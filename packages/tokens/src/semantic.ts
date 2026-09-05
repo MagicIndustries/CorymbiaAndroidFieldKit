@@ -99,9 +99,9 @@ export const lightTheme: Theme = {
 
     statusGood: ramp.deepGreen,
     statusGoodInk: ramp.paper[0],
-    statusFair: ramp.amberDark,
+    statusFair: ramp.amberDeep,
     statusFairInk: ramp.paper[0],
-    statusPoor: ramp.rustDark,
+    statusPoor: ramp.rustDeep,
     statusPoorInk: ramp.paper[0],
 
     overlay: ramp.black,

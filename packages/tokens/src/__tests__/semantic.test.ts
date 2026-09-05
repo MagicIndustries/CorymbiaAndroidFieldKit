@@ -30,28 +30,72 @@ describe('themes', () => {
     ])
   })
 
-  it('pins the raw brand and status palette to exact values from the logo and brochure', () => {
-    // Discrete brand greens, from the logo's spore dots.
-    expect(ramp.brand.lime).toBe('#98D455')
-    expect(ramp.brand.limeDeep).toBe('#4E9B22')
-    expect(ramp.brand.grass).toBe('#84CF69')
-    expect(ramp.brand.mint).toBe('#55D28C')
-    expect(ramp.brand.teal).toBe('#30CF9F')
+  it('pins the entire ramp as a complete palette manifest', () => {
+    // Every colour in the ramp, organized to match the structure in ramp.ts.
+    // This test serves as the authoritative record of the product palette: adding or
+    // changing a ramp value without updating this test will cause it to fail.
+    expect(ramp).toEqual({
+      // Five-stop gradient from the logo mark, left to right.
+      brandGradient: ['#ABD246', '#99D252', '#6BD371', '#22D5A3', '#1CD5A7'],
 
-    // Deep green used for the light-theme accent/status-good role.
-    expect(ramp.deepGreen).toBe('#12996F')
+      // Discrete brand greens, from the logo's spore dots.
+      brand: {
+        lime: '#98D455',
+        limeDeep: '#4E9B22',
+        grass: '#84CF69',
+        mint: '#55D28C',
+        teal: '#30CF9F',
+      },
 
-    // Amber and rust, and their darker light-theme variants.
-    expect(ramp.amber).toBe('#E8B33D')
-    expect(ramp.amberDark).toBe('#9A6B10')
-    expect(ramp.rust).toBe('#E86A4D')
-    expect(ramp.rustDark).toBe('#B23A21')
+      // Dark ground, derived from the brochure's slate.
+      slate: {
+        950: '#0E1519',
+        900: '#16212A',
+        800: '#1E2C36',
+        700: '#2C3E4A',
+        600: '#3B4A57',
+        500: '#2E3B47',
+      },
 
-    // Near-black text/ink tints, one per hue.
-    expect(ramp.nearBlack.green).toBe('#12290A')
-    expect(ramp.nearBlack.teal).toBe('#04231A')
-    expect(ramp.nearBlack.brown).toBe('#2B1C05')
-    expect(ramp.nearBlack.red).toBe('#2B0C05')
+      // Light ground.
+      paper: {
+        0: '#FFFFFF',
+        50: '#F2F5F4',
+        100: '#E4EAE8',
+        200: '#CBD6D2',
+        600: '#5F7480',
+        900: '#16212A',
+      },
+
+      // A deep, muted green — distinct from the brand greens above.
+      deepGreen: '#12996F',
+
+      // Amber, as named in the spec.
+      amber: '#E8B33D',
+      // A deeper ochre variant of amber, for use on light grounds.
+      amberDeep: '#9A6B10',
+
+      // Rust, as named in the spec.
+      rust: '#E86A4D',
+      // A deeper brick-red variant of rust, for use on light grounds.
+      rustDeep: '#B23A21',
+
+      // Pale green-grey.
+      paleGreenGrey: '#E6EDEA',
+      // Blue-grey.
+      blueGrey: '#8FA3AD',
+
+      // Plain black, used as a scrim/overlay base.
+      black: '#000000',
+
+      // Four near-black tints, one per hue, for text/ink pairings on saturated fills.
+      nearBlack: {
+        green: '#12290A',
+        teal: '#04231A',
+        brown: '#2B1C05',
+        red: '#2B0C05',
+      },
+    })
   })
 
   it('meets the minimum and field touch target sizes from the spec', () => {

@@ -44,13 +44,13 @@ export const ramp = {
 
   /** Amber, as named in the spec. */
   amber: '#E8B33D',
-  /** A darker ochre variant of amber, for use on light grounds. */
-  amberDark: '#9A6B10',
+  /** A deeper ochre variant of amber, for use on light grounds. */
+  amberDeep: '#9A6B10',
 
   /** Rust, as named in the spec. */
   rust: '#E86A4D',
-  /** A darker brick-red variant of rust, for use on light grounds. */
-  rustDark: '#B23A21',
+  /** A deeper brick-red variant of rust, for use on light grounds. */
+  rustDeep: '#B23A21',
 
   /** Pale green-grey. */
   paleGreenGrey: '#E6EDEA',
