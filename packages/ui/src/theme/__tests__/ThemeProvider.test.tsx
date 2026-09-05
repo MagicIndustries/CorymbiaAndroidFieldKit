@@ -2,6 +2,7 @@ import React from 'react'
 import { Text, Pressable } from 'react-native'
 import { render, screen, fireEvent } from '@testing-library/react-native'
 import { ThemeProvider, useTheme } from '../index'
+import { mockSystemColorScheme } from '../../test-utils'
 
 function Probe() {
   const { theme, name, setTheme } = useTheme()
@@ -52,5 +53,37 @@ describe('ThemeProvider', () => {
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {})
     expect(() => render(<Probe />)).toThrow(/useTheme must be used within a ThemeProvider/)
     spy.mockRestore()
+  })
+
+  describe('follows the system setting when preference is "system"', () => {
+    it('resolves to light when the OS reports light', () => {
+      mockSystemColorScheme('light')
+      render(
+        <ThemeProvider>
+          <Probe />
+        </ThemeProvider>,
+      )
+      expect(screen.getByTestId('name')).toHaveTextContent('light')
+    })
+
+    it('resolves to dark when the OS reports dark', () => {
+      mockSystemColorScheme('dark')
+      render(
+        <ThemeProvider>
+          <Probe />
+        </ThemeProvider>,
+      )
+      expect(screen.getByTestId('name')).toHaveTextContent('dark')
+    })
+
+    it('resolves to dark when the OS reports unspecified (the product default)', () => {
+      mockSystemColorScheme('unspecified')
+      render(
+        <ThemeProvider>
+          <Probe />
+        </ThemeProvider>,
+      )
+      expect(screen.getByTestId('name')).toHaveTextContent('dark')
+    })
   })
 })
