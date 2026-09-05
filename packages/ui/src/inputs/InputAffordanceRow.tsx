@@ -55,14 +55,22 @@ export function InputAffordanceRow({
               justifyContent: 'center',
               borderRadius: radii.md,
               borderWidth: 2,
+              // Doctrine rule 9: colour never carries meaning alone. `done`
+              // gets a solid border (a confirmed state) where the pending
+              // tile is dashed (provisional), and the label's wording
+              // changes too — the same two-channel pattern ContextStamp
+              // uses for fix quality — so completion reads at a glance
+              // without colour, for a colour-vision-deficient user or in
+              // glare that washes the accent colour out.
+              borderStyle: done ? 'solid' : 'dashed',
               borderColor: done ? theme.colors.accent : theme.colors.border,
               backgroundColor: theme.colors.surfaceRaised,
               paddingVertical: spacing.sm,
             }}
           >
             <Type variant="heading">{a.glyph}</Type>
-            <Type variant="label" dim>
-              {a.label}
+            <Type variant="label" dim testID={`affordance-${a.kind}-label`}>
+              {done ? `${a.label} ✓` : a.label}
             </Type>
           </Pressable>
         )
