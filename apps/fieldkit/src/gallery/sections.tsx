@@ -74,6 +74,14 @@ export function GallerySections() {
         />
       </Section>
 
+      <Section title="Buttons — every kind, standard size">
+        <View style={{ gap: spacing.sm }}>
+          <Button label="Primary" kind="primary" onPress={() => {}} />
+          <Button label="Secondary" kind="secondary" onPress={() => {}} />
+          <Button label="Primary, disabled" kind="primary" disabled onPress={() => {}} />
+        </View>
+      </Section>
+
       <Section title="Names — long, to prove the clamping">
         <Card>
           <Type variant="label" dim>
