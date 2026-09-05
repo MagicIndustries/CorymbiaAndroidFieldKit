@@ -16,3 +16,16 @@ jest.mock('react-native/Libraries/Utilities/useColorScheme', () => ({
   __esModule: true,
   default: jest.fn(() => null),
 }))
+
+// `useLayout()` composes its result entirely from `useWindowDimensions()`,
+// so its tests need to pin that hook to a specific device size and
+// orientation per case rather than depend on whatever untouched, non-native
+// `Dimensions` happens to report in the test environment. Mock it here,
+// globally (mirroring the `useColorScheme` mock above), so `mockWindowDimensions()`
+// (packages/ui/src/test-utils) can always assume it's already a jest.fn — the
+// mock must be registered before `useLayout.ts` (or anything importing
+// `react-native`) is first required, which `setupFilesAfterEnv` guarantees.
+jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({
+  __esModule: true,
+  default: jest.fn(() => ({ width: 412, height: 915, scale: 3, fontScale: 1 })),
+}))

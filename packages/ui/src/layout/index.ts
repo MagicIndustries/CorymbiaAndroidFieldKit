@@ -1,5 +1,7 @@
 export { sizeClassFor, BREAKPOINTS } from './sizeClass'
 export type { SizeClass } from './sizeClass'
+export { orientationFor } from './orientation'
+export type { Orientation } from './orientation'
 export { resolveReach } from './reach'
 export type { Handedness, ReachAnchor, Reach } from './reach'
 export { useLayout } from './useLayout'
