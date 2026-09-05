@@ -8,7 +8,8 @@
     "lint": "turbo run lint",
     "lint:verify-rules": "node scripts/verify-lint-rules.mjs",
     "typecheck": "turbo run typecheck",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "generate:brand-mark": "node scripts/generate-brand-mark-path.mjs"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",
