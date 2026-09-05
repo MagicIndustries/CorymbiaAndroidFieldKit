@@ -11,8 +11,12 @@ const wrap = (ui: React.ReactElement) => render(<ThemeProvider>{ui}</ThemeProvid
 // dist/matches.js), unlike jest-dom's always-substring behaviour the brief's
 // test code assumed. The brief also asserts two different substrings against
 // the same node (e.g. both '±38 m' and '4 min old' on one ambient chip),
-// which cannot both be true under exact equality. Every call below passes
-// `{ exact: false }` to restore the intended substring/contains semantics.
+// which cannot both be true under exact equality. `{ exact: false }` is used
+// only where it's genuinely needed: the icon-prefixed fix and device chips
+// (`◎ ±4 m`, `~ ±38 m · 4 min old`, `⚑ no position`, `▣ field-s24`) and the
+// negative "does not contain" assertions. The place and activity chips have
+// no prefix and a fully known rendered string, so those assertions match
+// exactly — an accidental prefix or suffix on them will now fail the test.
 describe('ContextStamp', () => {
   it('shows a deliberate fix with its accuracy and a solid border', async () => {
     await wrap(<ContextStamp fix={{ quality: 'deliberate', accuracyM: 4 }} />)
@@ -87,13 +91,28 @@ describe('ContextStamp', () => {
         place={{ name: 'Nth Reach', distanceM: 120 }}
       />,
     )
-    expect(screen.getByTestId('place-chip')).toHaveTextContent('120 m from Nth Reach', { exact: false })
+    expect(screen.getByTestId('place-chip')).toHaveTextContent('120 m from Nth Reach')
   })
 
   it('omits the distance when standing at the place', async () => {
     await wrap(<ContextStamp fix={{ quality: 'deliberate', accuracyM: 4 }} place={{ name: 'Nth Reach' }} />)
-    expect(screen.getByTestId('place-chip')).toHaveTextContent('Nth Reach', { exact: false })
-    expect(screen.getByTestId('place-chip')).not.toHaveTextContent('from', { exact: false })
+    expect(screen.getByTestId('place-chip')).toHaveTextContent('Nth Reach')
+  })
+
+  // `distanceM: 0` is a legitimate reading (standing right at the place's
+  // marker) and must render distinctly from "no distance known" (`undefined`,
+  // covered above). The component checks `=== undefined` rather than
+  // truthiness specifically so this case renders "0 m from X" rather than
+  // silently falling back to the bare place name — pin that here so a future
+  // refactor to `if (place.distanceM)` regresses loudly.
+  it('renders a zero distance rather than treating it as absent', async () => {
+    await wrap(
+      <ContextStamp
+        fix={{ quality: 'deliberate', accuracyM: 4 }}
+        place={{ name: 'Nth Reach', distanceM: 0 }}
+      />,
+    )
+    expect(screen.getByTestId('place-chip')).toHaveTextContent('0 m from Nth Reach')
   })
 
   it('distinguishes an activity it was filed to from one it merely happened during', async () => {
@@ -103,7 +122,7 @@ describe('ContextStamp', () => {
         activity={{ name: 'Survey 3', wasFiled: true }}
       />,
     )
-    expect(screen.getByTestId('activity-chip')).toHaveTextContent('Survey 3', { exact: false })
+    expect(screen.getByTestId('activity-chip')).toHaveTextContent('Survey 3')
     expect(screen.getByTestId('activity-chip')).not.toHaveTextContent('during', { exact: false })
 
     await rerender(
@@ -114,11 +133,18 @@ describe('ContextStamp', () => {
         />
       </ThemeProvider>,
     )
-    expect(screen.getByTestId('activity-chip')).toHaveTextContent('during Survey 3', { exact: false })
+    expect(screen.getByTestId('activity-chip')).toHaveTextContent('during Survey 3')
   })
 
   it('shows the device, since the user works across a tablet and a phone', async () => {
     await wrap(<ContextStamp fix={{ quality: 'none' }} device="field-s24" />)
     expect(screen.getByTestId('device-chip')).toHaveTextContent('field-s24', { exact: false })
+  })
+
+  it('renders no place, device, or activity chip when each is absent', async () => {
+    await wrap(<ContextStamp fix={{ quality: 'none' }} device={null} activity={null} />)
+    expect(screen.queryByTestId('place-chip')).toBeNull()
+    expect(screen.queryByTestId('device-chip')).toBeNull()
+    expect(screen.queryByTestId('activity-chip')).toBeNull()
   })
 })
