@@ -24,11 +24,15 @@ const SPORES = [
 ] as const
 
 const VIEW_BOX = {
-  tight: '405 165 660 1205',
+  // Full artwork height, ~6 units of horizontal breathing room either side. Verified
+  // (by rasterising design/logo/logo.svg at 1500x1500 and measuring the non-transparent
+  // bounding box) to contain the whole mark — see MEASURED_ARTWORK_BOUNDS in the test file.
+  tight: '414 0 672 1500',
   square: '0 0 1500 1500',
 } as const
 
-const ASPECT = { tight: 660 / 1205, square: 1 } as const
+/** width/height of each crop's viewBox, i.e. its true aspect ratio. */
+const ASPECT = { tight: 672 / 1500, square: 1 } as const
 
 export function CorymbiaMark({
   size = 26,

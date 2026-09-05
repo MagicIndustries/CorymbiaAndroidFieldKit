@@ -3,6 +3,11 @@ import { render } from '@testing-library/react-native'
 import { ramp } from '@corymbia/tokens'
 import { CorymbiaMark, BRAND_GRADIENT_STOPS } from '../index'
 
+// Measured fact, not a guess: rasterised design/logo/logo.svg at 1500x1500 and found the
+// non-transparent bounding box of the drawn artwork (path + spore circles) at these pixel
+// coordinates, in the SVG's own 0..1500 coordinate space.
+const MEASURED_ARTWORK_BOUNDS = { minX: 420, maxX: 1080, minY: 2, maxY: 1498 } as const
+
 describe('CorymbiaMark', () => {
   it('renders at the requested size', async () => {
     const { getByTestId } = await render(<CorymbiaMark size={40} />)
@@ -15,7 +20,7 @@ describe('CorymbiaMark', () => {
   // and one no other assertion here would catch.
   it('scales height to match the tight viewBox aspect ratio, so the mark is not squashed', async () => {
     const { getByTestId } = await render(<CorymbiaMark size={40} />)
-    expect(getByTestId('corymbia-mark').props.height).toBeCloseTo((40 * 1205) / 660)
+    expect(getByTestId('corymbia-mark').props.height).toBeCloseTo((40 * 1500) / 672)
   })
 
   it('scales height to match the square viewBox aspect ratio, so the icon is not stretched', async () => {
@@ -29,10 +34,10 @@ describe('CorymbiaMark', () => {
   it('uses the tight crop by default, for the app bar', async () => {
     const { getByTestId } = await render(<CorymbiaMark />)
     expect(getByTestId('corymbia-mark').props).toMatchObject({
-      minX: 405,
-      minY: 165,
-      vbWidth: 660,
-      vbHeight: 1205,
+      minX: 414,
+      minY: 0,
+      vbWidth: 672,
+      vbHeight: 1500,
     })
   })
 
@@ -44,6 +49,45 @@ describe('CorymbiaMark', () => {
       vbWidth: 1500,
       vbHeight: 1500,
     })
+  })
+
+  // The whole reason a clipping crop shipped once is that no test looked at what the
+  // viewBox actually contains — every prior assertion checked the viewBox string against
+  // itself. This computes containment from the rendered viewBox numbers against the
+  // measured artwork bounds, so a crop that clips the mark fails here.
+  it('contains the full measured artwork bounds within the tight viewBox, so nothing is clipped', async () => {
+    const { getByTestId } = await render(<CorymbiaMark />)
+    const { minX, minY, vbWidth, vbHeight } = getByTestId('corymbia-mark').props as {
+      minX: number
+      minY: number
+      vbWidth: number
+      vbHeight: number
+    }
+    const maxX = minX + vbWidth
+    const maxY = minY + vbHeight
+
+    expect(minX).toBeLessThanOrEqual(MEASURED_ARTWORK_BOUNDS.minX)
+    expect(maxX).toBeGreaterThanOrEqual(MEASURED_ARTWORK_BOUNDS.maxX)
+    expect(minY).toBeLessThanOrEqual(MEASURED_ARTWORK_BOUNDS.minY)
+    expect(maxY).toBeGreaterThanOrEqual(MEASURED_ARTWORK_BOUNDS.maxY)
+  })
+
+  it('keeps the tight crop at the artwork aspect ratio, so it is not squashed or stretched', async () => {
+    const { getByTestId } = await render(<CorymbiaMark />)
+    const { vbWidth, vbHeight } = getByTestId('corymbia-mark').props as {
+      vbWidth: number
+      vbHeight: number
+    }
+    expect(vbWidth / vbHeight).toBeCloseTo(672 / 1500)
+  })
+
+  it('keeps the square crop square, so the launcher icon is not squashed or stretched', async () => {
+    const { getByTestId } = await render(<CorymbiaMark crop="square" />)
+    const { vbWidth, vbHeight } = getByTestId('corymbia-mark').props as {
+      vbWidth: number
+      vbHeight: number
+    }
+    expect(vbWidth / vbHeight).toBeCloseTo(1)
   })
 
   it('takes its gradient colours from the tokens, so artwork and theme cannot drift', () => {
