@@ -18,8 +18,8 @@ function Probe() {
 }
 
 describe('ThemeProvider', () => {
-  it('defaults to dark', () => {
-    render(
+  it('defaults to dark', async () => {
+    await render(
       <ThemeProvider>
         <Probe />
       </ThemeProvider>,
@@ -27,8 +27,8 @@ describe('ThemeProvider', () => {
     expect(screen.getByTestId('name')).toHaveTextContent('dark')
   })
 
-  it('honours an explicit initial theme', () => {
-    render(
+  it('honours an explicit initial theme', async () => {
+    await render(
       <ThemeProvider initial="light">
         <Probe />
       </ThemeProvider>,
@@ -36,29 +36,31 @@ describe('ThemeProvider', () => {
     expect(screen.getByTestId('name')).toHaveTextContent('light')
   })
 
-  it('switches theme and changes the resolved surface colour', () => {
-    render(
+  it('switches theme and changes the resolved surface colour', async () => {
+    await render(
       <ThemeProvider>
         <Probe />
       </ThemeProvider>,
     )
     const darkSurface = screen.getByTestId('surface').props.children
-    fireEvent.press(screen.getByTestId('toLight'))
+    await fireEvent.press(screen.getByTestId('toLight'))
     const lightSurface = screen.getByTestId('surface').props.children
     expect(lightSurface).not.toBe(darkSurface)
     expect(screen.getByTestId('name')).toHaveTextContent('light')
   })
 
-  it('throws a useful error when used outside a provider', () => {
+  it('throws a useful error when used outside a provider', async () => {
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {})
-    expect(() => render(<Probe />)).toThrow(/useTheme must be used within a ThemeProvider/)
+    // render() is async in @testing-library/react-native v14+, so a synchronous
+    // render-phase throw surfaces as a rejected promise, not a thrown call.
+    await expect(render(<Probe />)).rejects.toThrow(/useTheme must be used within a ThemeProvider/)
     spy.mockRestore()
   })
 
   describe('follows the system setting when preference is "system"', () => {
-    it('resolves to light when the OS reports light', () => {
+    it('resolves to light when the OS reports light', async () => {
       mockSystemColorScheme('light')
-      render(
+      await render(
         <ThemeProvider>
           <Probe />
         </ThemeProvider>,
@@ -66,9 +68,9 @@ describe('ThemeProvider', () => {
       expect(screen.getByTestId('name')).toHaveTextContent('light')
     })
 
-    it('resolves to dark when the OS reports dark', () => {
+    it('resolves to dark when the OS reports dark', async () => {
       mockSystemColorScheme('dark')
-      render(
+      await render(
         <ThemeProvider>
           <Probe />
         </ThemeProvider>,
@@ -76,9 +78,9 @@ describe('ThemeProvider', () => {
       expect(screen.getByTestId('name')).toHaveTextContent('dark')
     })
 
-    it('resolves to dark when the OS reports unspecified (the product default)', () => {
+    it('resolves to dark when the OS reports unspecified (the product default)', async () => {
       mockSystemColorScheme('unspecified')
-      render(
+      await render(
         <ThemeProvider>
           <Probe />
         </ThemeProvider>,

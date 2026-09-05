@@ -17,10 +17,10 @@
     "react-native": "*"
   },
   "devDependencies": {
-    "@testing-library/react-native": "^12.8.1",
+    "@testing-library/react-native": "^14.0.1",
     "jest-expo": "~57.0.0",
     "react": "19.2.3",
     "react-native": "0.86.3",
-    "react-test-renderer": "19.2.3"
+    "test-renderer": "^1.2.0"
   }
 }
