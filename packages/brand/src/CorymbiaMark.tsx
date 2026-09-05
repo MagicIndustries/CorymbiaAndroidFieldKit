@@ -35,10 +35,11 @@ const VIEW_BOX = {
 const ASPECT = { tight: 672 / 1500, square: 1 } as const
 
 export function CorymbiaMark({
-  size = 26,
+  height = 32,
   crop = 'tight',
 }: {
-  size?: number
+  /** Rendered height in dp. Width is derived from the crop's aspect ratio. */
+  height?: number
   crop?: 'tight' | 'square'
 }) {
   return (
@@ -46,8 +47,8 @@ export function CorymbiaMark({
       testID="corymbia-mark"
       accessibilityRole="image"
       accessibilityLabel="Corymbia"
-      width={size}
-      height={size / ASPECT[crop]}
+      width={height * ASPECT[crop]}
+      height={height}
       viewBox={VIEW_BOX[crop]}
     >
       <Defs>

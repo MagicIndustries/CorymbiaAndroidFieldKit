@@ -9,23 +9,23 @@ import { CorymbiaMark, BRAND_GRADIENT_STOPS } from '../index'
 const MEASURED_ARTWORK_BOUNDS = { minX: 420, maxX: 1080, minY: 2, maxY: 1498 } as const
 
 describe('CorymbiaMark', () => {
-  it('renders at the requested size', async () => {
-    const { getByTestId } = await render(<CorymbiaMark size={40} />)
+  it('renders at the requested height', async () => {
+    const { getByTestId } = await render(<CorymbiaMark height={40} />)
     const svg = getByTestId('corymbia-mark')
-    expect(svg.props.width).toBe(40)
+    expect(svg.props.height).toBe(40)
   })
 
-  // The rendered height must preserve the viewBox's own aspect ratio, or the mark
+  // The rendered width must preserve the viewBox's own aspect ratio, or the mark
   // renders squashed/stretched — the most visible possible defect in this package,
   // and one no other assertion here would catch.
-  it('scales height to match the tight viewBox aspect ratio, so the mark is not squashed', async () => {
-    const { getByTestId } = await render(<CorymbiaMark size={40} />)
-    expect(getByTestId('corymbia-mark').props.height).toBeCloseTo((40 * 1500) / 672)
+  it('scales width to match the tight viewBox aspect ratio, so the mark is not squashed', async () => {
+    const { getByTestId } = await render(<CorymbiaMark height={40} />)
+    expect(getByTestId('corymbia-mark').props.width).toBeCloseTo((40 * 672) / 1500)
   })
 
-  it('scales height to match the square viewBox aspect ratio, so the icon is not stretched', async () => {
-    const { getByTestId } = await render(<CorymbiaMark size={40} crop="square" />)
-    expect(getByTestId('corymbia-mark').props.height).toBe(40)
+  it('scales width to match the square viewBox aspect ratio, so the icon is not stretched', async () => {
+    const { getByTestId } = await render(<CorymbiaMark height={40} crop="square" />)
+    expect(getByTestId('corymbia-mark').props.width).toBe(40)
   })
 
   // react-native-svg parses the `viewBox` string prop into minX/minY/vbWidth/vbHeight
