@@ -1,0 +1,28 @@
+These three constructs are rejected by eslint.config.mjs. Each was verified to
+fire during Task 5 of the foundation plan (real eslint output captured in
+.superpowers/sdd/task-5-report.md).
+
+1. A raw hex literal anywhere except packages/tokens/src/ramp.ts and the
+   tokens package's own __tests__ (which pin those values exactly)
+     const c = '#FF0000'
+   Why: components must consume the semantic layer, or light mode rots.
+   Tests outside the tokens package assert against tokens, not literals, so
+   they do not break every time a colour is tuned.
+
+2. Importing Dimensions or useWindowDimensions outside
+   packages/ui/src/layout/useLayout.ts
+     import { Dimensions } from 'react-native'
+   Why: ad-hoc pixel checks make the responsive model fiction.
+   Two narrow exemptions exist, both temporary or structural:
+     - packages/ui/src/test-utils/mockWindowDimensions.ts imports the hook to
+       mock it for tests, not to read a real window.
+     - apps/fieldkit/app/index.tsx is the Task 6 smoke screen; Task 12
+       replaces it with the real gallery screen and the exemption goes with it.
+
+3. A tool importing from a sibling tool
+     import { x } from '../survey/thing'
+   Why: keeps a tool independently extractable into its own package or APK.
+   apps/fieldkit/src/tools/ does not exist yet in this repo (tools arrive in
+   a later plan). The rule is written now and is provably correct — verified
+   against a temporary capture/survey fixture during Task 5 and then removed
+   — but is inert until the first tool (capture, per the product spec) lands.
