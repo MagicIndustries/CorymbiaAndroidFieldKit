@@ -43,7 +43,14 @@ Three constraints are enforced by lint and must not be worked around:
 
 Corymbia EcoSciences (https://www.corymbia.eco) provides environmental DNA (eDNA) analysis — soil and water sampling plus next-gen sequencing to identify animals, plants, fungi, and microbes present on a site. Customer-facing framing (from `design/brochure/`) covers biosecurity, biodiversity monitoring, endangered-species protection, soil analysis, and agricultural/land-management use.
 
-The repo name indicates the deliverable is an **Android field kit** — the on-site companion app for eDNA sample collection. Treat field conditions (offline capture, GPS/site metadata, sample chain-of-custody, later sync) as the likely design constraints, but confirm requirements with the user rather than assuming.
+The repo name indicates the deliverable is an **Android field kit** — the on-site companion app for eDNA sample collection. Field conditions (offline capture, GPS/site metadata, sample chain-of-custody, later sync) are the design constraints.
+
+This work is governed by an approved spec and plan:
+
+- `docs/superpowers/specs/2026-09-05-corymbia-field-kit-design.md` — the design spec. Several source comments and `eslint.config.mjs` cite it by section number (e.g. `spec §3`); read the cited section before assuming a rule is arbitrary or "simplifiable".
+- `docs/superpowers/plans/2026-09-05-foundation-and-design-system.md` — the implementation plan.
+
+Both are currently untracked on feature branches — they land on `main` via a separate pull request rather than through this branch's own commits — so don't expect `git log`/`git blame` to show them, and don't assume their absence from a fresh clone means no spec exists. If they are genuinely missing from your checkout, ask before assuming requirements.
 
 ## Design assets
 
@@ -72,7 +79,11 @@ The five canonical triage roles, used verbatim as label strings. See `docs/agent
 
 ### Domain docs
 
-Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Neither `CONTEXT.md` nor `docs/adr/` exists yet in this repo — they are created lazily,
+the first time a domain term or architectural decision actually needs recording. See
+`docs/agents/domain.md` for the convention (single-context layout: `CONTEXT.md` and
+`docs/adr/` at the repo root) and how to consume them once they exist. Their absence is
+expected, not a gap to flag or fill preemptively.
 
 ## Working agreements
 
