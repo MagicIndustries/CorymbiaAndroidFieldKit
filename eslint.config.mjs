@@ -117,13 +117,6 @@ export default [
       // it, not to read a real window, so it is not the violation rule 2
       // exists to catch.
       'packages/ui/src/test-utils/mockWindowDimensions.ts',
-      // TEMPORARY, and narrow to this one file: apps/fieldkit/app/index.tsx is
-      // the Task 6 smoke screen proving the app boots and tokens resolve on
-      // device. It reads useWindowDimensions directly to print a raw dp
-      // readout. Task 12 replaces this file with the real gallery screen
-      // (which does not read the window), at which point this exemption
-      // should be deleted along with it — do not let it outlive that file.
-      'apps/fieldkit/app/index.tsx',
     ],
     rules: {
       'no-restricted-imports': [

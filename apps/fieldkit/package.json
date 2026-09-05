@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "main": "expo-router/entry",
   "dependencies": {
+    "@corymbia/brand": "workspace:*",
     "@corymbia/tokens": "workspace:*",
+    "@corymbia/ui": "workspace:*",
     "expo": "~57.0.20",
     "expo-router": "~57.0.19",
     "expo-status-bar": "~57.0.1",
@@ -20,7 +22,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "lint": "eslint app",
+    "lint": "eslint app src",
     "typecheck": "tsc --noEmit"
   },
   "private": true
