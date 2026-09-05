@@ -26,6 +26,16 @@ describe('HelpAffordance', () => {
   // the reverse direction the brief's test didn't: dismissing the modal must
   // remove the explanation from the tree again, not just hide it, and the
   // affordance must be re-openable afterwards.
+  //
+  // Under `jest-expo` the real `Modal` from `react-native/Libraries/Modal/
+  // Modal` is never reached: `@react-native/jest-preset` (which `jest-expo`
+  // extends) globally replaces it with a mock (see node_modules/
+  // @react-native/jest-preset/jest/mocks/Modal.js) whose `render()` returns
+  // `null` — unmounting children — whenever `visible` is `false`. So this
+  // test exercises that mock's behaviour, not the native module. The mock
+  // happens to model the same "invisible means unmounted" contract the real
+  // component documents, which is what makes the test meaningful at all, but
+  // it proves the mock does that, not that the real Modal does.
   it('removes the explanation from the tree again once dismissed, and can be reopened', async () => {
     await wrap(<HelpAffordance title="Accuracy" body="How close the fix is." testID="h" />)
 

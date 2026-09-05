@@ -1,6 +1,6 @@
 import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react-native'
-import { darkTheme } from '@corymbia/tokens'
+import { darkTheme, touch } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
 import { InputAffordanceRow, INPUT_AFFORDANCE_ORDER } from '../InputAffordanceRow'
 
@@ -52,6 +52,18 @@ describe('InputAffordanceRow', () => {
       'Record a voice note',
     )
     expect(screen.getByTestId('affordance-photo').props.accessibilityLabel).toBe('Take a photo')
+  })
+
+  // Every tile sets `flex: 1` in a `flexDirection: 'row'` parent to divide
+  // the available width evenly, and `minHeight: touch.comfortable` for the
+  // vertical minimum. Asserted against the rendered element (not restated
+  // as a literal), and against the token rather than the number `56`, so a
+  // change to the token is caught here too.
+  it('meets the minimum touch target', async () => {
+    await wrap(<InputAffordanceRow onPress={() => {}} />)
+    expect(screen.getByTestId('affordance-title').props.style).toEqual(
+      expect.objectContaining({ minHeight: touch.comfortable, flex: 1 }),
+    )
   })
 
   // Doctrine rule 9 (see ContextStamp): colour never carries meaning alone.
