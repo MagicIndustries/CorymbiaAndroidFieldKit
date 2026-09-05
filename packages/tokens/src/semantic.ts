@@ -52,8 +52,8 @@ export const darkTheme: Theme = {
     border: ramp.slate[700],
     borderStrong: ramp.slate[600],
 
-    textPrimary: '#E6EDEA',
-    textDim: '#8FA3AD',
+    textPrimary: ramp.text.onDark,
+    textDim: ramp.text.dimOnDark,
     textOnAccent: ramp.ink.onTeal,
 
     accent: ramp.brand.teal,
@@ -62,7 +62,7 @@ export const darkTheme: Theme = {
     captureFast: ramp.brand.lime,
     captureFastInk: ramp.ink.onLime,
     captureAccurate: ramp.slate[900],
-    captureAccurateInk: '#E6EDEA',
+    captureAccurateInk: ramp.text.onDark,
 
     statusGood: ramp.status.goodDark,
     statusGoodInk: ramp.ink.onTeal,
@@ -71,7 +71,7 @@ export const darkTheme: Theme = {
     statusPoor: ramp.status.poor,
     statusPoorInk: ramp.ink.onPoor,
 
-    overlay: '#000000',
+    overlay: ramp.ink.black,
   },
 }
 
@@ -87,23 +87,23 @@ export const lightTheme: Theme = {
 
     textPrimary: ramp.paper[900],
     textDim: ramp.paper[600],
-    textOnAccent: '#FFFFFF',
+    textOnAccent: ramp.paper[0],
 
     accent: ramp.status.goodLight,
     accentMuted: ramp.brand.mint,
 
-    captureFast: '#4E9B22',
-    captureFastInk: '#FFFFFF',
+    captureFast: ramp.brand.limeDeep,
+    captureFastInk: ramp.paper[0],
     captureAccurate: ramp.paper[0],
     captureAccurateInk: ramp.paper[900],
 
     statusGood: ramp.status.goodLight,
-    statusGoodInk: '#FFFFFF',
-    statusFair: '#9A6B10',
-    statusFairInk: '#FFFFFF',
-    statusPoor: '#B23A21',
-    statusPoorInk: '#FFFFFF',
+    statusGoodInk: ramp.paper[0],
+    statusFair: ramp.status.fairLight,
+    statusFairInk: ramp.paper[0],
+    statusPoor: ramp.status.poorLight,
+    statusPoorInk: ramp.paper[0],
 
-    overlay: '#000000',
+    overlay: ramp.ink.black,
   },
 }

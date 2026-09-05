@@ -10,6 +10,7 @@ export const ramp = {
   /** Discrete brand greens, from the logo's spore dots. */
   brand: {
     lime: '#98D455',
+    limeDeep: '#4E9B22', // Dark lime for light-theme capture-fast control
     grass: '#84CF69',
     mint: '#55D28C',
     teal: '#30CF9F',
@@ -40,10 +41,18 @@ export const ramp = {
     goodDark: '#30CF9F',
     goodLight: '#12996F',
     fair: '#E8B33D',
+    fairLight: '#9A6B10', // Light-theme fair status
     poor: '#E86A4D',
+    poorLight: '#B23A21', // Light-theme poor status
+  },
+
+  text: {
+    onDark: '#E6EDEA', // Dark-theme primary text
+    dimOnDark: '#8FA3AD', // Dark-theme dim text
   },
 
   ink: {
+    black: '#000000', // Scrim/overlay base
     onLime: '#12290A',
     onTeal: '#04231A',
     onFair: '#2B1C05',
