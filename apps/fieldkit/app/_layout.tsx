@@ -1,6 +1,6 @@
 import { Slot } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
-import { SafeAreaView } from 'react-native'
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 import { ThemeProvider, useTheme } from '@corymbia/ui'
 
 function Frame() {
@@ -15,8 +15,10 @@ function Frame() {
 
 export default function RootLayout() {
   return (
-    <ThemeProvider>
-      <Frame />
-    </ThemeProvider>
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <Frame />
+      </ThemeProvider>
+    </SafeAreaProvider>
   )
 }
