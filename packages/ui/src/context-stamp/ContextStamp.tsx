@@ -6,8 +6,23 @@ import { Type } from '../primitives/Type'
 
 export type FixQuality = 'deliberate' | 'ambient' | 'none'
 
+/**
+ * A discriminated union on `quality`, so an accuracy-less "deliberate" or
+ * "ambient" fix — and an aged "deliberate" fix — cannot be constructed.
+ *
+ * - `deliberate`: the GPS cannot hand back a position without an accuracy
+ *   estimate, and the fix was taken just now, so it never carries an age.
+ * - `ambient`: always has an accuracy; its age may be unknown (a cached fix
+ *   whose timestamp wasn't recorded), but the field itself always exists.
+ * - `none`: no position at all, so neither field is meaningful.
+ */
+export type ContextStampFix =
+  | { quality: 'deliberate'; accuracyM: number }
+  | { quality: 'ambient'; accuracyM: number; ageMinutes?: number }
+  | { quality: 'none' }
+
 export type ContextStampProps = {
-  fix: { quality: FixQuality; accuracyM?: number; ageMinutes?: number }
+  fix: ContextStampFix
   place?: { name: string; distanceM?: number } | null
   device?: string | null
   activity?: { name: string; wasFiled: boolean } | null
@@ -57,7 +72,7 @@ function Chip({
  * their wording never collapses: ambient always states its age and "none"
  * always says so in words rather than guessing a position.
  */
-function fixChip(fix: ContextStampProps['fix']): { text: string; dashed: boolean } {
+function fixChip(fix: ContextStampFix): { text: string; dashed: boolean } {
   if (fix.quality === 'none') return { text: '⚑ no position', dashed: true }
   if (fix.quality === 'ambient') {
     const age = fix.ageMinutes === undefined ? '' : ` · ${fix.ageMinutes} min old`
