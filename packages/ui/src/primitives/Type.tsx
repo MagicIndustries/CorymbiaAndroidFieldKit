@@ -26,6 +26,7 @@ export function Type({
           fontSize: v.size,
           fontWeight: v.weight,
           letterSpacing: v.letterSpacing,
+          fontFamily: v.fontFamily,
           color: dim ? theme.colors.textDim : theme.colors.textPrimary,
         },
         style,

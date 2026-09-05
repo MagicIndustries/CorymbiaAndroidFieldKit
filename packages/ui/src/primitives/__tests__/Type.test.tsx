@@ -35,4 +35,29 @@ describe('Type', () => {
       expect.objectContaining({ fontSize: 62, fontWeight: '800' }),
     )
   })
+
+  // Finding 4 (final-review round b): the `mono` variant exists so live GPS
+  // coordinates don't visually jitter as digits update — that only works if
+  // it actually renders in a monospace face. Pinning the literal family name
+  // here means a future edit that quietly drops it (e.g. "simplifying" the
+  // token) fails this test instead of shipping a proportional font.
+  it('renders the mono variant in a monospace font, so live GPS digits do not jitter', async () => {
+    await wrap(
+      <Type testID="t" variant="mono">
+        -37.8136, 144.9631
+      </Type>,
+    )
+    expect(screen.getByTestId('t').props.style).toEqual(
+      expect.objectContaining({ fontFamily: 'monospace' }),
+    )
+  })
+
+  it('does not force a font family on other variants', async () => {
+    await wrap(
+      <Type testID="t" variant="body">
+        Hello
+      </Type>,
+    )
+    expect(screen.getByTestId('t').props.style.fontFamily).toBeUndefined()
+  })
 })

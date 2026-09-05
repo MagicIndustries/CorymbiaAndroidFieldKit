@@ -20,15 +20,30 @@ export const radii = {
 /**
  * Type scale. Sizes are constant physical size across form factors —
  * tablets get more content, never larger widgets (spec §5.3).
+ *
+ * Every variant carries a `fontFamily` key, even the ones that just want the
+ * platform default (`undefined`) — a uniform shape across every entry is
+ * what lets `Type` read `v.fontFamily` generically for whichever variant it
+ * is given, rather than needing a special case for the one variant that
+ * cares about its typeface.
  */
 export const type = {
-  hero: { size: 62, weight: '800', letterSpacing: -1.8 },
-  title: { size: 20, weight: '800', letterSpacing: 0 },
-  heading: { size: 16, weight: '800', letterSpacing: 0 },
-  body: { size: 14, weight: '500', letterSpacing: 0 },
-  small: { size: 12, weight: '500', letterSpacing: 0 },
-  label: { size: 10, weight: '700', letterSpacing: 1.8 },
-  mono: { size: 12, weight: '500', letterSpacing: 0 },
+  hero: { size: 62, weight: '800', letterSpacing: -1.8, fontFamily: undefined },
+  title: { size: 20, weight: '800', letterSpacing: 0, fontFamily: undefined },
+  heading: { size: 16, weight: '800', letterSpacing: 0, fontFamily: undefined },
+  body: { size: 14, weight: '500', letterSpacing: 0, fontFamily: undefined },
+  small: { size: 12, weight: '500', letterSpacing: 0, fontFamily: undefined },
+  label: { size: 10, weight: '700', letterSpacing: 1.8, fontFamily: undefined },
+  /**
+   * For live GPS coordinates: digits must line up as a fix updates, or the
+   * numbers appear to jitter even when the value barely changed. `monospace`
+   * is one of Android's built-in generic font families (resolved by the
+   * platform to its system monospace face, e.g. Droid Sans Mono/Roboto
+   * Mono) — this app targets Android only (see apps/fieldkit/android; there
+   * is no apps/fieldkit/ios), so a single Android-native family name is
+   * sufficient without a cross-platform fallback stack.
+   */
+  mono: { size: 12, weight: '500', letterSpacing: 0, fontFamily: 'monospace' },
 } as const
 
 /** Standard touch targets in dp. */
