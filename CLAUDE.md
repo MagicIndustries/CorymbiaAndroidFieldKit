@@ -4,9 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-This repo is a greenfield scaffold: **there is no application source code, no build system, and no commits on `main` yet.** Everything currently tracked is design collateral and agent-skill configuration.
+A pnpm workspace orchestrated by Turborepo, containing shared packages under
+`packages/` (`@corymbia/tokens`, `@corymbia/brand`, `@corymbia/ui`) and the Expo
+application in `apps/fieldkit`.
 
-Do not infer a stack, framework, or directory layout from this file — none has been committed. When the first implementation work starts, the choice of stack, package manager, test runner, and lint setup is still open, and this file should be updated with the real build/test/lint commands at that point.
+Commands, from the repository root:
+
+- `pnpm turbo run test` — all tests (currently `packages/tokens`, `packages/brand`
+  and `packages/ui`; `apps/fieldkit` has no tests of its own yet)
+- `pnpm turbo run lint` — ESLint across all four workspaces, including the three
+  architectural rules described in `docs/ui-doctrine.md`
+- `pnpm turbo run typecheck` — TypeScript across all four workspaces
+- `pnpm run lint:verify-rules` — proves the three architectural lint rules actually
+  fire under a real per-workspace invocation, not just that they are configured
+- `cd apps/fieldkit && npx expo run:android` — build and run on a connected device
+
+## Design and UI rules
+
+`docs/ui-doctrine.md` holds the rules every screen and component is checked
+against. Read it before building any UI. Add to it whenever a cross-screen
+design decision is made.
+
+Three constraints are enforced by lint and must not be worked around:
+
+1. Components consume semantic tokens from `@corymbia/tokens` only — never raw
+   hex, never the raw ramp.
+2. Only `packages/ui/src/layout/useLayout.ts` reads window dimensions.
+   Everything else branches on `sizeClass` (compact/medium/expanded, which
+   drives layout) or `deviceClass` (phone/tablet, which drives ergonomics such
+   as reach zones) — never on a raw width or height.
+3. A tool under `apps/fieldkit/src/tools/` may import from packages and from
+   itself, never from a sibling tool. This rule needs an explicit `basePath` in
+   `eslint.config.mjs` because Turborepo runs each workspace's `lint` script
+   with that workspace as the working directory, not the repo root — do not
+   "simplify" it away.
 
 ## Project context
 
