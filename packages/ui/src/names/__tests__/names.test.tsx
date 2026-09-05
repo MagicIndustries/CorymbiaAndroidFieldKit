@@ -1,5 +1,6 @@
 import React from 'react'
 import { render, screen } from '@testing-library/react-native'
+import { darkTheme } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
 import { ProjectName } from '../ProjectName'
 import { NameChip } from '../NameChip'
@@ -53,5 +54,20 @@ describe('NameChip', () => {
   it('always speaks the full name even when the label is shortened', async () => {
     await wrap(<NameChip name={LONG} shortLabel="Yarra Nth 2" testID="c" />)
     expect(screen.getByTestId('c').props.accessibilityLabel).toBe(LONG)
+  })
+
+  it('borders in the accent token, not another semantic colour', async () => {
+    await wrap(<NameChip name={LONG} testID="c" />)
+    const label = screen.getByTestId('c')
+    expect(label.parent?.props.style).toEqual(
+      expect.objectContaining({ borderColor: darkTheme.colors.accent }),
+    )
+  })
+
+  it('sets its text colour from the accent token, not another semantic colour', async () => {
+    await wrap(<NameChip name={LONG} testID="c" />)
+    expect(screen.getByTestId('c').props.style).toEqual(
+      expect.objectContaining({ color: darkTheme.colors.accent }),
+    )
   })
 })
