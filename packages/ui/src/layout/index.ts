@@ -1,5 +1,7 @@
 export { sizeClassFor, BREAKPOINTS } from './sizeClass'
 export type { SizeClass } from './sizeClass'
+export { deviceClassFor, DEVICE_BREAKPOINT } from './deviceClass'
+export type { DeviceClass } from './deviceClass'
 export { orientationFor } from './orientation'
 export type { Orientation } from './orientation'
 export { resolveReach } from './reach'
