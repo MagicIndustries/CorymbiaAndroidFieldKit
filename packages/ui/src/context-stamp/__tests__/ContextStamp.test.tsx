@@ -2,7 +2,7 @@ import React from 'react'
 import { render, screen } from '@testing-library/react-native'
 import { darkTheme } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
-import { ContextStamp } from '../ContextStamp'
+import { ContextStamp, composeContextStampSpokenLabel } from '../ContextStamp'
 
 const wrap = (ui: React.ReactElement) => render(<ThemeProvider>{ui}</ThemeProvider>)
 
@@ -146,5 +146,81 @@ describe('ContextStamp', () => {
     expect(screen.queryByTestId('place-chip')).toBeNull()
     expect(screen.queryByTestId('device-chip')).toBeNull()
     expect(screen.queryByTestId('activity-chip')).toBeNull()
+  })
+})
+
+// Doctrine rule 16, second half (final-review round b, Finding 5): the
+// voiced mode needs one spoken sentence, not four glyph-prefixed chip
+// fragments read aloud in sequence. These pin the exact wording — the
+// wording IS the deliverable here, so every case asserts a literal string,
+// not a substring or a "contains" check.
+describe('composeContextStampSpokenLabel', () => {
+  it('speaks a deliberate fix plainly, with activity and place composed — the spec\'s worked example', () => {
+    // Exact sentence from the spec: "recorded during Survey 3, near Yarra
+    // Flats — North Reach, 120 m away".
+    expect(
+      composeContextStampSpokenLabel({
+        fix: { quality: 'deliberate', accuracyM: 4 },
+        activity: { name: 'Survey 3', wasFiled: false },
+        place: { name: 'Yarra Flats — North Reach', distanceM: 120 },
+      }),
+    ).toBe('recorded during Survey 3, near Yarra Flats — North Reach, 120 m away')
+  })
+
+  it('speaks an ambient fix with its approximate accuracy and age', () => {
+    expect(
+      composeContextStampSpokenLabel({
+        fix: { quality: 'ambient', accuracyM: 38, ageMinutes: 4 },
+      }),
+    ).toBe('recorded approximately, accurate to about 38 metres, 4 minutes old')
+  })
+
+  it('speaks an ambient fix with unknown age by omitting it, rather than guessing', () => {
+    expect(
+      composeContextStampSpokenLabel({
+        fix: { quality: 'ambient', accuracyM: 38 },
+      }),
+    ).toBe('recorded approximately, accurate to about 38 metres')
+  })
+
+  it('speaks a missing fix plainly, in words rather than silence', () => {
+    expect(composeContextStampSpokenLabel({ fix: { quality: 'none' } })).toBe('no position recorded')
+  })
+
+  it('composes an activity filed to, a place, a device, and a fix together', () => {
+    expect(
+      composeContextStampSpokenLabel({
+        fix: { quality: 'none' },
+        activity: { name: 'Survey 3', wasFiled: true },
+        place: { name: 'Nth Reach' },
+        device: 'field-s24',
+      }),
+    ).toBe('no position recorded for Survey 3, near Nth Reach, on field-s24')
+  })
+
+  it('pluralises a single minute correctly', () => {
+    expect(
+      composeContextStampSpokenLabel({
+        fix: { quality: 'ambient', accuracyM: 10, ageMinutes: 1 },
+      }),
+    ).toBe('recorded approximately, accurate to about 10 metres, 1 minute old')
+  })
+})
+
+describe('ContextStamp accessibility label', () => {
+  it('sets the composed sentence as the accessibility label on the outer, accessible node', async () => {
+    await wrap(
+      <ContextStamp
+        testID="stamp"
+        fix={{ quality: 'deliberate', accuracyM: 4 }}
+        activity={{ name: 'Survey 3', wasFiled: false }}
+        place={{ name: 'Yarra Flats — North Reach', distanceM: 120 }}
+      />,
+    )
+    const stamp = screen.getByTestId('stamp')
+    expect(stamp.props.accessible).toBe(true)
+    expect(stamp.props.accessibilityLabel).toBe(
+      'recorded during Survey 3, near Yarra Flats — North Reach, 120 m away',
+    )
   })
 })

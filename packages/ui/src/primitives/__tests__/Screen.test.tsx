@@ -40,4 +40,30 @@ describe('Screen', () => {
       expect.objectContaining({ backgroundColor: darkTheme.colors.surface }),
     )
   })
+
+  // Doctrine rule 16 (final-review round b, Finding 5): a screen carries a
+  // spoken description via an accessible node, not by making the whole
+  // screen container `accessible` (which would swallow every child into one
+  // opaque focus stop instead of letting a screen reader traverse it).
+  it('carries a spoken description as an accessibility label, without swallowing its children', async () => {
+    await wrap(
+      <Screen testID="s" spokenDescription="Capture screen for Survey 3">
+        <Text testID="content">Content</Text>
+      </Screen>,
+    )
+    const description = screen.getByTestId('s-spoken-description')
+    expect(description.props.accessible).toBe(true)
+    expect(description.props.accessibilityLabel).toBe('Capture screen for Survey 3')
+    // The real content is still present and independently reachable.
+    expect(screen.getByTestId('content')).toBeTruthy()
+  })
+
+  it('renders no spoken-description node when none is given', async () => {
+    await wrap(
+      <Screen testID="s">
+        <Text>Content</Text>
+      </Screen>,
+    )
+    expect(screen.queryByTestId('s-spoken-description')).toBeNull()
+  })
 })

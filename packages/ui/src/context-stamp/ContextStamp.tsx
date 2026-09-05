@@ -81,16 +81,84 @@ function fixChip(fix: ContextStampFix): { text: string; dashed: boolean } {
   return { text: `◎ ±${fix.accuracyM} m`, dashed: false }
 }
 
+function pluralMinutes(n: number): string {
+  return `${n} minute${n === 1 ? '' : 's'}`
+}
+
+/**
+ * Doctrine rule 16, second half (final-review round b, Finding 5):
+ * `ContextStamp` has every fact the voiced mode needs and, until now, no way
+ * to say it. Its chips (`◎ ±4 m`, `~ ±38 m · 4 min old`, `⚑ no position`,
+ * `▣ field-s24`) are glyph-prefixed fragments meant for a glance in
+ * sunlight, not for a screen reader or TTS voice to read aloud one after
+ * another as noise.
+ *
+ * This composes one readable sentence instead. Fix quality gets the most
+ * words precisely because it is the one thing rule 9 says colour must never
+ * carry alone — 'deliberate' is a routine, high-confidence reading and is
+ * spoken plainly ("recorded"); 'ambient' and 'none' are the two qualities a
+ * field ecologist actually needs warned about aloud, so they spell out the
+ * uncertainty (approximate accuracy, age, or its absence) that a sighted
+ * user gets from the dashed border and amber/grey colour instead.
+ *
+ * Exact worked example from the spec: a deliberate fix, filmed during
+ * (not filed to) "Survey 3", 120 m from "Yarra Flats — North Reach", no
+ * device —
+ *   "recorded during Survey 3, near Yarra Flats — North Reach, 120 m away"
+ * — pinned verbatim in the test file, one case per fix class.
+ */
+export function composeContextStampSpokenLabel({
+  fix,
+  place,
+  device,
+  activity,
+}: Pick<ContextStampProps, 'fix' | 'place' | 'device' | 'activity'>): string {
+  let sentence: string
+  if (fix.quality === 'deliberate') {
+    sentence = 'recorded'
+  } else if (fix.quality === 'ambient') {
+    const age = fix.ageMinutes === undefined ? '' : `, ${pluralMinutes(fix.ageMinutes)} old`
+    sentence = `recorded approximately, accurate to about ${fix.accuracyM} metres${age}`
+  } else {
+    sentence = 'no position recorded'
+  }
+
+  if (activity) {
+    sentence += activity.wasFiled ? ` for ${activity.name}` : ` during ${activity.name}`
+  }
+
+  const trailing: string[] = []
+  if (place) {
+    trailing.push(
+      place.distanceM === undefined ? `near ${place.name}` : `near ${place.name}, ${place.distanceM} m away`,
+    )
+  }
+  if (device) {
+    trailing.push(`on ${device}`)
+  }
+  if (trailing.length > 0) {
+    sentence += `, ${trailing.join(', ')}`
+  }
+
+  return sentence
+}
+
 export function ContextStamp({ fix, place, device, activity, testID }: ContextStampProps) {
   const { theme } = useTheme()
   const c = theme.colors
   const { text, dashed } = fixChip(fix)
+  const spokenLabel = composeContextStampSpokenLabel({ fix, place, device, activity })
 
   const fixColor =
     fix.quality === 'deliberate' ? c.statusGood : fix.quality === 'ambient' ? c.statusFair : c.textDim
 
   return (
-    <View testID={testID} style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
+    <View
+      testID={testID}
+      accessible
+      accessibilityLabel={spokenLabel}
+      style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}
+    >
       <Chip testID="fix-chip" color={fixColor} dashed={dashed}>
         {text}
       </Chip>
