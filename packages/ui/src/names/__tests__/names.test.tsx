@@ -7,6 +7,13 @@ import { NameChip } from '../NameChip'
 const LONG = 'Yarra Flats Riparian Restoration — North Reach Stage 2'
 const wrap = (ui: React.ReactElement) => render(<ThemeProvider>{ui}</ThemeProvider>)
 
+// A project record as it comes off the data model: `name` plus an optional
+// `shortLabel`. `ProjectNameProps` deliberately does not declare
+// `shortLabel` (Finding 1), so this is passed via spread, not as a named
+// JSX attribute — spreading is exactly the convenience the type omission
+// preserves.
+const project = { name: LONG, shortLabel: 'Yarra Nth 2' }
+
 describe('ProjectName', () => {
   it('clamps to two lines so the card never grows (doctrine rule 10)', async () => {
     await wrap(<ProjectName name={LONG} testID="n" />)
@@ -19,7 +26,10 @@ describe('ProjectName', () => {
   })
 
   it('shows the full name, not the short label — the hero has room', async () => {
-    await wrap(<ProjectName name={LONG} shortLabel="Yarra Nth 2" testID="n" />)
+    // Spread, not a named `shortLabel` attribute: `ProjectNameProps` has no
+    // `shortLabel` field, so a caller passing a whole project record still
+    // compiles via spread while the component simply ignores the field.
+    await wrap(<ProjectName {...project} testID="n" />)
     expect(screen.getByTestId('n')).toHaveTextContent(LONG)
   })
 })
