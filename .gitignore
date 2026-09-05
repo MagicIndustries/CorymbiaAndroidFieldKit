@@ -17,3 +17,10 @@
 
 # Logs
 *.log
+.superpowers/
+
+node_modules/
+dist/
+.turbo/
+.expo/
+*.tsbuildinfo
