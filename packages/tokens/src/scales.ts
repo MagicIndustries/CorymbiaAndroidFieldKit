@@ -48,3 +48,29 @@ export const field = {
   /** The traffic-light frame thickness. */
   frame: 5,
 } as const
+
+/**
+ * Elevation scale — shadow/elevation geometry only. Deliberately excludes
+ * `shadowColor`: that is a themed value and must be read from
+ * `useTheme().colors.overlay` at the call site, never baked in here.
+ *
+ * Two levels plus the resting case, matching the one raised surface the
+ * product currently has (`Card`'s `raised` prop). Extend this list only
+ * when a second, visually distinct raised surface actually appears.
+ */
+export const elevation = {
+  /** The default, flush-with-the-page case. No shadow at all. */
+  resting: {
+    elevation: 0,
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  /** A surface lifted above the page, e.g. `Card`'s `raised` prop. */
+  raised: {
+    elevation: 4,
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+  },
+} as const
