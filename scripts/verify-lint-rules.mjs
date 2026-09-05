@@ -19,6 +19,17 @@
  * walking up from that workspace directory — identical to what `pnpm
  * --filter <workspace> lint` actually does.
  *
+ * SAFETY: two cases write fixtures under `apps/fieldkit/src/tools/`, a real
+ * source directory a later plan populates with real tool code (starting
+ * with `apps/fieldkit/src/tools/capture/`). An earlier version of this
+ * script computed a single "cleanup root" per case and `rmSync`'d it
+ * recursively — safe only by accident, while `src/tools` happened not to
+ * exist yet. The moment real files landed under it, that same cleanup would
+ * have deleted them along with the fixtures and reported success. This
+ * version never deletes a directory it did not itself create, and never
+ * writes over a file that already exists: see `writeFile` and the cleanup
+ * pass at the bottom.
+ *
  * Usage: node scripts/verify-lint-rules.mjs
  * Exits non-zero if any rule fails to fire as expected.
  */
@@ -30,20 +41,42 @@ import path from 'node:path'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-/** Returns the shallowest path along `targetPath` that does not yet exist. */
-function firstMissingAncestor(targetPath) {
-  let current = targetPath
-  let missing = targetPath
-  while (!fs.existsSync(current)) {
-    missing = current
-    current = path.dirname(current)
-  }
-  return missing
-}
+// Tracks exactly what this run created, so cleanup can be precise instead
+// of guessing at a "root" to delete recursively.
+const createdFiles = new Set()
+const createdDirs = new Set()
 
+/**
+ * Writes a fixture file, refusing outright if that path already contains
+ * real content — this script must never silently clobber or later delete
+ * something it didn't create. Only the directories that do not yet exist
+ * are recorded as created-by-us; any directory that already exists (e.g. a
+ * real `src/tools/capture/` from other work) is left completely alone,
+ * fixture files inside it are added individually, and removed individually.
+ */
 function writeFile(absPath, content) {
+  if (fs.existsSync(absPath)) {
+    throw new Error(
+      `Refusing to write fixture over existing file: ${absPath}\n` +
+        `This is either real content or a leftover from a previous run — ` +
+        `aborting without touching it.`,
+    )
+  }
+
+  // Walk up from the target's parent, recording every ancestor directory
+  // that does not exist yet. Only those get created (and later removed).
+  let dir = path.dirname(absPath)
+  const missingDirs = []
+  while (!fs.existsSync(dir)) {
+    missingDirs.push(dir)
+    dir = path.dirname(dir)
+  }
+
   fs.mkdirSync(path.dirname(absPath), { recursive: true })
+  for (const d of missingDirs) createdDirs.add(d)
+
   fs.writeFileSync(absPath, content)
+  createdFiles.add(absPath)
 }
 
 async function lint(workspaceDir, filePaths) {
@@ -80,91 +113,81 @@ const cases = [
     name: 'Rule 1 (no-restricted-syntax): raw hex string literal is rejected',
     async run() {
       const dir = path.join(repoRoot, 'packages/ui/src/__lint_verify_tmp__')
-      const cleanupRoot = firstMissingAncestor(dir)
       const file = path.join(dir, 'rule1-literal.ts')
       writeFile(file, "export const scratch = '#FF0000'\nconsole.log(scratch)\n")
       const messages = await lint(path.join(repoRoot, 'packages/ui'), [file])
-      return { cleanupRoot, ok: hasRuleId(messages, 'no-restricted-syntax'), messages }
+      return { ok: hasRuleId(messages, 'no-restricted-syntax'), messages }
     },
   },
   {
     name: 'Rule 1 (no-restricted-syntax): raw hex TEMPLATE literal is rejected (Finding 3 gap)',
     async run() {
       const dir = path.join(repoRoot, 'packages/ui/src/__lint_verify_tmp__')
-      const cleanupRoot = firstMissingAncestor(dir)
       const file = path.join(dir, 'rule1-template.ts')
       writeFile(file, 'export const scratch = `#FF0000`\nconsole.log(scratch)\n')
       const messages = await lint(path.join(repoRoot, 'packages/ui'), [file])
-      return { cleanupRoot, ok: hasRuleId(messages, 'no-restricted-syntax'), messages }
+      return { ok: hasRuleId(messages, 'no-restricted-syntax'), messages }
     },
   },
   {
     name: "Rule 2 (no-restricted-imports): named import of 'react-native' Dimensions is rejected",
     async run() {
       const dir = path.join(repoRoot, 'packages/ui/src/__lint_verify_tmp__')
-      const cleanupRoot = firstMissingAncestor(dir)
       const file = path.join(dir, 'rule2-named.ts')
       writeFile(file, "import { Dimensions } from 'react-native'\nconsole.log(Dimensions)\n")
       const messages = await lint(path.join(repoRoot, 'packages/ui'), [file])
-      return { cleanupRoot, ok: hasRuleId(messages, 'no-restricted-imports'), messages }
+      return { ok: hasRuleId(messages, 'no-restricted-imports'), messages }
     },
   },
   {
     name: 'Rule 2 (no-restricted-imports): react-native SUBPATH import is rejected (Finding 3 gap)',
     async run() {
       const dir = path.join(repoRoot, 'packages/ui/src/__lint_verify_tmp__')
-      const cleanupRoot = firstMissingAncestor(dir)
       const file = path.join(dir, 'rule2-subpath.ts')
       writeFile(
         file,
         "import Dimensions from 'react-native/Libraries/Utilities/Dimensions'\nconsole.log(Dimensions)\n",
       )
       const messages = await lint(path.join(repoRoot, 'packages/ui'), [file])
-      return { cleanupRoot, ok: hasRuleId(messages, 'no-restricted-imports'), messages }
+      return { ok: hasRuleId(messages, 'no-restricted-imports'), messages }
     },
   },
   {
     name: 'Rule 3 (import/no-restricted-paths): cross-tool import (capture -> survey) is rejected',
     async run() {
       const toolsDir = path.join(repoRoot, 'apps/fieldkit/src/tools')
-      const cleanupRoot = firstMissingAncestor(toolsDir)
       writeFile(
-        path.join(toolsDir, 'survey/helper.ts'),
+        path.join(toolsDir, 'survey/__lint_verify_tmp__helper.ts'),
         "export const helper = 'survey helper'\n",
       )
-      const file = path.join(toolsDir, 'capture/index.ts')
-      writeFile(
-        file,
-        "import { helper } from '../survey/helper'\nconsole.log(helper)\n",
-      )
+      const file = path.join(toolsDir, 'capture/__lint_verify_tmp__index.ts')
+      writeFile(file, "import { helper } from '../survey/__lint_verify_tmp__helper'\nconsole.log(helper)\n")
       // cwd = the fieldkit app directory, matching its real `lint` script
       // ("eslint app"), which is invoked with the app as cwd, never the
       // repo root. This is the exact case Finding 1 fixes.
       const messages = await lint(path.join(repoRoot, 'apps/fieldkit'), [file])
-      return { cleanupRoot, ok: hasRuleId(messages, 'import/no-restricted-paths'), messages }
+      return { ok: hasRuleId(messages, 'import/no-restricted-paths'), messages }
     },
   },
   {
     name: 'Rule 3 (import/no-restricted-paths): same-tool import (capture -> capture) is still ALLOWED',
     async run() {
       const toolsDir = path.join(repoRoot, 'apps/fieldkit/src/tools')
-      const cleanupRoot = firstMissingAncestor(toolsDir)
       writeFile(
-        path.join(toolsDir, 'capture/sibling.ts'),
+        path.join(toolsDir, 'capture/__lint_verify_tmp__sibling.ts'),
         "export const helper = 'capture sibling'\n",
       )
-      const file = path.join(toolsDir, 'capture/self.ts')
-      writeFile(file, "import { helper } from './sibling'\nconsole.log(helper)\n")
+      const file = path.join(toolsDir, 'capture/__lint_verify_tmp__self.ts')
+      writeFile(file, "import { helper } from './__lint_verify_tmp__sibling'\nconsole.log(helper)\n")
       const messages = await lint(path.join(repoRoot, 'apps/fieldkit'), [file])
       // Inverted assertion: a rule that rejects every import would pass the
       // case above for the wrong reason. This case is what rules that out.
-      return { cleanupRoot, ok: !hasRuleId(messages, 'import/no-restricted-paths'), messages }
+      return { ok: !hasRuleId(messages, 'import/no-restricted-paths'), messages }
     },
   },
 ]
 
 let allOk = true
-const cleanupRoots = new Set()
 
 for (const testCase of cases) {
   process.stdout.write(`\n=== ${testCase.name} ===\n`)
@@ -176,7 +199,6 @@ for (const testCase of cases) {
     console.error('  ERRORED:', err)
     continue
   }
-  cleanupRoots.add(result.cleanupRoot)
   if (result.ok) {
     console.log('  PASS')
   } else {
@@ -191,10 +213,24 @@ for (const testCase of cases) {
   }
 }
 
-// Cleanup: each cleanupRoot is the shallowest directory this run created,
-// so removing it recursively cannot touch anything that pre-existed.
-for (const root of cleanupRoots) {
-  fs.rmSync(root, { recursive: true, force: true })
+// Cleanup: remove exactly the files this run wrote, then remove exactly the
+// directories this run created — deepest first, and only if now empty. A
+// directory that pre-existed (e.g. a real `src/tools/capture/`) was never
+// added to `createdDirs`, so it is never touched here even though fixture
+// files were written inside it. No recursive/force delete of anything.
+for (const file of createdFiles) {
+  fs.rmSync(file, { force: true })
+}
+const dirsDeepestFirst = [...createdDirs].sort((a, b) => b.length - a.length)
+for (const dir of dirsDeepestFirst) {
+  try {
+    fs.rmdirSync(dir)
+  } catch (err) {
+    if (err.code !== 'ENOTEMPTY' && err.code !== 'ENOENT') throw err
+    // Non-empty means this directory holds something this run did not
+    // create (e.g. a real file that lives alongside our fixtures) — leave
+    // it exactly as found instead of forcing a recursive delete.
+  }
 }
 
 console.log(`\n${allOk ? 'All rules verified.' : 'One or more rules FAILED to fire as expected.'}`)
