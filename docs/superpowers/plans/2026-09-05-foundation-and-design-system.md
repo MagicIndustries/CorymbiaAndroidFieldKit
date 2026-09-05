@@ -1431,6 +1431,9 @@ Group transform, verbatim: `matrix(1.2165365,0,0,1.2165365,141.72777,-162.40239)
     "lint": "eslint src",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@corymbia/tokens": "workspace:*"
+  },
   "peerDependencies": {
     "react": "*",
     "react-native": "*",
@@ -1449,6 +1452,11 @@ Group transform, verbatim: `matrix(1.2165365,0,0,1.2165365,141.72777,-162.40239)
 
 Copy `tsconfig.json`, `jest.config.js` and `babel.config.js` from `packages/ui` verbatim.
 
+**The mark takes its colours from `@corymbia/tokens`, not from literals.** The five gradient
+stops are `ramp.brandGradient`, and all eight spore dots are exactly the four `ramp.brand`
+greens. So this package needs no exemption from the hex lint rule, and the artwork and the
+tokens cannot drift apart.
+
 - [ ] **Step 3: Write the failing test**
 
 `packages/brand/src/__tests__/CorymbiaMark.test.tsx`:
@@ -1456,6 +1464,7 @@ Copy `tsconfig.json`, `jest.config.js` and `babel.config.js` from `packages/ui` 
 ```tsx
 import React from 'react'
 import { render } from '@testing-library/react-native'
+import { ramp } from '@corymbia/tokens'
 import { CorymbiaMark, BRAND_GRADIENT_STOPS } from '../index'
 
 describe('CorymbiaMark', () => {
@@ -1475,13 +1484,17 @@ describe('CorymbiaMark', () => {
     expect(getByTestId('corymbia-mark').props.viewBox).toBe('0 0 1500 1500')
   })
 
-  it('carries the exact five gradient stops from the source artwork', () => {
-    expect(BRAND_GRADIENT_STOPS).toEqual([
-      { offset: '0', color: '#ABD246' },
-      { offset: '0.1666', color: '#99D252' },
-      { offset: '0.4994', color: '#6BD371' },
-      { offset: '0.9638', color: '#22D5A3' },
-      { offset: '1', color: '#1CD5A7' },
+  it('takes its gradient colours from the tokens, so artwork and theme cannot drift', () => {
+    expect(BRAND_GRADIENT_STOPS.map((s) => s.color)).toEqual([...ramp.brandGradient])
+  })
+
+  it('places the five stops at the offsets from the source artwork', () => {
+    expect(BRAND_GRADIENT_STOPS.map((s) => s.offset)).toEqual([
+      '0',
+      '0.1666',
+      '0.4994',
+      '0.9638',
+      '1',
     ])
   })
 
@@ -1504,25 +1517,27 @@ Expected: FAIL — `Cannot find module '../index'`.
 ```tsx
 import React from 'react'
 import Svg, { Circle, Defs, G, LinearGradient, Path, Stop } from 'react-native-svg'
+import { ramp } from '@corymbia/tokens'
 import { MARK_PATH } from './markPath'
 
-export const BRAND_GRADIENT_STOPS = [
-  { offset: '0', color: '#ABD246' },
-  { offset: '0.1666', color: '#99D252' },
-  { offset: '0.4994', color: '#6BD371' },
-  { offset: '0.9638', color: '#22D5A3' },
-  { offset: '1', color: '#1CD5A7' },
-] as const
+/** Offsets are artwork geometry; colours come from the tokens. */
+const STOP_OFFSETS = ['0', '0.1666', '0.4994', '0.9638', '1'] as const
 
+export const BRAND_GRADIENT_STOPS = STOP_OFFSETS.map((offset, i) => ({
+  offset,
+  color: ramp.brandGradient[i] as string,
+}))
+
+/** The eight spore dots. Every fill is one of the four brand greens. */
 const SPORES = [
-  { cx: 378, cy: 805.96002, r: 39.82, fill: '#84CF69' },
-  { cx: 293.82001, cy: 744.15997, r: 26.129999, fill: '#98D455' },
-  { cx: 309.51001, cy: 663.41998, r: 19.940001, fill: '#98D455' },
-  { cx: 745.02002, cy: 759.98999, r: 25.91, fill: '#30CF9F' },
-  { cx: 688.40997, cy: 814.45001, r: 19.57, fill: '#30CF9F' },
-  { cx: 537.57001, cy: 284.92001, r: 37.560001, fill: '#55D28C' },
-  { cx: 584.82001, cy: 376.81, r: 30.68, fill: '#55D28C' },
-  { cx: 523.03003, cy: 437.92999, r: 21.08, fill: '#55D28C' },
+  { cx: 378, cy: 805.96002, r: 39.82, fill: ramp.brand.grass },
+  { cx: 293.82001, cy: 744.15997, r: 26.129999, fill: ramp.brand.lime },
+  { cx: 309.51001, cy: 663.41998, r: 19.940001, fill: ramp.brand.lime },
+  { cx: 745.02002, cy: 759.98999, r: 25.91, fill: ramp.brand.teal },
+  { cx: 688.40997, cy: 814.45001, r: 19.57, fill: ramp.brand.teal },
+  { cx: 537.57001, cy: 284.92001, r: 37.560001, fill: ramp.brand.mint },
+  { cx: 584.82001, cy: 376.81, r: 30.68, fill: ramp.brand.mint },
+  { cx: 523.03003, cy: 437.92999, r: 21.08, fill: ramp.brand.mint },
 ] as const
 
 const VIEW_BOX = {
@@ -1573,17 +1588,14 @@ export function CorymbiaMark({
 }
 ```
 
-- [ ] **Step 6: Exempt the brand package from the hex lint rule**
+- [ ] **Step 6: Confirm the brand package needs no lint exemption**
 
-The mark's colours are artwork coordinates, not theme decisions. In `eslint.config.mjs`, extend rule 1's `ignores`:
+Because the mark draws its colours from `ramp`, no hex literal appears in this package.
+Do **not** add an exemption to `eslint.config.mjs`.
 
-```js
-ignores: [
-  'packages/tokens/src/ramp.ts',
-  'packages/brand/src/CorymbiaMark.tsx',
-  'packages/brand/src/markPath.ts',
-],
-```
+Run: `pnpm --filter @corymbia/brand lint`
+Expected: PASS with no errors. If it reports "Raw hex colours are not allowed", a colour was
+hardcoded instead of taken from `ramp` — fix the source rather than the lint config.
 
 - [ ] **Step 7: Write `packages/brand/src/index.ts`**
 
@@ -1682,6 +1694,7 @@ describe('Button', () => {
 ```tsx
 import React from 'react'
 import { render, screen } from '@testing-library/react-native'
+import { darkTheme } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
 import { Type } from '../Type'
 
@@ -1691,7 +1704,7 @@ describe('Type', () => {
   it('renders body text in the primary colour by default', () => {
     wrap(<Type testID="t">Hello</Type>)
     expect(screen.getByTestId('t').props.style).toEqual(
-      expect.objectContaining({ fontSize: 14, color: '#E6EDEA' }),
+      expect.objectContaining({ fontSize: 14, color: darkTheme.colors.textPrimary }),
     )
   })
 
@@ -1702,7 +1715,7 @@ describe('Type', () => {
       </Type>,
     )
     expect(screen.getByTestId('t').props.style).toEqual(
-      expect.objectContaining({ color: '#8FA3AD' }),
+      expect.objectContaining({ color: darkTheme.colors.textDim }),
     )
   })
 
@@ -2460,16 +2473,21 @@ describe('HelpAffordance', () => {
 import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react-native'
 import { ThemeProvider } from '../../theme'
-import { InputAffordanceRow } from '../InputAffordanceRow'
+import { InputAffordanceRow, INPUT_AFFORDANCE_ORDER } from '../InputAffordanceRow'
 
 const wrap = (ui: React.ReactElement) => render(<ThemeProvider>{ui}</ThemeProvider>)
 
 describe('InputAffordanceRow', () => {
-  it('always renders the four affordances in the same fixed order (doctrine rule 5)', () => {
+  it('declares the four affordances in one fixed order (doctrine rule 5)', () => {
+    expect(INPUT_AFFORDANCE_ORDER).toEqual(['title', 'description', 'voice', 'photo'])
+  })
+
+  it('renders them in that order', () => {
     wrap(<InputAffordanceRow onPress={() => {}} />)
-    expect(screen.getByTestId('affordance-order').props.children).toBe(
-      'title,description,voice,photo',
-    )
+    const rendered = screen
+      .getAllByRole('button')
+      .map((node) => node.props.testID.replace('affordance-', ''))
+    expect(rendered).toEqual([...INPUT_AFFORDANCE_ORDER])
   })
 
   it('reports which affordance was tapped', () => {
@@ -2608,6 +2626,9 @@ const AFFORDANCES: {
   { kind: 'photo', glyph: '📷', label: 'Photo', spoken: 'Take a photo' },
 ]
 
+/** The canonical order, exported so it can be asserted without a test-only element. */
+export const INPUT_AFFORDANCE_ORDER: InputAffordanceKind[] = AFFORDANCES.map((a) => a.kind)
+
 export function InputAffordanceRow({
   onPress,
   completed = [],
@@ -2621,11 +2642,6 @@ export function InputAffordanceRow({
 
   return (
     <View testID={testID} style={{ flexDirection: 'row', gap: spacing.sm }}>
-      {/* Machine-checkable proof that the order never drifts. */}
-      <Type testID="affordance-order" style={{ display: 'none' }}>
-        {AFFORDANCES.map((a) => a.kind).join(',')}
-      </Type>
-
       {AFFORDANCES.map((a) => {
         const done = completed.includes(a.kind)
         return (
@@ -2671,7 +2687,7 @@ export { HelpAffordance } from './HelpAffordance'
 `packages/ui/src/inputs/index.ts`:
 
 ```ts
-export { InputAffordanceRow } from './InputAffordanceRow'
+export { InputAffordanceRow, INPUT_AFFORDANCE_ORDER } from './InputAffordanceRow'
 export type { InputAffordanceKind } from './InputAffordanceRow'
 ```
 
