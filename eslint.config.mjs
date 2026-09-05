@@ -1,6 +1,12 @@
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
 import tseslint from '@typescript-eslint/eslint-plugin'
 import tsparser from '@typescript-eslint/parser'
 import importPlugin from 'eslint-plugin-import'
+
+// Repo root, derived from this file's own location rather than process.cwd().
+// See the comment on RULE 3's `basePath` below for why that distinction matters.
+const repoRoot = path.dirname(fileURLToPath(import.meta.url))
 
 // Baseline configuration. Task 5 of the foundation plan adds the three
 // architectural rules on top of this: semantic tokens only, size classes only,
@@ -77,6 +83,24 @@ export default [
             '(theme.colors.*). Add new colours to packages/tokens/src/ramp.ts and expose ' +
             'them through the semantic layer.',
         },
+        {
+          // A plain string literal (`Literal` above) is a different ESTree
+          // node than a backtick string with no interpolation — that's a
+          // `TemplateLiteral` with a single quasi and zero expressions.
+          // `` `#FF0000` `` is functionally identical to `'#FF0000'` but was
+          // slipping past the selector above untouched. This selector
+          // matches only non-interpolated template literals (no
+          // `${...}` parts) whose single quasi is a bare hex colour, so it
+          // does not reach into legitimate interpolations such as
+          // `` `${theme.colors.overlay}CC` `` (an appended alpha suffix on a
+          // semantic token, which the design spec explicitly permits).
+          selector:
+            'TemplateLiteral[expressions.length=0][quasis.length=1][quasis.0.value.raw=/^#[0-9a-fA-F]{3,8}$/]',
+          message:
+            'Raw hex colours are not allowed, including as template literals. Use a semantic ' +
+            'token from @corymbia/tokens (theme.colors.*). Add new colours to ' +
+            'packages/tokens/src/ramp.ts and expose them through the semantic layer.',
+        },
       ],
     },
   },
@@ -114,6 +138,30 @@ export default [
                 'and branch on sizeClass (compact | medium | expanded).',
             },
           ],
+          // `paths` above only keys on the exact specifier 'react-native', so
+          // reaching the same APIs through a subpath import — e.g.
+          // `import Dimensions from 'react-native/Libraries/Utilities/Dimensions'`
+          // — bypassed it entirely. `patterns` closes that: both globs are
+          // needed because a plain `*` does not cross a `/` segment boundary
+          // (matches 'react-native/Libraries') while `**` is needed for the
+          // deeper, real path (`react-native/Libraries/Utilities/Dimensions`).
+          //
+          // Limitation, not chased further: `require('react-native').Dimensions`
+          // (CommonJS) cannot be caught by `no-restricted-imports` at all — the
+          // rule only inspects ES `import` declarations, not arbitrary call
+          // expressions. Catching that would need a separate `no-restricted-syntax`
+          // selector on `CallExpression[callee.name='require']`, which isn't
+          // worth the complexity/false-positive risk for a codebase that is
+          // otherwise all ES modules; flagged here rather than silently gapped.
+          patterns: [
+            {
+              group: ['react-native/*', 'react-native/**'],
+              message:
+                'Do not import react-native internals via a subpath (e.g. ' +
+                'react-native/Libraries/Utilities/Dimensions) to read window dimensions. Use ' +
+                'useLayout() from @corymbia/ui and branch on sizeClass (compact | medium | expanded).',
+            },
+          ],
         },
       ],
     },
@@ -147,6 +195,28 @@ export default [
       'import/no-restricted-paths': [
         'error',
         {
+          // `basePath` is mandatory here, not redundant defensive coding. The
+          // plugin resolves `target`/`from` as `path.resolve(basePath, ...)`,
+          // and its own default is `options.basePath || process.cwd()` — a
+          // DIFFERENT anchor than the one ESLint uses to match this block's
+          // `files` glob (always relative to this config file's directory,
+          // i.e. the repo root, regardless of cwd).
+          //
+          // Every real lint invocation in this repo runs per-workspace: the
+          // root `lint` script is `turbo run lint`, which fans out to each
+          // workspace's own `lint` script (`eslint src`, `eslint app`, ...)
+          // with THAT WORKSPACE as the process cwd. There is no invocation
+          // path where lint runs with cwd = repo root. Without an explicit
+          // `basePath`, the zone below would resolve against
+          // `apps/fieldkit` (cwd during `fieldkit`'s lint script), doubling
+          // the prefix into `apps/fieldkit/apps/fieldkit/src/tools/capture`
+          // — a path nothing can ever match — silently disabling this rule
+          // for every file, with no error to reveal it. Anchoring to
+          // `repoRoot` (derived from this file's own location via
+          // `import.meta.url`, not `process.cwd()`) makes the zone correct
+          // no matter which workspace's script invoked ESLint. Do not
+          // remove this thinking it's a no-op default.
+          basePath: repoRoot,
           zones: [
             {
               target: './apps/fieldkit/src/tools/capture',
