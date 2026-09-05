@@ -2,6 +2,9 @@
  * Raw colour ramps. THIS IS THE ONLY FILE IN THE REPO PERMITTED TO CONTAIN HEX
  * LITERALS. Everything else consumes the semantic layer in `semantic.ts`.
  * Values are taken from design/logo/logo.svg and design/brochure/.
+ *
+ * Entries here are named for what the colour IS, never for where it is used
+ * or which theme it serves — that assignment happens in `semantic.ts`.
  */
 export const ramp = {
   /** Five-stop gradient from the logo mark, left to right. */
@@ -10,7 +13,7 @@ export const ramp = {
   /** Discrete brand greens, from the logo's spore dots. */
   brand: {
     lime: '#98D455',
-    limeDeep: '#4E9B22', // Dark lime for light-theme capture-fast control
+    limeDeep: '#4E9B22',
     grass: '#84CF69',
     mint: '#55D28C',
     teal: '#30CF9F',
@@ -36,26 +39,32 @@ export const ramp = {
     900: '#16212A',
   },
 
-  /** Semantic status hues. Deliberately outside the brand — they mean, not decorate. */
-  status: {
-    goodDark: '#30CF9F',
-    goodLight: '#12996F',
-    fair: '#E8B33D',
-    fairLight: '#9A6B10', // Light-theme fair status
-    poor: '#E86A4D',
-    poorLight: '#B23A21', // Light-theme poor status
-  },
+  /** A deep, muted green — distinct from the brand greens above. */
+  deepGreen: '#12996F',
 
-  text: {
-    onDark: '#E6EDEA', // Dark-theme primary text
-    dimOnDark: '#8FA3AD', // Dark-theme dim text
-  },
+  /** Amber, as named in the spec. */
+  amber: '#E8B33D',
+  /** A darker ochre variant of amber, for use on light grounds. */
+  amberDark: '#9A6B10',
 
-  ink: {
-    black: '#000000', // Scrim/overlay base
-    onLime: '#12290A',
-    onTeal: '#04231A',
-    onFair: '#2B1C05',
-    onPoor: '#2B0C05',
+  /** Rust, as named in the spec. */
+  rust: '#E86A4D',
+  /** A darker brick-red variant of rust, for use on light grounds. */
+  rustDark: '#B23A21',
+
+  /** Pale green-grey. */
+  paleGreenGrey: '#E6EDEA',
+  /** Blue-grey. */
+  blueGrey: '#8FA3AD',
+
+  /** Plain black, used as a scrim/overlay base. */
+  black: '#000000',
+
+  /** Four near-black tints, one per hue, for text/ink pairings on saturated fills. */
+  nearBlack: {
+    green: '#12290A',
+    teal: '#04231A',
+    brown: '#2B1C05',
+    red: '#2B0C05',
   },
 } as const
