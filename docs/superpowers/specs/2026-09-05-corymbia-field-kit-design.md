@@ -314,6 +314,44 @@ The Victorian Biodiversity Atlas accepts exactly three — GDA94, AGD66 and WGS8
 stored vocabulary matches the destination's, and export becomes a lookup rather than a
 conversion. See `docs/research/2026-09-06-victorian-biodiversity-destinations.md` §5.3.
 
+### 7.5 The device registry, and what a fix must remember
+
+Two devices are in play — a 10-inch tablet and a Samsung phone — and a coordinate taken on one
+is not interchangeable with a coordinate taken on the other. GNSS hardware differs, and so does
+what it can achieve. A dataset that cannot say which device produced a record cannot explain
+why two fixes from the same morning disagree.
+
+**Fixed device characteristics are recorded once, in a `device` table**, not repeated on every
+row: manufacturer, brand, model name and model identifier, device type, OS name and version,
+whether it is physical hardware or an emulator, the application version and build that was
+running, and a stable installation identifier. A short human label — `field-s24`, `tablet` —
+is what the interface shows. Records and events reference the device by key.
+
+**Per-fix conditions are recorded on the record**, because they change from one capture to the
+next. Beyond position and horizontal accuracy: vertical accuracy, whether the position was
+reported as mocked, and the location provider where the platform exposes it.
+
+Three conventions are stored explicitly rather than assumed, because each is a number whose
+meaning cannot be recovered later from the number alone:
+
+- **The accuracy convention.** Android's accuracy is the radius of 68% confidence — one sigma,
+  not a maximum error. A destination asking for 95% confidence wants a different figure. Storing
+  which convention produced the number is what makes that conversion possible.
+- **The altitude reference.** Android reports altitude above the WGS84 ellipsoid, which differs
+  from mean sea level by several metres in Victoria. An altitude with no stated reference is
+  not a measurement.
+- **The datum**, per §7.4.
+
+**A mocked position must be distinguishable from a real one.** A record that cannot prove it
+was not spoofed has no chain of custody worth the name, and the platform tells us — so we
+store it.
+
+**What the platform does not expose is recorded as unknown, never guessed.** Satellite counts,
+which constellations contributed, and whether the receiver was dual-frequency all bear on how
+much to trust a fix, and none is available through the location API without native work. The
+schema has room for them; the honest value today is absent. That is a better answer than a
+plausible one.
+
 ---
 
 ## 8. Context stamping and provenance

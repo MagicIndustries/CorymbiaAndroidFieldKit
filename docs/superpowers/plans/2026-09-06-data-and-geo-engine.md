@@ -21,6 +21,10 @@
 - **`expo run:android` never exits** — it keeps Metro alive by design. To confirm an install landed: `adb shell dumpsys package eco.corymbia.fieldkit | grep lastUpdateTime`.
 - **`app.json` changes only reach a build via `npx expo prebuild --platform android`.** Permissions are `app.json` config; skipping prebuild means the permission is not in the manifest and the request fails silently at runtime.
 - **Datum is recorded explicitly, and only ever the one actually measured.** Android returns **WGS84** and the app performs no transformation, so WGS84 is what every device-derived position stores. The permitted vocabulary is `WGS84 | GDA94 | AGD66` — the three the Victorian Biodiversity Atlas accepts, so export is a lookup rather than a conversion. **GDA2020 is not accepted by the VBA** and must not appear. See `docs/research/2026-09-06-victorian-biodiversity-destinations.md` §5.3.
+- **Every record names the device that produced it**, by foreign key into a `device` table holding that device's fixed characteristics (spec §7.5). A coordinate from the tablet is not interchangeable with one from the phone.
+- **Three conventions are stored explicitly, never assumed**: the accuracy convention (Android's figure is the 68% confidence radius, not a maximum error), the altitude reference (Android reports above the WGS84 ellipsoid, several metres from mean sea level in Victoria), and the datum. Each is a number whose meaning cannot be recovered from the number alone.
+- **A mocked position must be distinguishable from a real one.** `expo-location` reports it; the schema stores it. A record that cannot show it was not spoofed has no chain of custody.
+- **What the platform does not expose is stored as unknown, never guessed** — satellite counts, contributing constellations and dual-frequency capability all bear on trust and none is reachable without native work. Absent is a better answer than plausible.
 - **Store the fix summary, not every reading**: sample count, spread and hold duration on the record. Not one row per GPS sample.
 - **Store GPS time alongside device time.** Field tablets drift; a satellite fix carries an authoritative clock.
 - **Sequence numbers are per activity**, restarting with each one.
@@ -54,11 +58,13 @@ packages/data/
   src/db/better-sqlite3.ts       test adapter, real SQL in Node
   src/db/migrate.ts              migration runner
   src/migrations/001-projects.ts client, project, location, project_location, activity
-  src/migrations/002-records.ts  record, event
+  src/migrations/002-devices.ts  device registry
+  src/migrations/003-records.ts  record, event
   src/migrations/index.ts        ordered list
   src/ids.ts                     UUID generation
   src/time.ts                    ISO-8601 helpers, device vs GPS clock
   src/kinds.ts                   record kinds and their attribute validators
+  src/repositories/devices.ts
   src/repositories/projects.ts
   src/repositories/activities.ts
   src/repositories/records.ts
@@ -81,6 +87,7 @@ packages/geo/
   src/**/__tests__/*.test.ts
 
 apps/fieldkit/
+  src/db/device.ts               captures this device's fixed characteristics
   app/diagnostics.tsx            the on-device proving screen
   src/db/provider.tsx            opens the database, exposes it via context
 ```
@@ -570,10 +577,378 @@ git commit -m "feat(data): add the migration runner and the project and activity
 
 ---
 
-### Task 3: The record and event schema
+### Task 3: The device registry
 
 **Files:**
-- Create: `packages/data/src/migrations/002-records.ts`
+- Create: `packages/data/src/migrations/002-devices.ts`, `src/repositories/devices.ts`
+- Modify: `packages/data/src/migrations/index.ts`, `packages/data/src/index.ts`
+- Test: `packages/data/src/repositories/__tests__/devices.test.ts`
+
+**Interfaces:**
+- Consumes: `Database`, `newId`, `nowIso`, `migrate`.
+- Produces:
+  - `type DeviceType = 'phone' | 'tablet' | 'desktop' | 'tv' | 'unknown'`
+  - `type DeviceFacts = { installId: string; label: string; manufacturer: string | null; brand: string | null; modelName: string | null; modelId: string | null; deviceType: DeviceType; osName: string | null; osVersion: string | null; isPhysical: boolean; appVersion: string | null; appBuild: string | null }`
+  - `type Device = DeviceFacts & { id: string; firstSeenAt: string; lastSeenAt: string }`
+  - `registerDevice(db, facts: DeviceFacts): Promise<Device>` — upserts on `installId`, refreshing the OS and application versions and `lastSeenAt`.
+  - `getDevice(db, id): Promise<Device | null>`
+  - `listDevices(db): Promise<Device[]>`
+
+**Why this is a table and not a string column.** Two devices are in play, and a coordinate taken
+on the 10-inch tablet is not interchangeable with one taken on the phone — the GNSS hardware
+differs and so does what it can achieve. A dataset that cannot say which device produced a record
+cannot explain why two fixes from the same morning disagree. Fixed characteristics belong in one
+row per device rather than repeated on every capture; only the conditions that change from fix to
+fix live on the record.
+
+**`installId` rather than a hardware serial.** Android restricts access to hardware identifiers,
+and a reinstall legitimately produces a new logical device. The install identifier is stable for
+the life of an installation, which is the right granularity: it changes exactly when the thing
+that could have changed the data-collection setup changes.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/data/src/repositories/__tests__/devices.test.ts`:
+
+```ts
+import { openTestDatabase } from '../../db/better-sqlite3'
+import { migrate } from '../../db/migrate'
+import type { Database } from '../../db/port'
+import { getDevice, listDevices, registerDevice, type DeviceFacts } from '../devices'
+
+const FACTS: DeviceFacts = {
+  installId: 'install-abc',
+  label: 'field-s24',
+  manufacturer: 'samsung',
+  brand: 'samsung',
+  modelName: 'Galaxy S24',
+  modelId: 'SM-S938B',
+  deviceType: 'phone',
+  osName: 'Android',
+  osVersion: '16',
+  isPhysical: true,
+  appVersion: '1.0.0',
+  appBuild: '1',
+}
+
+describe('the device registry', () => {
+  let db: Database
+  beforeEach(async () => {
+    db = await openTestDatabase()
+    await migrate(db)
+  })
+  afterEach(async () => {
+    await db.close()
+  })
+
+  it('registers a device with its fixed characteristics', async () => {
+    const device = await registerDevice(db, FACTS)
+    expect(device.modelId).toBe('SM-S938B')
+    expect(device.deviceType).toBe('phone')
+    expect(device.isPhysical).toBe(true)
+  })
+
+  it('returns the same device on a second registration rather than duplicating it', async () => {
+    const first = await registerDevice(db, FACTS)
+    const second = await registerDevice(db, FACTS)
+    expect(second.id).toBe(first.id)
+    expect(await listDevices(db)).toHaveLength(1)
+  })
+
+  it('keeps the original first-seen date across re-registrations', async () => {
+    const first = await registerDevice(db, FACTS)
+    await new Promise((r) => setTimeout(r, 5))
+    const second = await registerDevice(db, FACTS)
+    expect(second.firstSeenAt).toBe(first.firstSeenAt)
+  })
+
+  it('refreshes the OS and application version, which do change under one install', async () => {
+    await registerDevice(db, FACTS)
+    const updated = await registerDevice(db, { ...FACTS, osVersion: '17', appVersion: '1.1.0' })
+    expect(updated.osVersion).toBe('17')
+    expect(updated.appVersion).toBe('1.1.0')
+  })
+
+  it('treats a different install as a different device, so records stay attributable', async () => {
+    await registerDevice(db, FACTS)
+    await registerDevice(db, { ...FACTS, installId: 'install-xyz', label: 'tablet', deviceType: 'tablet' })
+    expect(await listDevices(db)).toHaveLength(2)
+  })
+
+  it('distinguishes the tablet from the phone by type', async () => {
+    const tablet = await registerDevice(db, {
+      ...FACTS,
+      installId: 'install-tab',
+      label: 'tablet',
+      deviceType: 'tablet',
+      modelId: 'SM-X510',
+    })
+    expect(tablet.deviceType).toBe('tablet')
+  })
+
+  it('records an emulator as not physical, so test data is identifiable later', async () => {
+    const device = await registerDevice(db, { ...FACTS, installId: 'i2', isPhysical: false })
+    expect(device.isPhysical).toBe(false)
+  })
+
+  it('tolerates characteristics the platform declines to report', async () => {
+    const device = await registerDevice(db, {
+      ...FACTS,
+      installId: 'i3',
+      manufacturer: null,
+      brand: null,
+      modelName: null,
+      modelId: null,
+      osName: null,
+      osVersion: null,
+      appVersion: null,
+      appBuild: null,
+    })
+    expect(device.manufacturer).toBeNull()
+  })
+
+  it('reads a device back by id and returns null for an unknown one', async () => {
+    const device = await registerDevice(db, FACTS)
+    expect((await getDevice(db, device.id))?.label).toBe('field-s24')
+    expect(await getDevice(db, 'nope')).toBeNull()
+  })
+})
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pnpm --filter @corymbia/data test devices`
+Expected: FAIL — `Cannot find module '../devices'`.
+
+- [ ] **Step 3: Write `packages/data/src/migrations/002-devices.ts`**
+
+```ts
+import type { Migration } from '../db/migrate'
+
+/**
+ * One row per device installation (spec §7.5).
+ *
+ * Fixed characteristics live here rather than being repeated on every capture.
+ * The columns for satellite counts, constellations and dual-frequency capability
+ * are deliberately absent: none is reachable through the location API without
+ * native work, and a column that would only ever hold a guess is worse than no
+ * column. They arrive with a migration when a native module makes them real.
+ */
+export const migration002: Migration = {
+  id: '002-devices',
+  up: [
+    `CREATE TABLE device (
+       id             TEXT PRIMARY KEY,
+       install_id     TEXT NOT NULL UNIQUE,
+       label          TEXT NOT NULL CHECK (length(trim(label)) > 0),
+       manufacturer   TEXT,
+       brand          TEXT,
+       model_name     TEXT,
+       model_id       TEXT,
+       device_type    TEXT NOT NULL
+                      CHECK (device_type IN ('phone', 'tablet', 'desktop', 'tv', 'unknown')),
+       os_name        TEXT,
+       os_version     TEXT,
+       is_physical    INTEGER NOT NULL CHECK (is_physical IN (0, 1)),
+       app_version    TEXT,
+       app_build      TEXT,
+       first_seen_at  TEXT NOT NULL,
+       last_seen_at   TEXT NOT NULL
+     )`,
+  ],
+}
+```
+
+- [ ] **Step 4: Write `packages/data/src/repositories/devices.ts`**
+
+```ts
+import type { Database } from '../db/port'
+import { newId } from '../ids'
+import { nowIso } from '../time'
+
+export type DeviceType = 'phone' | 'tablet' | 'desktop' | 'tv' | 'unknown'
+
+export type DeviceFacts = {
+  /** Stable for the life of an installation. See the note on identifiers below. */
+  installId: string
+  /** What the interface shows: "field-s24", "tablet". */
+  label: string
+  manufacturer: string | null
+  brand: string | null
+  modelName: string | null
+  modelId: string | null
+  deviceType: DeviceType
+  osName: string | null
+  osVersion: string | null
+  isPhysical: boolean
+  appVersion: string | null
+  appBuild: string | null
+}
+
+export type Device = DeviceFacts & {
+  id: string
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+type DeviceRow = {
+  id: string
+  install_id: string
+  label: string
+  manufacturer: string | null
+  brand: string | null
+  model_name: string | null
+  model_id: string | null
+  device_type: DeviceType
+  os_name: string | null
+  os_version: string | null
+  is_physical: number
+  app_version: string | null
+  app_build: string | null
+  first_seen_at: string
+  last_seen_at: string
+}
+
+function toDevice(row: DeviceRow): Device {
+  return {
+    id: row.id,
+    installId: row.install_id,
+    label: row.label,
+    manufacturer: row.manufacturer,
+    brand: row.brand,
+    modelName: row.model_name,
+    modelId: row.model_id,
+    deviceType: row.device_type,
+    osName: row.os_name,
+    osVersion: row.os_version,
+    isPhysical: row.is_physical === 1,
+    appVersion: row.app_version,
+    appBuild: row.app_build,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+  }
+}
+
+const SELECT = `SELECT id, install_id, label, manufacturer, brand, model_name, model_id,
+                       device_type, os_name, os_version, is_physical, app_version, app_build,
+                       first_seen_at, last_seen_at
+                FROM device`
+
+/**
+ * Upserts on `installId`.
+ *
+ * Hardware characteristics do not change under one installation, but the OS and
+ * the application version do — so those are refreshed, and `firstSeenAt` is
+ * preserved. A reinstall produces a new install id and therefore a new device
+ * row, which is correct: it is exactly the moment the data-collection setup
+ * could have changed underneath the records.
+ */
+export async function registerDevice(db: Database, facts: DeviceFacts): Promise<Device> {
+  const at = nowIso()
+  const existing = await db.first<DeviceRow>(`${SELECT} WHERE install_id = ?`, [facts.installId])
+
+  if (existing) {
+    await db.execute(
+      `UPDATE device
+         SET label = ?, os_name = ?, os_version = ?, app_version = ?, app_build = ?, last_seen_at = ?
+       WHERE id = ?`,
+      [
+        facts.label,
+        facts.osName,
+        facts.osVersion,
+        facts.appVersion,
+        facts.appBuild,
+        at,
+        existing.id,
+      ],
+    )
+    const refreshed = await db.first<DeviceRow>(`${SELECT} WHERE id = ?`, [existing.id])
+    if (!refreshed) throw new Error(`Device ${existing.id} vanished during re-registration.`)
+    return toDevice(refreshed)
+  }
+
+  const id = newId('dev')
+  await db.execute(
+    `INSERT INTO device (id, install_id, label, manufacturer, brand, model_name, model_id,
+                         device_type, os_name, os_version, is_physical, app_version, app_build,
+                         first_seen_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      facts.installId,
+      facts.label,
+      facts.manufacturer,
+      facts.brand,
+      facts.modelName,
+      facts.modelId,
+      facts.deviceType,
+      facts.osName,
+      facts.osVersion,
+      facts.isPhysical ? 1 : 0,
+      facts.appVersion,
+      facts.appBuild,
+      at,
+      at,
+    ],
+  )
+
+  const created = await db.first<DeviceRow>(`${SELECT} WHERE id = ?`, [id])
+  if (!created) throw new Error(`Device ${id} vanished immediately after registration.`)
+  return toDevice(created)
+}
+
+export async function getDevice(db: Database, id: string): Promise<Device | null> {
+  const row = await db.first<DeviceRow>(`${SELECT} WHERE id = ?`, [id])
+  return row ? toDevice(row) : null
+}
+
+export async function listDevices(db: Database): Promise<Device[]> {
+  const rows = await db.all<DeviceRow>(`${SELECT} ORDER BY last_seen_at DESC`)
+  return rows.map(toDevice)
+}
+```
+
+- [ ] **Step 5: Register the migration and re-export**
+
+`packages/data/src/migrations/index.ts`:
+
+```ts
+import type { Migration } from '../db/migrate'
+import { migration001 } from './001-projects'
+import { migration002 } from './002-devices'
+import { migration003 } from './003-records'
+
+/** Ordered. Never reorder or edit a shipped migration — add a new one. */
+export const migrations: Migration[] = [migration001, migration002, migration003]
+```
+
+Add to `packages/data/src/index.ts`:
+
+```ts
+export { registerDevice, getDevice, listDevices } from './repositories/devices'
+export type { Device, DeviceFacts, DeviceType } from './repositories/devices'
+```
+
+> Task 4 creates `003-records.ts`. Until it exists this import fails, so write Task 4's migration file before running the suite, or temporarily omit `migration003` from the array and restore it in Task 4.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `pnpm --filter @corymbia/data test`
+Expected: PASS — all device tests green.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add packages/data
+git commit -m "feat(data): add the device registry so every fix is attributable"
+```
+
+---
+
+### Task 4: The record and event schema
+
+**Files:**
+- Create: `packages/data/src/migrations/003-records.ts`
 - Modify: `packages/data/src/migrations/index.ts`
 - Test: `packages/data/src/db/__tests__/records-schema.test.ts`
 
@@ -593,6 +968,14 @@ import { migrate } from '../migrate'
 import type { Database } from '../port'
 
 const NOW = '2026-09-06T09:14:00+10:00'
+
+async function seedDevice(db: Database): Promise<void> {
+  await db.execute(
+    `INSERT INTO device (id, install_id, label, device_type, is_physical, first_seen_at, last_seen_at)
+     VALUES (?, ?, ?, ?, 1, ?, ?)`,
+    ['dev-1', 'install-abc', 'field-s24', 'phone', NOW, NOW],
+  )
+}
 
 async function seedActivity(db: Database): Promise<void> {
   await db.execute(
@@ -626,7 +1009,12 @@ async function insertRecord(db: Database, over: Record<string, unknown> = {}): P
     fix_hold_ms: 4200,
     captured_at: NOW,
     gps_time: NOW,
-    device_id: 'field-s24',
+    device_id: 'dev-1',
+    vertical_accuracy_m: 3,
+    is_mocked: 0,
+    location_provider: 'gps',
+    accuracy_convention: 'radius68',
+    altitude_reference: 'wgs84Ellipsoid',
     attributes: '{}',
     created_at: NOW,
     updated_at: NOW,
@@ -645,6 +1033,7 @@ describe('the record schema', () => {
   beforeEach(async () => {
     db = await openTestDatabase()
     await migrate(db)
+    await seedDevice(db)
     await seedActivity(db)
   })
   afterEach(async () => {
@@ -696,6 +1085,9 @@ describe('the record schema', () => {
       fix_sample_count: null,
       fix_spread_m: null,
       fix_hold_ms: null,
+      vertical_accuracy_m: null,
+      accuracy_convention: null,
+      altitude_reference: null,
     })
     expect(await db.all('SELECT id FROM record')).toHaveLength(1)
   })
@@ -725,12 +1117,29 @@ describe('the record schema', () => {
     expect(await db.all('SELECT id FROM record')).toHaveLength(2)
   })
 
+  it('refuses a record naming a device that was never registered', async () => {
+    await expect(insertRecord(db, { id: 'r9', device_id: 'ghost' })).rejects.toThrow()
+  })
+
+  it('refuses an accuracy stored without the convention that gives it meaning', async () => {
+    await expect(insertRecord(db, { id: 'r10', accuracy_convention: null })).rejects.toThrow()
+  })
+
+  it('records a mocked position as such, so a spoofed fix is identifiable', async () => {
+    await insertRecord(db, { id: 'r11', is_mocked: 1 })
+    const row = await db.first<{ is_mocked: number }>(
+      'SELECT is_mocked FROM record WHERE id = ?',
+      ['r11'],
+    )
+    expect(row?.is_mocked).toBe(1)
+  })
+
   it('stores an event with its own context stamp', async () => {
     await insertRecord(db)
     await db.execute(
       `INSERT INTO event (id, record_id, action, device_id, occurred_at, latitude, longitude, accuracy_m, fix_quality, activity_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ['e1', 'r1', 'created', 'field-s24', NOW, -37.82141, 145.03318, 4, 'deliberate', 'a1'],
+      ['e1', 'r1', 'created', 'dev-1', NOW, -37.82141, 145.03318, 4, 'deliberate', 'a1'],
     )
     const event = await db.first<{ action: string }>('SELECT action FROM event WHERE id = ?', ['e1'])
     expect(event?.action).toBe('created')
@@ -741,7 +1150,7 @@ describe('the record schema', () => {
     await expect(
       db.execute(
         'INSERT INTO event (id, record_id, action, device_id, occurred_at) VALUES (?, ?, ?, ?, ?)',
-        ['e2', 'r1', 'teleported', 'field-s24', NOW],
+        ['e2', 'r1', 'teleported', 'dev-1', NOW],
       ),
     ).rejects.toThrow()
   })
@@ -753,7 +1162,7 @@ describe('the record schema', () => {
 Run: `pnpm --filter @corymbia/data test records-schema`
 Expected: FAIL — `no such table: record`.
 
-- [ ] **Step 3: Write `packages/data/src/migrations/002-records.ts`**
+- [ ] **Step 3: Write `packages/data/src/migrations/003-records.ts`**
 
 ```ts
 import type { Migration } from '../db/migrate'
@@ -773,8 +1182,8 @@ import type { Migration } from '../db/migrate'
  * TypeScript (spec §7.2). Promote one to a real column the moment it must be
  * filtered on.
  */
-export const migration002: Migration = {
-  id: '002-records',
+export const migration003: Migration = {
+  id: '003-records',
   up: [
     `CREATE TABLE record (
        id                TEXT PRIMARY KEY,
@@ -798,9 +1207,24 @@ export const migration002: Migration = {
        fix_spread_m      REAL,
        fix_hold_ms       INTEGER,
 
+       -- Per-fix conditions (spec §7.5). These change from capture to capture;
+       -- the device's fixed characteristics live in the `device` table.
+       vertical_accuracy_m  REAL,
+       is_mocked            INTEGER NOT NULL DEFAULT 0 CHECK (is_mocked IN (0, 1)),
+       location_provider    TEXT,
+
+       -- Conventions stored explicitly, because neither can be recovered from the
+       -- number alone. Android's accuracy is the 68% confidence radius, not a
+       -- maximum error; its altitude is above the WGS84 ellipsoid, several metres
+       -- from mean sea level in Victoria.
+       accuracy_convention  TEXT CHECK (accuracy_convention IS NULL OR
+                                        accuracy_convention IN ('radius68', 'radius95', 'unknown')),
+       altitude_reference   TEXT CHECK (altitude_reference IS NULL OR
+                                        altitude_reference IN ('wgs84Ellipsoid', 'meanSeaLevel')),
+
        captured_at       TEXT NOT NULL,
        gps_time          TEXT,
-       device_id         TEXT NOT NULL,
+       device_id         TEXT NOT NULL REFERENCES device(id),
 
        attributes        TEXT NOT NULL DEFAULT '{}',
 
@@ -827,7 +1251,12 @@ export const migration002: Migration = {
               (latitude IS NULL AND longitude IS NULL
                AND accuracy_m IS NULL AND altitude_m IS NULL AND datum IS NULL
                AND fix_age_seconds IS NULL AND fix_sample_count IS NULL
-               AND fix_spread_m IS NULL AND fix_hold_ms IS NULL))
+               AND fix_spread_m IS NULL AND fix_hold_ms IS NULL
+               AND vertical_accuracy_m IS NULL AND accuracy_convention IS NULL
+               AND altitude_reference IS NULL)),
+
+       -- A stored accuracy without its convention is a number whose meaning was lost.
+       CHECK (accuracy_m IS NULL OR accuracy_convention IS NOT NULL)
      )`,
 
     // Spec §7.2: sequence numbers restart with each activity, so "Pin 023" means
@@ -843,7 +1272,7 @@ export const migration002: Migration = {
        action        TEXT NOT NULL
                      CHECK (action IN ('created', 'edited', 'media_added', 'filed',
                                        'played', 'deleted', 'restored')),
-       device_id     TEXT NOT NULL,
+       device_id     TEXT NOT NULL REFERENCES device(id),
        occurred_at   TEXT NOT NULL,
        latitude      REAL,
        longitude     REAL,
@@ -884,7 +1313,7 @@ git commit -m "feat(data): add the record spine and event log, with fix integrit
 
 ---
 
-### Task 4: Ids, time, and record kinds
+### Task 5: Ids, time, and record kinds
 
 **Files:**
 - Create: `packages/data/src/ids.ts`, `src/time.ts`, `src/kinds.ts`
@@ -1091,7 +1520,7 @@ git commit -m "feat(data): add ids, timestamps and record-kind attribute validat
 
 ---
 
-### Task 5: Project and activity repositories
+### Task 6: Project and activity repositories
 
 **Files:**
 - Create: `packages/data/src/repositories/projects.ts`, `src/repositories/activities.ts`
@@ -1488,7 +1917,7 @@ git commit -m "feat(data): add project and activity repositories with spec-defau
 
 ---
 
-### Task 6: The record repository and the event log
+### Task 7: The record repository and the event log
 
 **Files:**
 - Create: `packages/data/src/repositories/records.ts`, `src/repositories/events.ts`
@@ -1520,9 +1949,18 @@ import { migrate } from '../../db/migrate'
 import type { Database } from '../../db/port'
 import { createActivity } from '../activities'
 import { createProject } from '../projects'
+import { registerDevice } from '../devices'
 import { listEvents } from '../events'
 import { createRecord, listRecords, listUnfiledRecords, softDeleteRecord } from '../records'
 import type { Fix } from '../records'
+
+const CONDITIONS = {
+  verticalAccuracyM: 3,
+  accuracyConvention: 'radius68',
+  altitudeReference: 'wgs84Ellipsoid',
+  isMocked: false,
+  provider: 'gps',
+} as const
 
 const DELIBERATE: Fix = {
   quality: 'deliberate',
@@ -1534,6 +1972,7 @@ const DELIBERATE: Fix = {
   sampleCount: 7,
   spreadM: 1.2,
   holdMs: 4200,
+  ...CONDITIONS,
 }
 
 const AMBIENT: Fix = {
@@ -1544,15 +1983,33 @@ const AMBIENT: Fix = {
   altitudeM: null,
   datum: 'WGS84',
   ageSeconds: 240,
+  ...CONDITIONS,
 }
 
 describe('records', () => {
   let db: Database
   let activityId: string
+  let deviceId: string
 
   beforeEach(async () => {
     db = await openTestDatabase()
     await migrate(db)
+    deviceId = (
+      await registerDevice(db, {
+        installId: 'install-abc',
+        label: 'field-s24',
+        manufacturer: 'samsung',
+        brand: 'samsung',
+        modelName: 'Galaxy S24',
+        modelId: 'SM-S938B',
+        deviceType: 'phone',
+        osName: 'Android',
+        osVersion: '16',
+        isPhysical: true,
+        appVersion: '1.0.0',
+        appBuild: '1',
+      })
+    ).id
     const project = await createProject(db, { name: 'Yarra Flats' })
     activityId = (
       await createActivity(db, { projectId: project.id, kind: 'survey', name: 'Survey 3' })
@@ -1567,7 +2024,7 @@ describe('records', () => {
       activityId,
       kind: 'pin',
       fix: DELIBERATE,
-      deviceId: 'field-s24',
+      deviceId,
     })
     expect(record.fix).toEqual(DELIBERATE)
   })
@@ -1577,7 +2034,7 @@ describe('records', () => {
       activityId,
       kind: 'pin',
       fix: AMBIENT,
-      deviceId: 'field-s24',
+      deviceId,
     })
     expect(record.fix).toEqual(AMBIENT)
   })
@@ -1587,7 +2044,7 @@ describe('records', () => {
       activityId,
       kind: 'pin',
       fix: { quality: 'none' },
-      deviceId: 'field-s24',
+      deviceId,
     })
     expect(record.fix).toEqual({ quality: 'none' })
   })
@@ -1597,19 +2054,19 @@ describe('records', () => {
       activityId,
       kind: 'pin',
       fix: DELIBERATE,
-      deviceId: 'd',
+      deviceId,
     })
     const second = await createRecord(db, {
       activityId,
       kind: 'pin',
       fix: DELIBERATE,
-      deviceId: 'd',
+      deviceId,
     })
     expect([first.sequence, second.sequence]).toEqual([1, 2])
   })
 
   it('restarts numbering for a different activity', async () => {
-    await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId: 'd' })
+    await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
     const project = await createProject(db, { name: 'Other' })
     const other = await createActivity(db, {
       projectId: project.id,
@@ -1620,7 +2077,7 @@ describe('records', () => {
       activityId: other.id,
       kind: 'pin',
       fix: DELIBERATE,
-      deviceId: 'd',
+      deviceId,
     })
     expect(record.sequence).toBe(1)
   })
@@ -1630,7 +2087,7 @@ describe('records', () => {
       activityId: null,
       kind: 'pin',
       fix: AMBIENT,
-      deviceId: 'd',
+      deviceId,
     })
     expect(record.activityId).toBeNull()
     expect((await listUnfiledRecords(db)).map((r) => r.id)).toEqual([record.id])
@@ -1641,11 +2098,11 @@ describe('records', () => {
       activityId,
       kind: 'pin',
       fix: DELIBERATE,
-      deviceId: 'field-s24',
+      deviceId,
     })
     const events = await listEvents(db, record.id)
     expect(events.map((e) => e.action)).toEqual(['created'])
-    expect(events[0]?.deviceId).toBe('field-s24')
+    expect(events[0]?.deviceId).toBe(deviceId)
   })
 
   it('lists an activity’s records most recent first', async () => {
@@ -1653,14 +2110,14 @@ describe('records', () => {
       activityId,
       kind: 'pin',
       fix: DELIBERATE,
-      deviceId: 'd',
+      deviceId,
     })
     await new Promise((r) => setTimeout(r, 5))
     const second = await createRecord(db, {
       activityId,
       kind: 'pin',
       fix: DELIBERATE,
-      deviceId: 'd',
+      deviceId,
     })
     expect((await listRecords(db, activityId)).map((r) => r.id)).toEqual([second.id, first.id])
   })
@@ -1670,9 +2127,9 @@ describe('records', () => {
       activityId,
       kind: 'pin',
       fix: DELIBERATE,
-      deviceId: 'd',
+      deviceId,
     })
-    await softDeleteRecord(db, record.id, 'd')
+    await softDeleteRecord(db, record.id, deviceId)
 
     expect(await listRecords(db, activityId)).toEqual([])
     const raw = await db.first<{ deleted_at: string | null }>(
@@ -1689,7 +2146,7 @@ describe('records', () => {
         activityId,
         kind: 'pin',
         fix: DELIBERATE,
-        deviceId: 'd',
+        deviceId,
         attributes: { species: 'Eucalyptus' },
       }),
     ).rejects.toThrow(/species/)
@@ -1703,29 +2160,47 @@ describe('records', () => {
 import { openTestDatabase } from '../../db/better-sqlite3'
 import { migrate } from '../../db/migrate'
 import type { Database } from '../../db/port'
+import { registerDevice } from '../devices'
 import { appendEvent, listEvents } from '../events'
 
 describe('the event log', () => {
   let db: Database
+  let deviceId: string
   beforeEach(async () => {
     db = await openTestDatabase()
     await migrate(db)
+    deviceId = (
+      await registerDevice(db, {
+        installId: 'install-abc',
+        label: 'field-s24',
+        manufacturer: null,
+        brand: null,
+        modelName: null,
+        modelId: null,
+        deviceType: 'phone',
+        osName: null,
+        osVersion: null,
+        isPhysical: true,
+        appVersion: null,
+        appBuild: null,
+      })
+    ).id
   })
   afterEach(async () => {
     await db.close()
   })
 
   it('records an action with the device it happened on', async () => {
-    await appendEvent(db, { recordId: null, action: 'created', deviceId: 'field-s24' })
+    await appendEvent(db, { recordId: null, action: 'created', deviceId })
     const events = await listEvents(db, null)
-    expect(events[0]?.deviceId).toBe('field-s24')
+    expect(events[0]?.deviceId).toBe(deviceId)
   })
 
   it('stamps an ambient position onto the event, not just the record', async () => {
     await appendEvent(db, {
       recordId: null,
       action: 'played',
-      deviceId: 'tablet',
+      deviceId,
       fix: {
         quality: 'ambient',
         latitude: -37.8,
@@ -1742,14 +2217,14 @@ describe('the event log', () => {
   })
 
   it('accepts an event with no position', async () => {
-    await appendEvent(db, { recordId: null, action: 'edited', deviceId: 'tablet' })
+    await appendEvent(db, { recordId: null, action: 'edited', deviceId })
     expect((await listEvents(db, null))[0]?.fixQuality).toBeNull()
   })
 
   it('returns events oldest first, so a history reads as a narrative', async () => {
-    await appendEvent(db, { recordId: null, action: 'created', deviceId: 'd' })
+    await appendEvent(db, { recordId: null, action: 'created', deviceId })
     await new Promise((r) => setTimeout(r, 5))
-    await appendEvent(db, { recordId: null, action: 'edited', deviceId: 'd' })
+    await appendEvent(db, { recordId: null, action: 'edited', deviceId })
     expect((await listEvents(db, null)).map((e) => e.action)).toEqual(['created', 'edited'])
   })
 })
@@ -1894,8 +2369,33 @@ export type Datum = 'WGS84' | 'GDA94' | 'AGD66'
  * Three representations on purpose: the type stops it being written, the
  * constraint stops it being stored, the component stops it being shown wrongly.
  */
+export type AccuracyConvention = 'radius68' | 'radius95' | 'unknown'
+export type AltitudeReference = 'wgs84Ellipsoid' | 'meanSeaLevel'
+
+/**
+ * Conditions that apply to any position, whatever its class (spec §7.5).
+ *
+ * `accuracyConvention` and `altitudeReference` are stored because neither can be
+ * recovered from the number alone: Android's accuracy is the 68% confidence
+ * radius rather than a maximum error, and its altitude is above the WGS84
+ * ellipsoid, several metres from mean sea level in Victoria. A destination
+ * wanting 95% confidence wants a different figure, and only the stored
+ * convention makes that conversion possible.
+ *
+ * `isMocked` is chain-of-custody: a record that cannot show it was not spoofed
+ * is not evidence, and the platform tells us.
+ */
+export type PositionConditions = {
+  verticalAccuracyM: number | null
+  accuracyConvention: AccuracyConvention
+  altitudeReference: AltitudeReference | null
+  isMocked: boolean
+  /** Where the platform exposes it — 'gps', 'fused', 'network'. Null when it does not. */
+  provider: string | null
+}
+
 export type Fix =
-  | {
+  | ({
       quality: 'deliberate'
       latitude: number
       longitude: number
@@ -1905,8 +2405,8 @@ export type Fix =
       sampleCount: number
       spreadM: number
       holdMs: number
-    }
-  | {
+    } & PositionConditions)
+  | ({
       quality: 'ambient'
       latitude: number
       longitude: number
@@ -1914,7 +2414,7 @@ export type Fix =
       altitudeM: number | null
       datum: Datum
       ageSeconds: number
-    }
+    } & PositionConditions)
   | { quality: 'none' }
 
 export type FieldRecord = {
@@ -1948,6 +2448,11 @@ type RecordRow = {
   fix_sample_count: number | null
   fix_spread_m: number | null
   fix_hold_ms: number | null
+  vertical_accuracy_m: number | null
+  is_mocked: number
+  location_provider: string | null
+  accuracy_convention: AccuracyConvention | null
+  altitude_reference: AltitudeReference | null
   captured_at: string
   gps_time: string | null
   device_id: string
@@ -1962,6 +2467,11 @@ function toFix(row: RecordRow): Fix {
     accuracyM: row.accuracy_m as number,
     altitudeM: row.altitude_m,
     datum: row.datum as Datum,
+    verticalAccuracyM: row.vertical_accuracy_m,
+    accuracyConvention: row.accuracy_convention as AccuracyConvention,
+    altitudeReference: row.altitude_reference,
+    isMocked: row.is_mocked === 1,
+    provider: row.location_provider,
   }
   return row.fix_quality === 'deliberate'
     ? {
@@ -1993,6 +2503,8 @@ function toRecord(row: RecordRow): FieldRecord {
 const SELECT = `SELECT id, activity_id, kind, sequence, title, description,
                        latitude, longitude, accuracy_m, altitude_m, datum,
                        fix_quality, fix_age_seconds, fix_sample_count, fix_spread_m, fix_hold_ms,
+                       vertical_accuracy_m, is_mocked, location_provider,
+                       accuracy_convention, altitude_reference,
                        captured_at, gps_time, device_id, attributes
                 FROM record WHERE deleted_at IS NULL`
 
@@ -2034,8 +2546,10 @@ export async function createRecord(
       `INSERT INTO record (id, activity_id, kind, sequence, title, short_label, description,
                            latitude, longitude, accuracy_m, altitude_m, datum,
                            fix_quality, fix_age_seconds, fix_sample_count, fix_spread_m, fix_hold_ms,
+                           vertical_accuracy_m, is_mocked, location_provider,
+                           accuracy_convention, altitude_reference,
                            captured_at, gps_time, device_id, attributes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         input.activityId,
@@ -2053,6 +2567,11 @@ export async function createRecord(
         fix.quality === 'deliberate' ? fix.sampleCount : null,
         fix.quality === 'deliberate' ? fix.spreadM : null,
         fix.quality === 'deliberate' ? fix.holdMs : null,
+        positioned?.verticalAccuracyM ?? null,
+        positioned?.isMocked ? 1 : 0,
+        positioned?.provider ?? null,
+        positioned?.accuracyConvention ?? null,
+        positioned?.altitudeReference ?? null,
         at,
         input.gpsTime ?? null,
         input.deviceId,
@@ -2119,7 +2638,14 @@ export {
   listUnfiledRecords,
   softDeleteRecord,
 } from './repositories/records'
-export type { Fix, FieldRecord, Datum } from './repositories/records'
+export type {
+  Fix,
+  FieldRecord,
+  Datum,
+  PositionConditions,
+  AccuracyConvention,
+  AltitudeReference,
+} from './repositories/records'
 export { appendEvent, listEvents } from './repositories/events'
 export type { EventAction, EventEntry } from './repositories/events'
 ```
@@ -2139,7 +2665,7 @@ git commit -m "feat(data): add the record repository and the append-only event l
 
 ---
 
-### Task 7: The expo-sqlite adapter
+### Task 8: The expo-sqlite adapter
 
 **Files:**
 - Create: `packages/data/src/db/expo.ts`
@@ -2292,7 +2818,7 @@ git commit -m "feat(data): add the expo-sqlite adapter"
 
 ---
 
-### Task 8: The `geo` package — distance, nearest location, duplicate guard
+### Task 9: The `geo` package — distance, nearest location, duplicate guard
 
 **Files:**
 - Create: `packages/geo/package.json`, `tsconfig.json`, `jest.config.js`, `babel.config.js`, `src/distance.ts`, `src/nearest.ts`, `src/duplicate.ts`, `src/index.ts`
@@ -2572,7 +3098,7 @@ git commit -m "feat(geo): add distance, nearest-place and duplicate detection"
 
 ---
 
-### Task 9: Fix classification, averaging and trend
+### Task 10: Fix classification, averaging and trend
 
 **Files:**
 - Create: `packages/geo/src/classify.ts`, `src/average.ts`, `src/trend.ts`
@@ -2736,6 +3262,10 @@ export type Reading = {
   longitude: number
   accuracyM: number
   altitudeM: number | null
+  /** Vertical accuracy where the platform reports it. */
+  verticalAccuracyM?: number | null
+  /** Whether the platform flagged this as coming from a mock provider (spec §7.5). */
+  isMocked?: boolean
   timestampMs: number
 }
 
@@ -2872,7 +3402,7 @@ git commit -m "feat(geo): add accuracy grading, hold-averaging and the hold verd
 
 ---
 
-### Task 10: The location source and its fake
+### Task 11: The location source and its fake
 
 **Files:**
 - Create: `packages/geo/src/location/port.ts`, `src/location/fake.ts`, `src/location/expo.ts`
@@ -3040,6 +3570,9 @@ function toReading(position: Location.LocationObject): Reading {
     // rather than asserting a number that might not be there.
     accuracyM: position.coords.accuracy ?? Number.POSITIVE_INFINITY,
     altitudeM: position.coords.altitude,
+    verticalAccuracyM: position.coords.altitudeAccuracy ?? null,
+    // A fix that cannot show it was not spoofed is not evidence (spec §7.5).
+    isMocked: position.mocked ?? false,
     timestampMs: position.timestamp,
   }
 }
@@ -3104,7 +3637,7 @@ git commit -m "feat(geo): add the location source port with expo and scripted ad
 
 ---
 
-### Task 11: The ambient position cache
+### Task 12: The ambient position cache
 
 **Files:**
 - Create: `packages/geo/src/ambient-cache.ts`
@@ -3303,7 +3836,7 @@ git commit -m "feat(geo): add the ambient position cache with fix ageing"
 
 ---
 
-### Task 12: Wiring the database into the app
+### Task 13: Wiring the database into the app
 
 **Files:**
 - Create: `apps/fieldkit/src/db/provider.tsx`
@@ -3328,6 +3861,12 @@ Add to `apps/fieldkit/package.json` `dependencies`:
 "@corymbia/geo": "workspace:*"
 ```
 
+Then install the two Expo modules that report the device's fixed characteristics:
+
+```bash
+cd apps/fieldkit && npx expo install expo-device expo-application && cd ../..
+```
+
 Add to `apps/fieldkit/app.json` under `expo.android`:
 
 ```json
@@ -3338,18 +3877,96 @@ Run `pnpm install` from the repo root, then `cd apps/fieldkit && npx expo prebui
 
 **The prebuild is not optional.** Permissions are `app.json` config; without prebuild they never reach the Android manifest and the permission request fails at runtime with no useful error.
 
-- [ ] **Step 2: Write `apps/fieldkit/src/db/provider.tsx`**
+- [ ] **Step 2: Write `apps/fieldkit/src/db/device.ts`**
+
+```ts
+import * as Application from 'expo-application'
+import * as Device from 'expo-device'
+import type { DeviceFacts, DeviceType } from '@corymbia/data'
+
+/**
+ * Reads this device's fixed characteristics (spec §7.5), so every record can say
+ * which machine produced it. A coordinate from the 10-inch tablet is not
+ * interchangeable with one from the phone.
+ *
+ * Every field is optional in the type because the platform genuinely declines to
+ * report some of them on some devices, and an absent value is a better record
+ * than an invented one.
+ *
+ * VERIFY EACH FIELD AGAINST THE INSTALLED SDK before trusting this. The names
+ * below are what expo-device and expo-application are expected to expose at SDK
+ * 57; if one does not exist, record null and say so in your report rather than
+ * substituting something that looks similar.
+ */
+function toDeviceType(type: Device.DeviceType | null): DeviceType {
+  switch (type) {
+    case Device.DeviceType.PHONE:
+      return 'phone'
+    case Device.DeviceType.TABLET:
+      return 'tablet'
+    case Device.DeviceType.DESKTOP:
+      return 'desktop'
+    case Device.DeviceType.TV:
+      return 'tv'
+    default:
+      return 'unknown'
+  }
+}
+
+/**
+ * A stable identifier for this installation.
+ *
+ * Android restricts hardware identifiers, and a reinstall legitimately produces a
+ * new logical device — which is the right granularity, because a reinstall is
+ * exactly when the data-collection setup could have changed underneath the
+ * records. `getAndroidId()` is stable per app-signing-key per device; the
+ * fallback keeps the app working if it is unavailable rather than failing to
+ * register at all.
+ */
+async function readInstallId(): Promise<string> {
+  const androidId = Application.getAndroidId?.()
+  if (androidId) return androidId
+  const installTime = await Application.getInstallationTimeAsync?.()
+  return `fallback-${installTime?.getTime() ?? 'unknown'}-${Device.modelId ?? 'device'}`
+}
+
+export async function readDeviceFacts(): Promise<DeviceFacts> {
+  const deviceType = await Device.getDeviceTypeAsync()
+  return {
+    installId: await readInstallId(),
+    // A short, human label. The device's own name is what she would call it.
+    label: Device.deviceName ?? Device.modelName ?? 'this device',
+    manufacturer: Device.manufacturer ?? null,
+    brand: Device.brand ?? null,
+    modelName: Device.modelName ?? null,
+    modelId: Device.modelId ?? null,
+    deviceType: toDeviceType(deviceType),
+    osName: Device.osName ?? null,
+    osVersion: Device.osVersion ?? null,
+    isPhysical: Device.isDevice,
+    appVersion: Application.nativeApplicationVersion ?? null,
+    appBuild: Application.nativeBuildVersion ?? null,
+  }
+}
+```
+
+- [ ] **Step 3: Write `apps/fieldkit/src/db/provider.tsx`**
 
 ```tsx
 import React, { createContext, useContext, useEffect, useState } from 'react'
-import { migrate, openDatabase, type Database } from '@corymbia/data'
+import { migrate, openDatabase, registerDevice, type Database, type Device } from '@corymbia/data'
+import { readDeviceFacts } from './device'
 
 type Status =
   | { state: 'opening'; error: null; applied: string[] }
   | { state: 'ready'; error: null; applied: string[] }
   | { state: 'failed'; error: Error; applied: string[] }
 
-const DatabaseContext = createContext<{ db: Database | null; status: Status } | null>(null)
+const DatabaseContext = createContext<{
+  db: Database | null
+  device: Device | null
+  status: Status
+} | null>(null)
 
 /**
  * Opens the database and runs migrations before rendering anything that reads
@@ -3362,6 +3979,7 @@ const DatabaseContext = createContext<{ db: Database | null; status: Status } | 
  */
 export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   const [db, setDb] = useState<Database | null>(null)
+  const [device, setDevice] = useState<Device | null>(null)
   const [status, setStatus] = useState<Status>({ state: 'opening', error: null, applied: [] })
 
   useEffect(() => {
@@ -3371,11 +3989,16 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
       try {
         const opened = await openDatabase()
         const applied = await migrate(opened)
+        // Register before anything can write a record: every record and event
+        // carries a device foreign key, so nothing may be captured until the
+        // device this app is running on is known.
+        const registered = await registerDevice(opened, await readDeviceFacts())
         if (cancelled) {
           await opened.close()
           return
         }
         setDb(opened)
+        setDevice(registered)
         setStatus({ state: 'ready', error: null, applied })
       } catch (error) {
         if (cancelled) return
@@ -3393,7 +4016,7 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <DatabaseContext.Provider value={{ db, status }}>{children}</DatabaseContext.Provider>
+    <DatabaseContext.Provider value={{ db, device, status }}>{children}</DatabaseContext.Provider>
   )
 }
 
@@ -3409,9 +4032,17 @@ export function useDatabase(): Database {
   if (!value.db) throw new Error('The database is not open yet; check useDatabaseStatus first.')
   return value.db
 }
+
+/** The registered device this app is running on. Every capture is attributed to it. */
+export function useDevice(): Device {
+  const value = useContext(DatabaseContext)
+  if (!value) throw new Error('useDevice must be used within a DatabaseProvider')
+  if (!value.device) throw new Error('The device is not registered yet; check useDatabaseStatus first.')
+  return value.device
+}
 ```
 
-- [ ] **Step 3: Wrap the app in `apps/fieldkit/app/_layout.tsx`**
+- [ ] **Step 4: Wrap the app in `apps/fieldkit/app/_layout.tsx`**
 
 Add `DatabaseProvider` inside `ThemeProvider` — the theme must be available to render a database error:
 
@@ -3445,7 +4076,7 @@ export default function RootLayout() {
 }
 ```
 
-- [ ] **Step 4: Verify**
+- [ ] **Step 5: Verify**
 
 Run: `pnpm turbo run lint typecheck --force`
 Expected: clean.
@@ -3458,16 +4089,16 @@ grep -c ACCESS_FINE_LOCATION apps/fieldkit/android/app/src/main/AndroidManifest.
 
 Expected: `1` or more. If `0`, prebuild did not run — go back to Step 1.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add apps/fieldkit pnpm-lock.yaml
-git commit -m "feat(app): open the database and run migrations at startup"
+git commit -m "feat(app): open the database, register the device, and migrate at startup"
 ```
 
 ---
 
-### Task 13: The diagnostic screen, on hardware
+### Task 14: The diagnostic screen, on hardware
 
 **Files:**
 - Create: `apps/fieldkit/app/diagnostics.tsx`
@@ -3505,9 +4136,7 @@ import {
 } from '@corymbia/data'
 import { spacing } from '@corymbia/tokens'
 import { Button, Card, Screen, Type, useTheme } from '@corymbia/ui'
-import { useDatabase, useDatabaseStatus } from '../src/db/provider'
-
-const DEVICE_ID = 'diagnostics'
+import { useDatabase, useDatabaseStatus, useDevice } from '../src/db/provider'
 
 export default function Diagnostics() {
   const status = useDatabaseStatus()
@@ -3518,10 +4147,20 @@ export default function Diagnostics() {
   const [holding, setHolding] = useState(false)
   const [records, setRecords] = useState<FieldRecord[]>([])
   const [message, setMessage] = useState<string | null>(null)
+  const [mocked, setMocked] = useState(false)
 
   const source = useRef(createExpoLocationSource()).current
   const ambient = useRef(createAmbientCache(source)).current
   const held = useRef<Reading[]>([])
+
+  // Conditions that apply to every fix this device takes. Android's accuracy is
+  // the 68% confidence radius and its altitude is above the WGS84 ellipsoid;
+  // both are stored because neither can be recovered from the number alone.
+  const conditions = {
+    accuracyConvention: 'radius68',
+    altitudeReference: 'wgs84Ellipsoid',
+    provider: null,
+  } as const
 
   useEffect(() => {
     let stop: (() => void) | undefined
@@ -3531,6 +4170,9 @@ export default function Diagnostics() {
       if (state !== 'granted') return
       stop = await source.watch((reading) => {
         ambient.record(reading)
+        // expo-location reports whether a position came from a mock provider.
+        // Record it: a fix that cannot show it was not spoofed is not evidence.
+        setMocked(reading.isMocked ?? false)
         setReadings((previous) => [...previous.slice(-19), reading])
         if (holding) held.current.push(reading)
       })
@@ -3564,6 +4206,7 @@ export default function Diagnostics() {
     setRecords={setRecords}
     message={message}
     setMessage={setMessage}
+    mocked={mocked}
     applied={status.applied}
   />
 }
@@ -3581,12 +4224,18 @@ type BodyProps = {
   setRecords: (r: FieldRecord[]) => void
   message: string | null
   setMessage: (m: string | null) => void
+  mocked: boolean
   applied: string[]
 }
 
 function DiagnosticsBody(props: BodyProps) {
   const db = useDatabase()
+  const device = useDevice()
   const { latest, readings, holding, held, ambient } = props
+
+  /** The conventions this device's fixes are measured under (spec §7.5). */
+  const conditionsOf = (_p: BodyProps) =>
+    ({ accuracyConvention: 'radius68', altitudeReference: 'wgs84Ellipsoid', provider: null }) as const
 
   const row = (label: string, value: string) => (
     <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 }}>
@@ -3630,6 +4279,9 @@ function DiagnosticsBody(props: BodyProps) {
       accuracyM: averaged.accuracyM,
       altitudeM: averaged.altitudeM,
       datum: 'WGS84',
+      verticalAccuracyM: null,
+      isMocked: props.mocked,
+      ...conditionsOf(props),
       sampleCount: averaged.sampleCount,
       spreadM: averaged.spreadM,
       holdMs: samples.length > 1
@@ -3641,7 +4293,7 @@ function DiagnosticsBody(props: BodyProps) {
       activityId,
       kind: 'pin',
       fix,
-      deviceId: DEVICE_ID,
+      deviceId: device.id,
       gpsTime: nowIso(new Date(samples[samples.length - 1]?.timestampMs ?? Date.now())),
     })
     props.setRecords(await listRecords(db, activityId))
@@ -3660,9 +4312,12 @@ function DiagnosticsBody(props: BodyProps) {
           altitudeM: fixNow.altitudeM,
           datum: 'WGS84',
           ageSeconds: fixNow.ageSeconds,
+          verticalAccuracyM: null,
+          isMocked: props.mocked,
+          ...conditionsOf(props),
         }
       : { quality: 'none' }
-    await createRecord(db, { activityId, kind: 'pin', fix, deviceId: DEVICE_ID })
+    await createRecord(db, { activityId, kind: 'pin', fix, deviceId: device.id })
     props.setRecords(await listRecords(db, activityId))
     props.setMessage(fixNow ? `Saved ambient, ${fixNow.ageSeconds}s old` : 'Saved with no position')
   }
@@ -3682,7 +4337,21 @@ function DiagnosticsBody(props: BodyProps) {
 
         <View style={{ height: spacing.md }} />
         <Card>
+          <Type variant="label" dim>DEVICE</Type>
+          {row('label', device.label)}
+          {row('type', device.deviceType)}
+          {row('model', device.modelId ?? device.modelName ?? 'unreported')}
+          {row('os', `${device.osName ?? '?'} ${device.osVersion ?? ''}`.trim())}
+          {row('physical', device.isPhysical ? 'yes' : 'emulator')}
+          {row('app', `${device.appVersion ?? '?'} (${device.appBuild ?? '?'})`)}
+        </Card>
+
+        <View style={{ height: spacing.md }} />
+        <Card>
           <Type variant="label" dim>GPS</Type>
+          {row('mocked', props.mocked ? 'YES — spoofed position' : 'no')}
+          {row('accuracy convention', 'radius68 (Android 1-sigma)')}
+          {row('altitude reference', 'wgs84Ellipsoid')}
           {row('permission', props.permission)}
           {row('readings seen', String(readings.length))}
           {row('accuracy', latest ? `${latest.accuracyM.toFixed(1)} m` : '—')}
@@ -3789,7 +4458,9 @@ This is the deliverable. Work through it on the device, **outside with a clear v
 - [ ] Saving an ambient fix records an age in seconds that grows as the fix gets older.
 - [ ] Dropping a second pin on the spot reports the duplicate warning.
 - [ ] Stored records appear in the list with per-activity sequence numbers starting at 1.
-- [ ] Force-stop and relaunch: the records are still there.
+- [ ] Force-stop and relaunch: the records are still there, and the device row is reused rather than duplicated.
+- [ ] The DEVICE panel reports a plausible model, type and OS — confirm the S25 registers as `phone`, and note anything the platform declines to report so the gaps are known rather than assumed.
+- [ ] The mocked flag reads `no`. If a mock-location app is installed for testing, enable it once and confirm the flag flips — a chain-of-custody guard that has never been seen to fire is not a guard.
 
 Capture a screenshot into `docs/design-review/` and record the observations — especially the cold-start acquisition time and the accuracy the S25 actually reaches — in the report. Plan 3's thresholds depend on those numbers.
 
@@ -3804,7 +4475,7 @@ git commit -m "feat(app): add the GPS and database diagnostic screen"
 
 ## Self-Review
 
-**Spec coverage.** §7.1 entities → Tasks 2, 3 (the tables this plan uses; `media`, `record_link`, `batch` and `batch_item` arrive with the plans that need them). §7.2 record spine, kinds, per-activity sequence → Tasks 3, 4, 6. §7.3 required-but-defaulted → Tasks 2, 5. §7.4 fix provenance, GPS time, datum → Tasks 3, 6, 9. §8.1 context stamp → Task 6. §8.2 deliberate/ambient/none and the ambient cache → Tasks 3, 6, 11. §8.4 offline place names → Task 8. §8.5 event log → Task 6. §9.3 hold verdict → Task 9. §9.5 duplicate guard → Task 8. §10.1 resume the last activity → Task 5.
+**Spec coverage.** §7.1 entities → Tasks 2, 4 (the tables this plan uses; `media`, `record_link`, `batch` and `batch_item` arrive with the plans that need them). §7.2 record spine, kinds, per-activity sequence → Tasks 4, 5, 7. §7.3 required-but-defaulted → Tasks 2, 6. §7.4 fix provenance, GPS time, datum → Tasks 4, 7, 10. §7.5 device registry and stored conventions → Tasks 3, 4, 7, 13. §8.1 context stamp → Task 7. §8.2 deliberate/ambient/none and the ambient cache → Tasks 4, 7, 12. §8.4 offline place names → Task 9. §8.5 event log → Task 7. §9.3 hold verdict → Task 10. §9.5 duplicate guard → Task 9. §10.1 resume the last activity → Task 6.
 
 **Deliberately out of scope**, each with a home: the capture screen and its traffic-light frame (Plan 3); media capture and storage (Plan 4); the launcher, projects UI and Inbox (Plan 5); export profiles (Plan 6); tablet layouts (Plan 7); voice mode (Plan 8).
 
@@ -3812,7 +4483,9 @@ git commit -m "feat(app): add the GPS and database diagnostic screen"
 
 **Type consistency.** `Fix` in `@corymbia/data` mirrors `ContextStampFix` in `@corymbia/ui` and the CHECK constraints in migration 002 — deliberately three representations of one rule. `Reading` is defined once in `packages/geo/src/classify.ts` and imported everywhere else. `Coordinate` is structurally satisfied by `Reading`, so averaging output feeds `distanceMetres` without conversion. `Database`, `LocationSource`, `Project`, `Activity`, `FieldRecord`, `EventEntry`, `AmbientFix`, `HoldVerdict` and `FixGrade` each keep one name throughout.
 
-**A known limit, stated rather than hidden.** The `expo-sqlite` and `expo-location` adapters are verified against stubs in unit tests, which proves translation and nothing more. Only Task 13 on the device proves they work. Any report claiming otherwise is overstating its evidence.
+**A known limit, stated rather than hidden.** The `expo-sqlite`, `expo-location`, `expo-device` and `expo-application` adapters are verified against stubs in unit tests, which proves translation and nothing more. Only Task 14 on the device proves they work — and the field names those Expo modules expose must be checked against the installed SDK rather than trusted from this plan. Any report claiming otherwise is overstating its evidence.
+
+**What is deliberately absent from the device table.** Satellite counts, which constellations contributed to a fix, and whether the receiver is dual-frequency all bear on how far a coordinate can be trusted, and none is reachable through `expo-location` without native work. They are not columns holding nulls; they are not columns at all, and arrive with a migration when a native module makes them real. A column that could only ever hold a guess is worse than no column.
 
 ---
 
