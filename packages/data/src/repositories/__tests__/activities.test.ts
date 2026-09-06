@@ -44,18 +44,35 @@ describe('activities', () => {
     ).rejects.toThrow(FOREIGN_KEY)
   })
 
-  it('lists most recent first', async () => {
+  // `nowIso()` truncates to whole seconds, so two activities created in the
+  // same test share a `started_at` no matter how long the test sleeps between
+  // them — the truncation is in the format, not the clock. The `id DESC`
+  // tiebreak in `listActivities`/`mostRecentActivity` then decided both tests
+  // below, leaving the `started_at DESC` term they are named for untested.
+  //
+  // Both now write the timestamps in the OPPOSITE order to the ids — the
+  // technique records.test.ts uses — so the answer changes if either term is
+  // dropped. Ids are time-ordered, so the FIRST-created activity is the one
+  // that must come out on top.
+  const EARLIER = '2026-02-11T08:00:00+11:00'
+  const LATER = '2026-02-11T09:00:00+11:00'
+
+  it('lists most recent first, by start time rather than by insertion order', async () => {
     const first = await createActivity(db, { projectId, kind: 'survey', name: 'One' })
-    await new Promise((r) => setTimeout(r, 5))
     const second = await createActivity(db, { projectId, kind: 'sampling', name: 'Two' })
-    expect((await listActivities(db, projectId)).map((a) => a.id)).toEqual([second.id, first.id])
+    await db.execute('UPDATE activity SET started_at = ? WHERE id = ?', [LATER, first.id])
+    await db.execute('UPDATE activity SET started_at = ? WHERE id = ?', [EARLIER, second.id])
+
+    expect((await listActivities(db, projectId)).map((a) => a.id)).toEqual([first.id, second.id])
   })
 
   it('reports the most recent activity across all projects, for the launcher to resume', async () => {
-    await createActivity(db, { projectId, kind: 'survey', name: 'One' })
-    await new Promise((r) => setTimeout(r, 5))
-    const latest = await createActivity(db, { projectId, kind: 'sampling', name: 'Two' })
-    expect((await mostRecentActivity(db))?.id).toBe(latest.id)
+    const first = await createActivity(db, { projectId, kind: 'survey', name: 'One' })
+    const second = await createActivity(db, { projectId, kind: 'sampling', name: 'Two' })
+    await db.execute('UPDATE activity SET started_at = ? WHERE id = ?', [LATER, first.id])
+    await db.execute('UPDATE activity SET started_at = ? WHERE id = ?', [EARLIER, second.id])
+
+    expect((await mostRecentActivity(db))?.id).toBe(first.id)
   })
 
   it('returns null when nothing has been started yet', async () => {

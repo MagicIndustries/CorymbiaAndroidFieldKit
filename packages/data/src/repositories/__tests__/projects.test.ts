@@ -62,11 +62,26 @@ describe('projects', () => {
     expect(await getProject(db, 'nope')).toBeNull()
   })
 
-  it('lists most recently updated first', async () => {
+  it('lists most recently updated first, by update time rather than by insertion order', async () => {
+    // `nowIso()` truncates to whole seconds, so both projects are created with
+    // an identical `updated_at` however long the test sleeps between them, and
+    // the `id DESC` tiebreak alone decided this test — leaving the
+    // `updated_at DESC` term it is named for untested. The timestamps are now
+    // written in the OPPOSITE order to the ids (the technique
+    // records.test.ts uses), so dropping either term changes the answer. Ids
+    // are time-ordered, so the first-created project must come out on top.
     const first = await createProject(db, { name: 'One' })
-    await new Promise((r) => setTimeout(r, 5))
     const second = await createProject(db, { name: 'Two' })
-    expect((await listProjects(db)).map((p) => p.id)).toEqual([second.id, first.id])
+    await db.execute('UPDATE project SET updated_at = ? WHERE id = ?', [
+      '2026-02-11T09:00:00+11:00',
+      first.id,
+    ])
+    await db.execute('UPDATE project SET updated_at = ? WHERE id = ?', [
+      '2026-02-11T08:00:00+11:00',
+      second.id,
+    ])
+
+    expect((await listProjects(db)).map((p) => p.id)).toEqual([first.id, second.id])
   })
 
   it('excludes soft-deleted projects', async () => {

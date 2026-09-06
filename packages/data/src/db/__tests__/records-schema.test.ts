@@ -790,6 +790,79 @@ describe('the record schema', () => {
       )
     })
 
+    describe("the none clause's conjuncts, one at a time", () => {
+      // The test above violates every conjunct at once, so it stays green with
+      // any one of them deleted — `AND datum IS NULL` and
+      // `AND accuracy_convention IS NULL` could each be removed with the whole
+      // suite passing. This is the tamper-evident table; the record table's
+      // equivalent rule already gets this treatment, and so does this one now.
+      const NONE_STAMP: Record<string, unknown> = {
+        fix_quality: 'none',
+        latitude: null,
+        longitude: null,
+        accuracy_m: null,
+        accuracy_convention: null,
+        datum: null,
+        is_mocked: null,
+      }
+      const noneStamp = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+        ...NONE_STAMP,
+        ...over,
+      })
+
+      it('accepts the well-formed positionless stamp these all depart from', async () => {
+        await insertEvent(db, noneStamp({ id: 'en-ok' }))
+        expect(await db.all('SELECT id FROM event')).toHaveLength(1)
+      })
+
+      // Each row below sets exactly one conjunct's column and nothing else, so
+      // deleting that conjunct makes the insert either succeed or fail under a
+      // different constraint's name — either way this test goes red.
+      const conjuncts: [string, Record<string, unknown>][] = [
+        ['a longitude', { longitude: 145.03318 }],
+        ['an accuracy convention', { accuracy_convention: 'radius68' }],
+        ['a datum', { datum: 'WGS84' }],
+        ['a mocked flag', { is_mocked: 0 }],
+      ]
+
+      it.each(conjuncts)('refuses a positionless stamp carrying %s', async (_what, over) => {
+        await expect(insertEvent(db, noneStamp({ id: 'en-1', ...over }))).rejects.toThrow(
+          CHECK('event_none_has_no_position'),
+        )
+      })
+
+      // latitude and accuracy_m cannot be isolated by any insert: a latitude
+      // with no datum trips event_position_has_datum, and an accuracy with no
+      // convention trips event_accuracy_has_convention — both declared before
+      // this clause, so both are what SQLite reports. Supplying the companion
+      // column to get past them violates that companion's own conjunct
+      // instead, so deleting either conjunct alone leaves every insert-based
+      // test green. The schema text is the assertion that does go red, the
+      // same technique the record table uses for its three.
+      const noneClause = (sql: string): string => {
+        const start = sql.indexOf('CONSTRAINT event_none_has_no_position')
+        expect(start).toBeGreaterThan(-1)
+        return sql.slice(start, sql.indexOf('CONSTRAINT', start + 1))
+      }
+
+      it.each(['latitude IS NULL', 'accuracy_m IS NULL'])(
+        'keeps `%s` a conjunct of event_none_has_no_position',
+        async (conjunct) => {
+          const table = await db.first<{ sql: string }>(
+            `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'event'`,
+          )
+          expect(noneClause(table?.sql ?? '')).toContain(conjunct)
+        },
+      )
+
+      it('states the rule in the schema, not only as a side effect of another constraint', async () => {
+        const table = await db.first<{ sql: string }>(
+          `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'event'`,
+        )
+        expect(table?.sql).toMatch(/CONSTRAINT event_none_has_no_position/)
+      })
+    })
+
     it('accepts a positionless event stamp', async () => {
       await insertEvent(db, {
         id: 'e9',

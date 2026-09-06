@@ -43,10 +43,31 @@ describe('the device registry', () => {
   })
 
   it('keeps the original first-seen date across re-registrations', async () => {
+    // `nowIso()` truncates to whole seconds, so a re-registration milliseconds
+    // later writes a byte-identical timestamp and this test could not fail:
+    // adding `first_seen_at = excluded.first_seen_at` to registerDevice's
+    // upsert left it green, and this is the ONLY test of that guard. Sleeping
+    // 5 ms, as it used to, does not push the two apart — the truncation is in
+    // the format, not the clock.
+    //
+    // So the stored date is pushed somewhere today's clock cannot reach. An
+    // overwrite would replace it with a 2026 timestamp and is unmistakable.
+    const ORIGINALLY_SEEN = '2020-03-01T06:15:00+11:00'
     const first = await registerDevice(db, FACTS)
-    await new Promise((r) => setTimeout(r, 5))
+    await db.execute('UPDATE device SET first_seen_at = ?, last_seen_at = ? WHERE id = ?', [
+      ORIGINALLY_SEEN,
+      ORIGINALLY_SEEN,
+      first.id,
+    ])
+
     const second = await registerDevice(db, FACTS)
-    expect(second.firstSeenAt).toBe(first.firstSeenAt)
+
+    expect(second.id).toBe(first.id)
+    expect(second.firstSeenAt).toBe(ORIGINALLY_SEEN)
+    // And the upsert genuinely ran: without this, an `ON CONFLICT DO NOTHING`
+    // would preserve first_seen_at trivially while refreshing nothing at all.
+    // last_seen_at is the column that must move when first_seen_at does not.
+    expect(second.lastSeenAt).not.toBe(ORIGINALLY_SEEN)
   })
 
   it('refreshes the OS and application version, which do change under one install', async () => {
