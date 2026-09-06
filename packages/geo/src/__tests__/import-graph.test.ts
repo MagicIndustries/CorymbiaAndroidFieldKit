@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import fs from 'node:fs'
 import path from 'node:path'
 import { builtinModules } from 'node:module'
@@ -36,8 +37,12 @@ import ts from 'typescript'
  * What it does not catch: a Node built-in reached through a third-party
  * package's own code (not walked — `expo-location` is React Native's problem,
  * not ours), a runtime `require()` built from a computed string, and anything
- * not reachable from the barrel. The barrel is the boundary that matters,
- * because the barrel is what the app imports.
+ * not reachable from the barrel. Every syntactic form of a static import
+ * specifier IS followed, including TypeScript's legacy `import x =
+ * require('specifier')` (an `ImportEqualsDeclaration` wrapping an
+ * `ExternalModuleReference`) — only a specifier assembled at runtime from a
+ * non-literal expression can still hide from this walker. The barrel is the
+ * boundary that matters, because the barrel is what the app imports.
  */
 
 const PACKAGE_ROOT = path.resolve(__dirname, '..', '..')
@@ -58,8 +63,9 @@ interface Reference {
 
 /**
  * The module specifiers in `file` whose imports survive compilation: value
- * imports and re-exports, `import()`, and `require()`. Type-only forms are
- * excluded because Metro never sees them.
+ * imports and re-exports, `import()`, `require()`, and the legacy
+ * `import x = require('specifier')` form. Type-only forms are excluded
+ * because Metro never sees them.
  */
 function emittedSpecifiers(file: string): string[] {
   const source = ts.createSourceFile(
@@ -86,6 +92,13 @@ function emittedSpecifiers(file: string): string[] {
       const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword
       const isRequire = ts.isIdentifier(callee) && callee.text === 'require'
       if (isDynamicImport || isRequire) record(node.arguments[0])
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      // `import x = require('specifier')` parses as an ImportEqualsDeclaration
+      // wrapping an ExternalModuleReference, not an ImportDeclaration or a
+      // CallExpression — invisible to the branches above unless handled here.
+      if (!node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference)) {
+        record(node.moduleReference.expression)
+      }
     }
     ts.forEachChild(node, visit)
   }
