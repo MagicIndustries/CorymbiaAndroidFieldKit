@@ -73,42 +73,43 @@ const SELECT = `SELECT id, install_id, label, manufacturer, brand, model_name, m
 /**
  * Upserts on `installId`.
  *
- * Hardware characteristics do not change under one installation, but the OS and
- * the application version do — so those are refreshed, and `firstSeenAt` is
- * preserved. A reinstall produces a new install id and therefore a new device
- * row, which is correct: it is exactly the moment the data-collection setup
- * could have changed underneath the records.
+ * Hardware characteristics do not change under one installation — they
+ * genuinely cannot, so a second registration's values for `manufacturer`,
+ * `brand`, `modelName`, `modelId`, `deviceType` and `isPhysical` are ignored
+ * rather than trusted, and the row keeps whatever it was first created with.
+ * The OS and the application version do change under one installation, so
+ * those are refreshed, along with `label` — a device can legitimately be
+ * renamed. `firstSeenAt` is preserved. A reinstall produces a new install id
+ * and therefore a new device row, which is correct: it is exactly the moment
+ * the data-collection setup could have changed underneath the records.
+ *
+ * This is a single `INSERT … ON CONFLICT(install_id) DO UPDATE` rather than a
+ * SELECT-then-branch: two concurrent registrations for the same, not-yet-seen
+ * install (two app-lifecycle hooks firing at cold start, say) must not race
+ * to INSERT and have the loser blow up on the UNIQUE constraint. `install_id`
+ * is already UNIQUE (see migration 002), so no schema change is needed for
+ * SQLite to resolve the conflict atomically and hand back the single
+ * surviving row via `RETURNING`.
  */
 export async function registerDevice(db: Database, facts: DeviceFacts): Promise<Device> {
   const at = nowIso()
-  const existing = await db.first<DeviceRow>(`${SELECT} WHERE install_id = ?`, [facts.installId])
-
-  if (existing) {
-    await db.execute(
-      `UPDATE device
-         SET label = ?, os_name = ?, os_version = ?, app_version = ?, app_build = ?, last_seen_at = ?
-       WHERE id = ?`,
-      [
-        facts.label,
-        facts.osName,
-        facts.osVersion,
-        facts.appVersion,
-        facts.appBuild,
-        at,
-        existing.id,
-      ],
-    )
-    const refreshed = await db.first<DeviceRow>(`${SELECT} WHERE id = ?`, [existing.id])
-    if (!refreshed) throw new Error(`Device ${existing.id} vanished during re-registration.`)
-    return toDevice(refreshed)
-  }
-
   const id = newId('dev')
-  await db.execute(
+
+  const row = await db.first<DeviceRow>(
     `INSERT INTO device (id, install_id, label, manufacturer, brand, model_name, model_id,
                          device_type, os_name, os_version, is_physical, app_version, app_build,
                          first_seen_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(install_id) DO UPDATE SET
+       label = excluded.label,
+       os_name = excluded.os_name,
+       os_version = excluded.os_version,
+       app_version = excluded.app_version,
+       app_build = excluded.app_build,
+       last_seen_at = excluded.last_seen_at
+     RETURNING id, install_id, label, manufacturer, brand, model_name, model_id,
+               device_type, os_name, os_version, is_physical, app_version, app_build,
+               first_seen_at, last_seen_at`,
     [
       id,
       facts.installId,
@@ -128,9 +129,8 @@ export async function registerDevice(db: Database, facts: DeviceFacts): Promise<
     ],
   )
 
-  const created = await db.first<DeviceRow>(`${SELECT} WHERE id = ?`, [id])
-  if (!created) throw new Error(`Device ${id} vanished immediately after registration.`)
-  return toDevice(created)
+  if (!row) throw new Error(`Device upsert for install ${facts.installId} returned no row.`)
+  return toDevice(row)
 }
 
 export async function getDevice(db: Database, id: string): Promise<Device | null> {

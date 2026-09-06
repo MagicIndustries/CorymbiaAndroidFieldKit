@@ -99,4 +99,41 @@ describe('the device registry', () => {
     expect((await getDevice(db, device.id))?.label).toBe('field-s24')
     expect(await getDevice(db, 'nope')).toBeNull()
   })
+
+  it('resolves concurrent registrations of the same install to one row', async () => {
+    const results = await Promise.all([
+      registerDevice(db, FACTS),
+      registerDevice(db, FACTS),
+      registerDevice(db, FACTS),
+      registerDevice(db, FACTS),
+      registerDevice(db, FACTS),
+    ])
+
+    expect(await listDevices(db)).toHaveLength(1)
+    const ids = new Set(results.map((device) => device.id))
+    expect(ids.size).toBe(1)
+  })
+
+  it('relabels a device on re-registration, since a device can be renamed', async () => {
+    const first = await registerDevice(db, FACTS)
+    const renamed = await registerDevice(db, { ...FACTS, label: 'renamed-s24' })
+    expect(renamed.id).toBe(first.id)
+    expect(renamed.label).toBe('renamed-s24')
+  })
+
+  it('preserves hardware facts across re-registration, since they cannot change under one install', async () => {
+    await registerDevice(db, FACTS)
+    const reregistered = await registerDevice(db, {
+      ...FACTS,
+      manufacturer: 'google',
+      modelId: 'DIFFERENT-MODEL',
+      deviceType: 'tablet',
+      isPhysical: false,
+    })
+
+    expect(reregistered.manufacturer).toBe(FACTS.manufacturer)
+    expect(reregistered.modelId).toBe(FACTS.modelId)
+    expect(reregistered.deviceType).toBe(FACTS.deviceType)
+    expect(reregistered.isPhysical).toBe(FACTS.isPhysical)
+  })
 })
