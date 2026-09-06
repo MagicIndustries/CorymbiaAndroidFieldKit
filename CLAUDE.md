@@ -4,17 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-A pnpm workspace orchestrated by Turborepo, containing shared packages under
-`packages/` (`@corymbia/tokens`, `@corymbia/brand`, `@corymbia/ui`) and the Expo
-application in `apps/fieldkit`.
+A pnpm workspace orchestrated by Turborepo, containing five shared packages under
+`packages/` (`@corymbia/tokens`, `@corymbia/brand`, `@corymbia/ui`,
+`@corymbia/data`, `@corymbia/geo`) and the Expo application in `apps/fieldkit` —
+six workspaces in all.
+
+- `@corymbia/data` — SQLite schema, migrations and repositories. The record
+  spine, the append-only event log, and the device registry.
+- `@corymbia/geo` — the GPS engine: distance, accuracy grading, hold averaging,
+  the ambient position cache, and the platform location adapters.
 
 Commands, from the repository root:
 
-- `pnpm turbo run test` — all tests (currently `packages/tokens`, `packages/brand`
-  and `packages/ui`; `apps/fieldkit` has no tests of its own yet)
-- `pnpm turbo run lint` — ESLint across all four workspaces, including the three
+- `pnpm turbo run test` — all tests (`packages/tokens`, `packages/brand`,
+  `packages/ui`, `packages/data` and `packages/geo`; `apps/fieldkit` has no
+  tests of its own yet)
+- `pnpm turbo run lint` — ESLint across all six workspaces, including the three
   architectural rules described in `docs/ui-doctrine.md`
-- `pnpm turbo run typecheck` — TypeScript across all four workspaces
+- `pnpm turbo run typecheck` — TypeScript across all six workspaces
 - `pnpm run lint:verify-rules` — proves the three architectural lint rules actually
   fire under a real per-workspace invocation, not just that they are configured
 - `cd apps/fieldkit && npx expo run:android` — build and run on a connected device
@@ -46,6 +53,10 @@ use for judging the app in the field.
 against. Read it before building any UI. Add to it whenever a cross-screen
 design decision is made.
 
+`docs/gps-accuracy.md` explains how the reported GPS accuracy is derived
+(inverse-variance weighting, the floor, spread, altitude) and why an optimistic
+figure is harmful — read it before touching `packages/geo/src/average.ts`.
+
 Three constraints are enforced by lint and must not be worked around:
 
 1. Components consume semantic tokens from `@corymbia/tokens` only — never raw
@@ -59,6 +70,31 @@ Three constraints are enforced by lint and must not be worked around:
    `eslint.config.mjs` because Turborepo runs each workspace's `lint` script
    with that workspace as the working directory, not the repo root — do not
    "simplify" it away.
+
+## Data and GPS rules
+
+Two rules in `@corymbia/data` are not enforced by lint or by any type, and both
+can be broken silently — the code goes on working and only the data is wrong.
+
+- **Every adapter that opens this database must set `recursive_triggers = ON`.**
+  The event log is append-only, enforced by two triggers (migration 003). With
+  the pragma off — SQLite's default — `INSERT OR REPLACE INTO event` deletes the
+  conflicting row to make room and SQLite *skips the BEFORE DELETE trigger for
+  that deletion*, so the statement silently rewrites an existing event and
+  returns success. That defeats the one table whose entire purpose is being
+  tamper-evident. Both adapters set it (`src/db/better-sqlite3.ts`,
+  `src/db/expo.ts`); a third one that forgets will pass every test that does not
+  specifically try a REPLACE.
+
+- **The three fix classes are enforced in three places, and all three change
+  together.** Spec §8.2's deliberate/ambient/none distinction is stated by the
+  `Fix` discriminated union in `src/repositories/records.ts` (so a malformed fix
+  cannot be constructed), by the CHECK constraints in migration 003 (so one
+  cannot be stored), and by `ContextStamp` in `@corymbia/ui` (so one cannot be
+  shown wrongly). Adding a fourth class, or changing what a class must carry, in
+  only one of the three leaves the other two disagreeing — and the disagreement
+  surfaces as a `SQLITE_CONSTRAINT` failure mid-capture on a field device, or
+  worse, as a row nobody refused.
 
 ## Project context
 

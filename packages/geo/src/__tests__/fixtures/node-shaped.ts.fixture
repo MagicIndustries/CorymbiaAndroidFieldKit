@@ -1,0 +1,25 @@
+// NOT source. A deliberately Node-shaped module, read only by the positive
+// canary in ../import-graph.test.ts, which walks it directly rather than
+// through the barrel.
+//
+// The extension is `.ts.fixture` rather than `.ts` on purpose: TypeScript's
+// parser is happy to read it (an unrecognised extension is parsed as TS), but
+// `tsc`, ESLint and Jest's own `testMatch` all ignore it, so a file that
+// imports `better-sqlite3` and reaches for `Buffer` cannot fail a typecheck,
+// trip a lint rule, or be mistaken for something the package actually ships.
+//
+// Every line below exists to be flagged. If the walker stops reporting any of
+// them, its "this list is empty" assertions against the real barrel have
+// stopped meaning anything.
+
+import fs from 'node:fs'
+import Database from 'better-sqlite3'
+
+export function looksHarmless(): string {
+  const where = __dirname
+  const file = __filename
+  const size = Buffer.byteLength(where + file)
+  const cwd = process.cwd()
+  const legacy: unknown = require('node:path')
+  return `${where}${file}${String(size)}${cwd}${String(legacy)}${String(fs)}${String(Database)}`
+}

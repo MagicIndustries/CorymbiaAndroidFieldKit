@@ -1,5 +1,6 @@
 import React from 'react'
 import { View } from 'react-native'
+import { useRouter } from 'expo-router'
 import { radii, spacing } from '@corymbia/tokens'
 import {
   Button,
@@ -45,9 +46,18 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export function GallerySections() {
   const { name, setTheme, theme } = useTheme()
   const { sizeClass, deviceClass, orientation, width, height } = useLayout()
+  const router = useRouter()
 
   return (
     <View>
+      <Section title="Diagnostics">
+        <Button
+          label="Open the GPS and database diagnostics"
+          kind="secondary"
+          onPress={() => router.push('/diagnostics')}
+        />
+      </Section>
+
       <Section title="Brand bar">
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
           <CorymbiaMark height={26} />

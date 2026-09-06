@@ -137,6 +137,10 @@ No Tamagui, no NativeWind.
 **Dark mode is the default.** Light mode exists for glare — a bright overcast sky can defeat
 a dark screen. The theme follows the system setting with a manual override in settings.
 
+**Preferences persist.** An override that resets at every launch is not an override. Theme,
+handedness, capture-control order and density are stored locally and survive a restart —
+which means the application needs a small settings store, described in §7.6.
+
 ### 5.3 Responsive layout
 
 Devices: Samsung S25 (development reference), Samsung S24 and a 10-inch tablet (the user's).
@@ -182,6 +186,12 @@ corners are easiest. This inverts phone thinking.
 - Interactive controls live in the bottom third by default, and hug the bottom corners only
   on a **tablet in landscape** — the one case where the thumbs actually rest near the
   corners. A phone in landscape keeps the bottom band despite being `expanded` by width.
+- **Which capture control sits on the dominant side is itself a preference**, not a fixed
+  decision. The two differ in what they demand: `SAVE NOW` is the frequent action, while
+  `SHARPEN` is the effortful one, needing a sustained press. Whether the dominant thumb
+  should be given frequency or effort depends on how she actually holds the device and for
+  how long — which is not knowable from a desk. So it is a setting, defaulting to `SAVE NOW`
+  on the dominant side, and swappable without changing handedness.
 - Readouts occupy the centre — looked at, not touched.
 - **Reach zones are user-configurable.** A handedness and anchor setting determines which
   corner the working column occupies and which side primary actions sit on. Changing it
@@ -261,7 +271,8 @@ to projects.
 ### 7.2 The record spine
 
 **A single `record` table with a `kind` discriminator.** It carries everything common and
-positional: activity, sequence number, title, optional short label, description, latitude,
+positional: activity, capture number, activity sequence, title, optional short label,
+description, latitude,
 longitude, accuracy, altitude, datum, fix quality class, capture timestamps, capture method,
 soft-delete flag and audit timestamps. Kind-specific fields — a sample's medium, depth,
 volume and tube ID; an observation's species and abundance — live in a JSON attributes
@@ -272,9 +283,71 @@ capture with title, description, photos and voice notes. `sample` and any later 
 added by defining a schema and a form, which is the point of the design. No kind other than
 `pin` is built in the first implementation.
 
-**Sequence numbers are per activity**, not per project — she sees "Pin 023" in the context
-of the survey she is running, and numbering that restarts with each activity is what makes
-that label meaningful in the field.
+**A record carries two numbers, because they answer two different questions.**
+
+**The capture number is the stable one.** It is assigned the moment anything is recorded, is
+unique across the whole database, and is never changed again — not by filing, not by
+reordering, not by deletion. This is the number that is safe to write in marker on a water or
+soil sample tube, because the label will still match the record months later. Some captures
+are only coordinates and notes; some are physical samples that have to be labelled, and the
+app cannot tell which at capture time, so every record gets one.
+
+**The activity sequence is the meaningful-in-context one, and it moves.** It is the ordinal
+within an activity — she sees "Pin 023" in the context of the survey she is running, and
+numbering that restarts with each activity is what makes that label meaningful in the field.
+It is **per activity, not per project**. A record that is not in an activity does not have
+one at all: the Inbox (§10.2) is a supported destination, and a record filed there has no
+position in a survey to be the 23rd of. The sequence is assigned when the record enters an
+activity, and it changes when records are inserted around it — filing into the middle of a
+survey renumbers everything at and after that position, and reordering within a survey is
+the same operation. That is why nothing durable may be keyed to it.
+
+**A record can be moved between activities, and the activity it leaves closes the gap.**
+Misfilings happen — a record captured into whichever survey was running, or filed into the
+wrong one from the Inbox — so refiling is supported. It is the same renumbering run twice in
+one transaction: the destination opens a slot at the position the record lands in, and the
+**source renumbers so it stays 1, 2, 3 with no hole** where the record used to be. Leaving a
+gap was considered and rejected: a survey showing 1, 2, 4, 5 invites the reading that
+something was lost, and the sequence is presentation order that is already expected to shift
+on every insertion. The capture number does not move, so a tube already labelled in marker
+stays correct — which is the whole reason the ordinal is allowed to.
+
+**Filing is visible after the fact.** A record filed into an activity later carries the time
+it was filed, alongside the `filed` entry in the event log (§8.5) that records where and on
+which device it happened. A list can therefore show which of its records arrived by filing
+without asking the log a question per row. The timestamp is about the activity the record is
+in **now**: refiling overwrites it, because a record does not arrive in its new activity at
+capture either, and a `filed` entry that names the activity it came from is what makes the
+move auditable. Reordering within one activity leaves it alone.
+
+**Renumbering writes no event per shifted record.** Filing, reordering and refiling all move
+other records' `sequence` values as a side effect of placing one record — the "shifted
+record" cost of every insertion described above. None of that shifting is logged. The record
+that was actually filed, moved or refiled gets its one event; the records that merely had
+their ordinal bumped to make room do not. This is deliberate, not an oversight: the capture
+number is what stays stable, and an event for every shifted row would flood the log with an
+entry per insertion into a busy survey, for a fact (the new ordinal) that is already visible
+by re-reading the record. §8.5 makes the event log the chain of custody for what happened to
+*this* record; a row's ordinal changing because a different record moved past it is not
+something that happened to it in that sense.
+
+**Activity ordinals are contiguous by construction, and that is a repository invariant, not
+a schema one.** Every operation that touches `sequence` — filing, moving, refiling — leaves
+an activity numbered 1, 2, 3 with no gap, but nothing in migration 003 requires this:
+`idx_record_sequence` and `record_sequence_positive` would equally accept an activity
+numbered 1, 2, 5. The schema enforces uniqueness and positivity; contiguity is upheld only by
+the three functions always shifting the records between a change and the end of the activity,
+never leaving a hole open. If a gap ever appeared — a bug, a restored backup, a sync conflict
+not yet designed — the current operations would only partly repair it: each of the three
+closes exactly the gap it might otherwise open at the position it touches (`fileRecord`'s
+insertion point, `moveRecord`'s departure and arrival, `refileRecord`'s departure from the
+source), but none of them scans an activity end to end looking for a gap sitting elsewhere in
+it. A repair pass is a follow-up, not yet built.
+
+**Trade-off accepted.** Two numbers is more to explain than one, and a screen showing both
+would be confusing. The alternative was worse: one number cannot be both immutable enough to
+write on a tube and re-orderable enough to mean "the 23rd pin in this survey", and the single
+number the first draft specified made filing from the Inbox impossible without collisions.
 
 **Rationale.** Batching, exporting, media handling, map display and the capture screen then
 work for any kind of record. Adding a tool means defining a schema and a form, not new
@@ -346,11 +419,30 @@ meaning cannot be recovered later from the number alone:
 was not spoofed has no chain of custody worth the name, and the platform tells us — so we
 store it.
 
-**What the platform does not expose is recorded as unknown, never guessed.** Satellite counts,
-which constellations contributed, and whether the receiver was dual-frequency all bear on how
-much to trust a fix, and none is available through the location API without native work. The
-schema has room for them; the honest value today is absent. That is a better answer than a
-plausible one.
+**What the platform does not expose is not modelled at all, rather than modelled as unknown.**
+Satellite counts, which constellations contributed, and whether the receiver was dual-frequency
+all bear on how much to trust a fix, and none is available through the location API without
+native work. They are therefore not nullable columns waiting to be filled — they are absent,
+and arrive with a migration when a native module makes them real. A column that could only ever
+hold a guess is worse than no column, because a null in a provenance field reads as "measured
+and found to be nothing" rather than "never asked".
+
+That distinction is not pedantry: adding a column to SQLite later costs one line, while
+tightening a constraint later requires rebuilding the table. Absence is cheap to reverse;
+a wrong guess recorded as data is not.
+
+### 7.6 Settings
+
+A small key-value store, in the same database, holding what the user has chosen rather than
+what she has recorded. Distinct from the domain tables on purpose: these are preferences, not
+observations, and they never appear in an export.
+
+What it holds today: the theme override, handedness, which capture control takes the dominant
+side, and the form density. Each has a default, so an unset key is not an error and a fresh
+install behaves correctly before anything is written.
+
+The reason it exists at all is that an override which resets at every launch is not an
+override — and the field conditions these settings exist for do not change between launches.
 
 ---
 
@@ -417,6 +509,12 @@ SAVE`, so the screen only ever offers one live action.
 
 Placement follows the reach zone setting: a bottom band by default, and one box under each
 thumb in the bottom corners on a tablet in landscape.
+
+**Which control sits on which side is configurable** (§5.4). The default puts `SAVE NOW` on
+the dominant side because it is the more frequent action, but `SHARPEN` demands a sustained
+press and may deserve the stronger thumb — that is hers to decide after a day in the field,
+not a matter to settle in advance. Swapping them must not require changing handedness, since
+the two preferences are independent.
 
 ### 9.2 The traffic-light frame
 
