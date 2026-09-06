@@ -210,7 +210,37 @@ export type FieldRecord = {
   /** Which activity was running when it was captured, stamped automatically (spec §8.3). */
   contextActivityId: string | null
   kind: RecordKind
-  sequence: number
+  /**
+   * The number that is safe to write on a sample tube (spec §7.2).
+   *
+   * Assigned the moment the record is created, unique across the database, and
+   * never changed by filing, reordering or deletion. When she is only taking
+   * coordinates and notes it is simply an identity she can say out loud; when
+   * she is taking a physical sample it is the label, and a label that stops
+   * matching its record is worse than no label at all.
+   */
+  captureNumber: number
+  /**
+   * The ordinal within the activity — "Pin 023" in the survey she is running.
+   *
+   * Null exactly when the record is in no activity: the Inbox is a supported
+   * destination, not an error state, and a record in no activity has no
+   * position in one. Explicitly NOT stable: filing a record into the middle of
+   * an activity renumbers everything at and after that position. Anything that
+   * has to keep matching uses `captureNumber`.
+   */
+  sequence: number | null
+  /**
+   * When this record was filed into an activity after the fact, or null when it
+   * was captured straight into one (or is still unfiled).
+   *
+   * A column rather than a question asked of the event log, because the Inbox
+   * and activity lists show this per row and a hundred records must not cost a
+   * hundred queries. It is written in the same transaction as the filing and by
+   * nothing else, so it cannot drift; the `'filed'` event remains the source of
+   * truth for where and on which device the filing happened.
+   */
+  filedAt: string | null
   title: string | null
   description: string | null
   /**
@@ -228,7 +258,9 @@ type RecordRow = {
   activity_id: string | null
   context_activity_id: string | null
   kind: RecordKind
-  sequence: number
+  capture_number: number
+  sequence: number | null
+  filed_at: string | null
   title: string | null
   description: string | null
   latitude: number | null
@@ -321,7 +353,9 @@ function toRecord(row: RecordRow): FieldRecord {
     activityId: row.activity_id,
     contextActivityId: row.context_activity_id,
     kind: row.kind,
+    captureNumber: row.capture_number,
     sequence: row.sequence,
+    filedAt: row.filed_at,
     title: row.title,
     description: row.description,
     fix: toFix(row),
@@ -331,7 +365,8 @@ function toRecord(row: RecordRow): FieldRecord {
   }
 }
 
-const SELECT = `SELECT id, activity_id, context_activity_id, kind, sequence, title, description,
+const SELECT = `SELECT id, activity_id, context_activity_id, kind, capture_number, sequence,
+                       filed_at, title, description,
                        latitude, longitude, accuracy_m, altitude_m, datum,
                        fix_quality, fix_age_seconds, fix_sample_count, fix_spread_m, fix_hold_ms,
                        vertical_accuracy_m, is_mocked, location_provider,
@@ -340,16 +375,55 @@ const SELECT = `SELECT id, activity_id, context_activity_id, kind, sequence, tit
                 FROM record WHERE deleted_at IS NULL`
 
 /**
- * Sequence numbers restart with each activity (spec §7.2), so "Pin 023" means
- * something in the survey she is running. Unfiled records — the Inbox — number
- * in their own sequence.
+ * The next tube label: one more than the highest ever issued, across the whole
+ * database (spec §7.2).
+ *
+ * Queries the bare `record` table rather than the filtered `SELECT` constant,
+ * for the same reason `nextSequence` does and one more besides.
+ * `idx_record_capture_number` has no partial predicate, so a tombstone still
+ * holds its number and reusing it is a UNIQUE collision — but the stronger
+ * reason is that a capture number is a promise never to be reused. Two tubes
+ * labelled 41, one of which is in the bin, is exactly the confusion the number
+ * exists to prevent.
  */
-async function nextSequence(db: Database, activityId: string | null): Promise<number> {
+async function nextCaptureNumber(db: Database): Promise<number> {
   const row = await db.first<{ next: number }>(
-    'SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM record WHERE activity_id IS ?',
+    'SELECT COALESCE(MAX(capture_number), 0) + 1 AS next FROM record',
+  )
+  return row?.next ?? 1
+}
+
+/**
+ * The next ordinal in an activity (spec §7.2), so "Pin 023" means something in
+ * the survey she is running.
+ *
+ * `activityId` is a `string`, not `string | null`, and the predicate is `= ?`
+ * rather than the `IS ?` it used to be. That is the direct consequence of
+ * `sequence` now meaning the activity ordinal and nothing else: an unfiled
+ * record has no ordinal, so every unfiled row's `sequence` is NULL and
+ * `MAX(sequence) WHERE activity_id IS NULL` is NULL forever. Under the old
+ * `IS ?` this function would have gone on answering 1 for every Inbox capture —
+ * a number that is not wrong so much as meaningless, and one that
+ * `record_sequence_tracks_activity` now refuses to store anyway. Making the
+ * parameter non-nullable moves that from a runtime surprise to a compile error
+ * at the call site, which is where the decision "is this record going into an
+ * activity?" is actually made.
+ *
+ * Still queries the bare `record` table: `idx_record_sequence` has no partial
+ * predicate on `deleted_at`, so a tombstone keeps its number and handing it to
+ * a new record is a UNIQUE collision and a lost capture.
+ */
+async function nextSequence(db: Database, activityId: string): Promise<number> {
+  const row = await db.first<{ next: number }>(
+    'SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM record WHERE activity_id = ?',
     [activityId],
   )
   return row?.next ?? 1
+}
+
+/** The highest ordinal in an activity, or 0 when it holds no records at all. */
+async function maxSequence(db: Database, activityId: string): Promise<number> {
+  return (await nextSequence(db, activityId)) - 1
 }
 
 export async function createRecord(
@@ -374,21 +448,28 @@ export async function createRecord(
   const contextActivityId = input.contextActivityId ?? null
 
   await db.transaction(async () => {
-    const sequence = await nextSequence(db, input.activityId)
+    // The tube label is assigned always; the activity ordinal only when the
+    // record is being captured directly into an activity. A capture that lands
+    // in the Inbox gets its ordinal later, from fileRecord, and until then has
+    // none — record_sequence_tracks_activity insists on exactly that.
+    const captureNumber = await nextCaptureNumber(db)
+    const sequence = input.activityId === null ? null : await nextSequence(db, input.activityId)
     await db.execute(
-      `INSERT INTO record (id, activity_id, context_activity_id, kind, sequence, title,
+      `INSERT INTO record (id, activity_id, context_activity_id, kind,
+                           capture_number, sequence, title,
                            short_label, description,
                            latitude, longitude, accuracy_m, altitude_m, datum,
                            fix_quality, fix_age_seconds, fix_sample_count, fix_spread_m, fix_hold_ms,
                            vertical_accuracy_m, is_mocked, location_provider,
                            accuracy_convention, altitude_reference,
                            captured_at, gps_time, device_id, attributes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         input.activityId,
         contextActivityId,
         input.kind,
+        captureNumber,
         sequence,
         input.title ?? null,
         input.description ?? null,
@@ -470,6 +551,240 @@ export async function listUnfiledRecords(db: Database): Promise<FieldRecord[]> {
     `${SELECT} AND activity_id IS NULL ORDER BY captured_at DESC, id DESC`,
   )
   return rows.map(toRecord)
+}
+
+/** The row filing and reordering need, tombstones included. */
+type PlacementRow = {
+  activity_id: string | null
+  sequence: number | null
+  deleted_at: string | null
+}
+
+async function placementOf(db: Database, id: string, verb: string): Promise<PlacementRow> {
+  const row = await db.first<PlacementRow>(
+    'SELECT activity_id, sequence, deleted_at FROM record WHERE id = ?',
+    [id],
+  )
+  if (!row) throw new Error(`Record ${id} does not exist, so there is nothing to ${verb}.`)
+  if (row.deleted_at !== null) {
+    throw new Error(
+      `Record ${id} has been deleted, so it cannot be ${verb}d. Its tombstone keeps whatever ` +
+        'number it had, which is what stops a live record being handed a dead one’s ordinal.',
+    )
+  }
+  return row
+}
+
+/**
+ * Checks a requested 1-based position, and says what the range is when it is wrong.
+ *
+ * Positions are 1-based because they are the numbers she reads on screen —
+ * "put it in at 3" means the record becomes Pin 003 — so an off-by-one here is
+ * a wrong label in the field rather than an array index nobody sees.
+ */
+function checkPosition(position: number, highest: number, what: string): void {
+  if (!Number.isInteger(position) || position < 1 || position > highest) {
+    throw new Error(
+      `A position is a whole number from 1 to ${String(highest)} ${what}; got ${String(position)}.`,
+    )
+  }
+}
+
+/**
+ * Moves every record whose ordinal lies in `[from, to]` by `delta`, one row at
+ * a time, in the order that leaves each destination free at the moment it is
+ * written: highest first when shifting up, lowest first when shifting down.
+ *
+ * The order is the entire point of this function. The obvious statement —
+ * `UPDATE record SET sequence = sequence + 1 WHERE activity_id = ? AND sequence >= ?`
+ * — is wrong. SQLite checks `idx_record_sequence` as each row of an UPDATE is
+ * written, not at the end of the statement, and UPDATE takes no ORDER BY; the
+ * planner walks that predicate through the index in ascending order, so the row
+ * at 3 is rewritten to 4 while 4 is still occupied and the whole thing fails
+ * with `UNIQUE constraint failed: record.activity_id, record.sequence`. Walking
+ * the rows ourselves in the vacating direction makes every intermediate state
+ * legal under the same index the finished state has to satisfy.
+ *
+ * There is deliberately no `deleted_at IS NULL` filter. `idx_record_sequence`
+ * has no partial predicate, so a tombstone still holds its number; skipping
+ * tombstones would leave one sitting on an ordinal a live record is about to be
+ * given, and the collision would surface as a failed filing rather than as the
+ * schema bug it is.
+ */
+async function shiftRange(
+  db: Database,
+  activityId: string,
+  from: number,
+  to: number,
+  delta: 1 | -1,
+  at: string,
+): Promise<void> {
+  if (from > to) return
+  const rows = await db.all<{ id: string; sequence: number }>(
+    `SELECT id, sequence FROM record
+      WHERE activity_id = ? AND sequence BETWEEN ? AND ?
+      ORDER BY sequence ${delta === 1 ? 'DESC' : 'ASC'}`,
+    [activityId, from, to],
+  )
+  for (const row of rows) {
+    await db.execute('UPDATE record SET sequence = ?, updated_at = ? WHERE id = ?', [
+      row.sequence + delta,
+      at,
+      row.id,
+    ])
+  }
+}
+
+/**
+ * Files an unfiled record into an activity, appending it by default or
+ * inserting it at a chosen position.
+ *
+ * This is the second half of spec §10.2's Inbox: capturing without a context is
+ * a supported way to work, and this is how those records reach the survey they
+ * belong to. Inserting at a position renumbers every record at or after it —
+ * the activity ordinal is a position in a list, and a list you can insert into
+ * is a list whose later numbers move. The tube label (`captureNumber`) does not
+ * move, which is what makes that acceptable.
+ *
+ * All of it happens in one transaction. A half-renumbered activity is a
+ * corrupted one: it either violates the unique index or, worse, it does not,
+ * and two records quietly share a label.
+ *
+ * Refuses a record that is already in an activity, naming `moveRecord` instead.
+ * Filing and reordering share every line of their renumbering but not their
+ * meaning — one changes where a record lives, the other changes where it sits —
+ * and a single function that silently did whichever the record's current state
+ * implied would give a caller no way to say which one it meant.
+ *
+ * `fix` stamps the filing event with where it happened, the way creation and
+ * deletion are stamped (spec §8.5), and is optional for the same reason: bulk
+ * filing from the Inbox list has no single position to report.
+ */
+export async function fileRecord(
+  db: Database,
+  input: {
+    recordId: string
+    activityId: string
+    deviceId: string
+    /** 1-based. Omitted appends to the end of the activity. */
+    position?: number
+    fix?: Fix
+  },
+): Promise<FieldRecord> {
+  await db.transaction(async () => {
+    const existing = await placementOf(db, input.recordId, 'file')
+    if (existing.activity_id !== null) {
+      throw new Error(
+        `Record ${input.recordId} is already filed into activity ${existing.activity_id}. ` +
+          'Use moveRecord to change its position within that activity.',
+      )
+    }
+
+    const highest = await maxSequence(db, input.activityId)
+    // Appending is position `highest + 1`, which is why the bound here is one
+    // past the last existing record rather than the last existing record.
+    const position = input.position ?? highest + 1
+    checkPosition(position, highest + 1, `in activity ${input.activityId}`)
+
+    const at = nowIso()
+    await shiftRange(db, input.activityId, position, highest, 1, at)
+    await db.execute(
+      `UPDATE record SET activity_id = ?, sequence = ?, filed_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [input.activityId, position, at, at, input.recordId],
+    )
+    await appendEvent(db, {
+      recordId: input.recordId,
+      action: 'filed',
+      deviceId: input.deviceId,
+      fix: input.fix,
+      activityId: input.activityId,
+      detail: `sequence ${String(position)}`,
+    })
+  })
+
+  const record = await getRecord(db, input.recordId)
+  if (!record) throw new Error(`Record ${input.recordId} vanished immediately after being filed.`)
+  return record
+}
+
+/**
+ * Moves an already-filed record to a different position within its activity.
+ *
+ * The same renumbering as `fileRecord`'s insert path, with one extra step: the
+ * record being moved is already holding an ordinal inside the range that has to
+ * shift, so it is parked one past the end of the activity first. That slot is
+ * free by construction, and it is a real positive ordinal, so the row stays
+ * legal under `record_sequence_positive` and `record_sequence_tracks_activity`
+ * for the whole of the transaction rather than being smuggled through a state
+ * the schema forbids.
+ *
+ * Logged as `'edited'`, not `'filed'`. The record did not change where it
+ * lives; `'filed'` in this log means a record reached an activity, and writing
+ * it for a reorder would make the history say something that did not happen.
+ * `filed_at` is likewise left exactly as it was — reordering a record that was
+ * captured in place does not turn it into one that was filed later.
+ *
+ * Asking for the position it already has is a no-op, matching
+ * `softDeleteRecord`: the caller is asking for a state the record is already
+ * in, and the log is append-only, so a spurious entry could never be retracted.
+ */
+export async function moveRecord(
+  db: Database,
+  input: {
+    recordId: string
+    /** 1-based, within the record's current activity. */
+    position: number
+    deviceId: string
+    fix?: Fix
+  },
+): Promise<FieldRecord> {
+  await db.transaction(async () => {
+    const existing = await placementOf(db, input.recordId, 'move')
+    const activityId = existing.activity_id
+    const from = existing.sequence
+    if (activityId === null || from === null) {
+      throw new Error(
+        `Record ${input.recordId} is in the Inbox, so it has no position to move within. ` +
+          'Use fileRecord to put it into an activity.',
+      )
+    }
+
+    const highest = await maxSequence(db, activityId)
+    checkPosition(input.position, highest, `in activity ${activityId}`)
+    const to = input.position
+    if (to === from) return
+
+    const at = nowIso()
+    // One past the end: free by construction, since `highest` is the largest
+    // ordinal in the activity. This vacates `from` so the shift below has
+    // somewhere to land.
+    await db.execute('UPDATE record SET sequence = ?, updated_at = ? WHERE id = ?', [
+      highest + 1,
+      at,
+      input.recordId,
+    ])
+    if (to < from) await shiftRange(db, activityId, to, from - 1, 1, at)
+    else await shiftRange(db, activityId, from + 1, to, -1, at)
+    await db.execute('UPDATE record SET sequence = ?, updated_at = ? WHERE id = ?', [
+      to,
+      at,
+      input.recordId,
+    ])
+
+    await appendEvent(db, {
+      recordId: input.recordId,
+      action: 'edited',
+      deviceId: input.deviceId,
+      fix: input.fix,
+      activityId,
+      detail: `sequence ${String(from)} to ${String(to)}`,
+    })
+  })
+
+  const record = await getRecord(db, input.recordId)
+  if (!record) throw new Error(`Record ${input.recordId} vanished immediately after being moved.`)
+  return record
 }
 
 /**

@@ -271,7 +271,8 @@ to projects.
 ### 7.2 The record spine
 
 **A single `record` table with a `kind` discriminator.** It carries everything common and
-positional: activity, sequence number, title, optional short label, description, latitude,
+positional: activity, capture number, activity sequence, title, optional short label,
+description, latitude,
 longitude, accuracy, altitude, datum, fix quality class, capture timestamps, capture method,
 soft-delete flag and audit timestamps. Kind-specific fields — a sample's medium, depth,
 volume and tube ID; an observation's species and abundance — live in a JSON attributes
@@ -282,9 +283,34 @@ capture with title, description, photos and voice notes. `sample` and any later 
 added by defining a schema and a form, which is the point of the design. No kind other than
 `pin` is built in the first implementation.
 
-**Sequence numbers are per activity**, not per project — she sees "Pin 023" in the context
-of the survey she is running, and numbering that restarts with each activity is what makes
-that label meaningful in the field.
+**A record carries two numbers, because they answer two different questions.**
+
+**The capture number is the stable one.** It is assigned the moment anything is recorded, is
+unique across the whole database, and is never changed again — not by filing, not by
+reordering, not by deletion. This is the number that is safe to write in marker on a water or
+soil sample tube, because the label will still match the record months later. Some captures
+are only coordinates and notes; some are physical samples that have to be labelled, and the
+app cannot tell which at capture time, so every record gets one.
+
+**The activity sequence is the meaningful-in-context one, and it moves.** It is the ordinal
+within an activity — she sees "Pin 023" in the context of the survey she is running, and
+numbering that restarts with each activity is what makes that label meaningful in the field.
+It is **per activity, not per project**. A record that is not in an activity does not have
+one at all: the Inbox (§10.2) is a supported destination, and a record filed there has no
+position in a survey to be the 23rd of. The sequence is assigned when the record enters an
+activity, and it changes when records are inserted around it — filing into the middle of a
+survey renumbers everything at and after that position, and reordering within a survey is
+the same operation. That is why nothing durable may be keyed to it.
+
+**Filing is visible after the fact.** A record filed into an activity later carries the time
+it was filed, alongside the `filed` entry in the event log (§8.5) that records where and on
+which device it happened. A list can therefore show which of its records arrived by filing
+without asking the log a question per row.
+
+**Trade-off accepted.** Two numbers is more to explain than one, and a screen showing both
+would be confusing. The alternative was worse: one number cannot be both immutable enough to
+write on a tube and re-orderable enough to mean "the 23rd pin in this survey", and the single
+number the first draft specified made filing from the Inbox impossible without collisions.
 
 **Rationale.** Batching, exporting, media handling, map display and the capture screen then
 work for any kind of record. Adding a tool means defining a schema and a form, not new

@@ -22,6 +22,8 @@ export {
   getRecord,
   listRecords,
   listUnfiledRecords,
+  fileRecord,
+  moveRecord,
   softDeleteRecord,
   sampleEvidence,
 } from './repositories/records'

@@ -18,6 +18,18 @@ import type { Migration } from '../db/migrate'
  * Kind-specific fields live in `attributes` as JSON, validated per kind in
  * TypeScript (spec §7.2). Promote one to a real column the moment it must be
  * filtered on.
+ *
+ * A record carries TWO numbers, because they answer different questions
+ * (spec §7.2):
+ *
+ *  * `capture_number` — assigned the moment anything is recorded, unique across
+ *    the database, and never changed again. This is the number that is safe to
+ *    write in marker on a sample tube, because nothing will ever move it.
+ *  * `sequence` — the ordinal WITHIN an activity, which is what makes
+ *    "Pin 023" mean something in the survey she is running. A record that is
+ *    not in an activity does not have one, and filing a record into the middle
+ *    of an activity renumbers the records at and after that position, so this
+ *    number is explicitly not stable.
  */
 export const migration003: Migration = {
   id: '003-records',
@@ -35,8 +47,34 @@ export const migration003: Migration = {
 
        kind              TEXT NOT NULL
                          CONSTRAINT record_kind_known CHECK (kind IN ('pin')),
-       sequence          INTEGER NOT NULL
-                         CONSTRAINT record_sequence_positive CHECK (sequence > 0),
+
+       -- The number she can write on a tube. Assigned once, at capture, unique
+       -- across the whole database (idx_record_capture_number below), and never
+       -- touched again by filing, reordering or deletion — a label that stops
+       -- matching the thing it labels is worse than no label. NOT NULL because
+       -- every record has one from the instant it exists: there is no state in
+       -- which a capture has happened and this is still unknown.
+       capture_number    INTEGER NOT NULL
+                         CONSTRAINT record_capture_number_positive
+                         CHECK (capture_number > 0),
+
+       -- The ordinal within an activity, and nothing else. Nullable because the
+       -- Inbox is a supported destination (spec §10.2) and a record that is in
+       -- no activity has no position in one — NOT NULL here forced unfiled
+       -- records into their own run of numbers, which then collided with the
+       -- target activity's the moment anything was filed.
+       sequence          INTEGER
+                         CONSTRAINT record_sequence_positive
+                         CHECK (sequence IS NULL OR sequence > 0),
+
+       -- When this record was filed into an activity after the fact, rather
+       -- than captured straight into one. NULL means "captured in place" (or
+       -- still in the Inbox), so the Inbox screen can show at a glance which
+       -- records arrived by filing without asking the event log a question per
+       -- row. It is written in the same transaction as the filing, and by
+       -- nothing else; the 'filed' event remains the source of truth for where
+       -- and on which device the filing happened.
+       filed_at          TEXT,
 
        title             TEXT,
        short_label       TEXT,
@@ -217,12 +255,43 @@ export const migration003: Migration = {
        -- there was no question to ask.
        CONSTRAINT record_mocked_known_when_positioned CHECK (
          (latitude IS NULL AND is_mocked IS NULL) OR
-         (latitude IS NOT NULL AND is_mocked IS NOT NULL))
+         (latitude IS NOT NULL AND is_mocked IS NOT NULL)),
+
+       -- The sequence IS the position in an activity, so the two exist together
+       -- or neither does. Without this, an Inbox record could still carry a
+       -- number that means nothing (the bug this migration was rewritten to
+       -- remove), and a filed record could carry none at all — which
+       -- idx_record_sequence would happily accept, because SQLite treats NULLs
+       -- in a unique index as distinct and would let a whole activity's records
+       -- sit there unnumbered.
+       CONSTRAINT record_sequence_tracks_activity CHECK (
+         (activity_id IS NULL AND sequence IS NULL) OR
+         (activity_id IS NOT NULL AND sequence IS NOT NULL)),
+
+       -- A record cannot have been filed into nothing. Keeps the denormalised
+       -- flag from outliving the filing it records — the one way it could drift
+       -- from the event log that a same-transaction write does not already
+       -- close.
+       CONSTRAINT record_filed_at_needs_activity CHECK (
+         filed_at IS NULL OR activity_id IS NOT NULL)
      )`,
 
     // Spec §7.2: sequence numbers restart with each activity, so "Pin 023" means
     // something in the survey she is running.
+    //
+    // Deliberately not partial on deleted_at: a tombstone keeps its number, so a
+    // new or newly filed record cannot be handed a dead record's ordinal. That
+    // is also why the renumbering in repositories/records.ts has to shift
+    // tombstones along with everything else.
+    //
+    // Unfiled records are all (NULL, NULL) here. SQLite treats NULLs in a unique
+    // index as distinct, so the Inbox holds as many rows as it likes and this
+    // index constrains exactly what it is meant to: ordering inside an activity.
     `CREATE UNIQUE INDEX idx_record_sequence ON record(activity_id, sequence)`,
+    // The tube label. Unique across the database rather than per activity,
+    // because the record it names may move between activities and the number
+    // written on the tube may not move with it.
+    `CREATE UNIQUE INDEX idx_record_capture_number ON record(capture_number)`,
     `CREATE INDEX idx_record_activity ON record(activity_id, captured_at DESC)`,
     // Spec §10.2: records with no activity are the Inbox, a supported destination.
     // Deletion is soft everywhere (spec §6), so tombstones are not Inbox rows and

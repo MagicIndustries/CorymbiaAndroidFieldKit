@@ -18,8 +18,24 @@ const NOW = '2026-09-06T09:14:00+10:00'
  * file cannot pass while silently enforcing nothing.
  */
 const CHECK = (name: string): RegExp => new RegExp(`CHECK constraint failed: ${name}`)
-const UNIQUE = /UNIQUE constraint failed/
+// Named to the column list, not just /UNIQUE constraint failed/. The record
+// table now carries two unique indexes with different jobs — the activity
+// ordinal and the tube label — so a bare match would pass when the wrong one
+// fired, which is precisely the confusion between the two numbers this schema
+// exists to end.
+const UNIQUE_SEQUENCE = /UNIQUE constraint failed: record\.activity_id, record\.sequence/
+const UNIQUE_CAPTURE_NUMBER = /UNIQUE constraint failed: record\.capture_number/
+const NOT_NULL = (column: string): RegExp =>
+  new RegExp(`NOT NULL constraint failed: record\\.${column}`)
 const FOREIGN_KEY = /FOREIGN KEY constraint failed/
+
+/**
+ * Capture numbers are unique across the whole database, so a fixture that
+ * defaulted every row to the same one would collide on
+ * idx_record_capture_number and every test asserting some OTHER rule would
+ * start passing for the wrong reason. Reset per test by the outer beforeEach.
+ */
+let nextCaptureNumber = 1
 
 async function seedDevice(db: Database): Promise<void> {
   await db.execute(
@@ -47,7 +63,9 @@ async function insertRecord(db: Database, over: Record<string, unknown> = {}): P
     activity_id: 'a1',
     context_activity_id: null,
     kind: 'pin',
+    capture_number: nextCaptureNumber++,
     sequence: 1,
+    filed_at: null,
     title: null,
     short_label: null,
     description: null,
@@ -160,6 +178,7 @@ async function insertEvent(db: Database, over: Record<string, unknown> = {}): Pr
 describe('the record schema', () => {
   let db: Database
   beforeEach(async () => {
+    nextCaptureNumber = 1
     db = await openTestDatabase()
     await migrate(db)
     await seedDevice(db)
@@ -592,10 +611,13 @@ describe('the record schema', () => {
     // of the discriminant. This rule says it on its own, so a fourth quality
     // value added without a fourth clause cannot silently unconstrain position.
     it('refuses half a coordinate that no class clause would catch', async () => {
+      // No activity_id, so no sequence either: record_sequence_tracks_activity
+      // pairs those two, and supplying one without the other would report that
+      // rule instead of the pairing rule this test is about.
       const sql = `INSERT INTO record
-        (id, kind, sequence, latitude, longitude, fix_quality, captured_at, device_id,
+        (id, kind, capture_number, latitude, longitude, fix_quality, captured_at, device_id,
          created_at, updated_at)
-        VALUES (?, 'pin', 1, ?, NULL, 'none', ?, 'dev-1', ?, ?)`
+        VALUES (?, 'pin', 99, ?, NULL, 'none', ?, 'dev-1', ?, ?)`
       // 'none' would ordinarily refuse a latitude, so this proves the pairing
       // rule exists at all rather than that the class clause fired again.
       await expect(db.execute(sql, ['r17', -37.82141, NOW, NOW, NOW])).rejects.toThrow(
@@ -676,10 +698,93 @@ describe('the record schema', () => {
     )
   })
 
+  describe('the two numbers a record carries', () => {
+    // Spec §7.2. capture_number is the tube label: assigned once, unique across
+    // the database, never moved. sequence is the ordinal inside an activity,
+    // exists only inside one, and moves when records are inserted around it.
+
+    it('accepts an Inbox record: a capture number, and no ordinal at all', async () => {
+      await insertRecord(db, { id: 'rn1', activity_id: null, sequence: null })
+      const row = await db.first<{ capture_number: number; sequence: number | null }>(
+        'SELECT capture_number, sequence FROM record WHERE id = ?',
+        ['rn1'],
+      )
+      expect(row?.capture_number).toBe(1)
+      expect(row?.sequence).toBeNull()
+    })
+
+    it('refuses an unfiled record that nonetheless claims an ordinal', async () => {
+      // The number would be an ordinal within nothing, and it is exactly what
+      // used to collide with the target activity's numbering on filing.
+      await expect(insertRecord(db, { id: 'rn2', activity_id: null, sequence: 3 })).rejects.toThrow(
+        CHECK('record_sequence_tracks_activity'),
+      )
+    })
+
+    it('refuses a record in an activity with no ordinal', async () => {
+      // idx_record_sequence would accept any number of these — SQLite treats
+      // NULLs in a unique index as distinct — so the CHECK is the only thing
+      // stopping a whole survey sitting there unnumbered.
+      await expect(
+        insertRecord(db, { id: 'rn3', activity_id: 'a1', sequence: null }),
+      ).rejects.toThrow(CHECK('record_sequence_tracks_activity'))
+    })
+
+    it('refuses two records sharing a capture number, anywhere in the database', async () => {
+      // Two tubes labelled 41 is the failure the number exists to prevent, and
+      // the two rows here are in different activities on purpose: unlike the
+      // ordinal, this uniqueness is not scoped to one.
+      await insertRecord(db, { id: 'rn4', capture_number: 41 })
+      await db.execute(
+        'INSERT INTO activity (id, project_id, kind, name, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ['a3', 'p1', 'survey', 'Survey 5', NOW, NOW, NOW],
+      )
+      await expect(
+        insertRecord(db, { id: 'rn5', activity_id: 'a3', capture_number: 41 }),
+      ).rejects.toThrow(UNIQUE_CAPTURE_NUMBER)
+    })
+
+    it('refuses a record with no capture number — there is no such state', async () => {
+      await expect(insertRecord(db, { id: 'rn6', capture_number: null })).rejects.toThrow(
+        NOT_NULL('capture_number'),
+      )
+    })
+
+    it('refuses a non-positive capture number', async () => {
+      await expect(insertRecord(db, { id: 'rn7', capture_number: 0 })).rejects.toThrow(
+        CHECK('record_capture_number_positive'),
+      )
+    })
+
+    it('keeps a soft-deleted record holding both of its numbers', async () => {
+      // Neither index is partial on deleted_at, deliberately: a tombstone that
+      // released its ordinal would let a live record be handed a dead one's
+      // label, and the renumbering in the repository has to shift tombstones
+      // for the same reason.
+      await insertRecord(db, { id: 'rn8', sequence: 1, deleted_at: NOW })
+      await expect(insertRecord(db, { id: 'rn9', sequence: 1 })).rejects.toThrow(UNIQUE_SEQUENCE)
+    })
+
+    it('refuses a filing timestamp on a record that is in no activity', async () => {
+      await expect(
+        insertRecord(db, { id: 'rn10', activity_id: null, sequence: null, filed_at: NOW }),
+      ).rejects.toThrow(CHECK('record_filed_at_needs_activity'))
+    })
+
+    it('records that a filed record was filed, and when', async () => {
+      await insertRecord(db, { id: 'rn11', filed_at: NOW })
+      const row = await db.first<{ filed_at: string | null }>(
+        'SELECT filed_at FROM record WHERE id = ?',
+        ['rn11'],
+      )
+      expect(row?.filed_at).toBe(NOW)
+    })
+  })
+
   describe('activities, sequences and the Inbox', () => {
     it('keeps sequence numbers unique per activity, not per project', async () => {
       await insertRecord(db)
-      await expect(insertRecord(db, { id: 'r7', sequence: 1 })).rejects.toThrow(UNIQUE)
+      await expect(insertRecord(db, { id: 'r7', sequence: 1 })).rejects.toThrow(UNIQUE_SEQUENCE)
 
       await db.execute(
         'INSERT INTO activity (id, project_id, kind, name, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -708,7 +813,12 @@ describe('the record schema', () => {
     it('lets an unfiled record say which activity was running when it was captured', async () => {
       // Spec §8.3: context is captured always, filing is a deliberate decision.
       // The Inbox's one-tap suggestion is exactly this column.
-      await insertRecord(db, { id: 'r14', activity_id: null, context_activity_id: 'a1' })
+      await insertRecord(db, {
+        id: 'r14',
+        activity_id: null,
+        sequence: null,
+        context_activity_id: 'a1',
+      })
       const row = await db.first<{ activity_id: string | null; context_activity_id: string }>(
         'SELECT activity_id, context_activity_id FROM record WHERE id = ?',
         ['r14'],
@@ -723,8 +833,11 @@ describe('the record schema', () => {
       )
       expect(index?.sql).toMatch(/deleted_at IS NULL/)
 
-      await insertRecord(db, { id: 'r15', activity_id: null, sequence: 1 })
-      await insertRecord(db, { id: 'r16', activity_id: null, sequence: 2, deleted_at: NOW })
+      // Unfiled records carry no ordinal at all now — that is what
+      // record_sequence_tracks_activity says, and what stops the Inbox running
+      // a second set of numbers that collides on filing.
+      await insertRecord(db, { id: 'r15', activity_id: null, sequence: null })
+      await insertRecord(db, { id: 'r16', activity_id: null, sequence: null, deleted_at: NOW })
       const inbox = await db.all<{ id: string }>(
         'SELECT id FROM record WHERE activity_id IS NULL AND deleted_at IS NULL ORDER BY captured_at DESC',
       )

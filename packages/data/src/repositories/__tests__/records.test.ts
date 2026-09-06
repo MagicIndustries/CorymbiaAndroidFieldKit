@@ -7,9 +7,11 @@ import { registerDevice } from '../devices'
 import { listEvents } from '../events'
 import {
   createRecord,
+  fileRecord,
   getRecord,
   listRecords,
   listUnfiledRecords,
+  moveRecord,
   sampleEvidence,
   softDeleteRecord,
 } from '../records'
@@ -199,6 +201,63 @@ describe('records', () => {
       deviceId,
     })
     expect(record.fix).toEqual({ quality: 'none' })
+  })
+
+  it('gives a record captured into an activity both numbers', async () => {
+    // Spec §7.2: the tube label and the ordinal in the survey. Captured
+    // directly into an activity, so nothing was filed after the fact.
+    const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    expect(record.captureNumber).toBe(1)
+    expect(record.sequence).toBe(1)
+    expect(record.filedAt).toBeNull()
+  })
+
+  it('gives an Inbox capture a tube label and no ordinal', async () => {
+    // She is standing at the site with a sample tube and no project chosen.
+    // The label has to exist now; the ordinal cannot, because there is no
+    // activity for it to be an ordinal in.
+    const record = await createRecord(db, { activityId: null, kind: 'pin', fix: AMBIENT, deviceId })
+    expect(record.captureNumber).toBe(1)
+    expect(record.sequence).toBeNull()
+    expect(record.filedAt).toBeNull()
+  })
+
+  it('numbers captures across the whole database, activity or Inbox alike', async () => {
+    // The ordinal restarts per activity; the label never restarts at all. A
+    // capture number scoped per activity would put two tubes labelled 1 in the
+    // same bag.
+    const first = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    const inbox = await createRecord(db, {
+      activityId: null,
+      kind: 'pin',
+      fix: AMBIENT,
+      deviceId,
+    })
+    const project = await createProject(db, { name: 'Other' })
+    const other = await createActivity(db, {
+      projectId: project.id,
+      kind: 'survey',
+      name: 'Survey 1',
+    })
+    const elsewhere = await createRecord(db, {
+      activityId: other.id,
+      kind: 'pin',
+      fix: DELIBERATE,
+      deviceId,
+    })
+
+    expect([first.captureNumber, inbox.captureNumber, elsewhere.captureNumber]).toEqual([1, 2, 3])
+    expect([first.sequence, inbox.sequence, elsewhere.sequence]).toEqual([1, null, 1])
+  })
+
+  it('does not reuse a soft-deleted record’s capture number', async () => {
+    // A tube in the bin still has 1 written on it. Reissuing that number is
+    // also a UNIQUE collision, because idx_record_capture_number is not partial
+    // on deleted_at — but the label is the reason the index is shaped that way.
+    const first = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    await softDeleteRecord(db, first.id, deviceId)
+    const second = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    expect(second.captureNumber).toBe(2)
   })
 
   it('numbers records per activity, starting at 1', async () => {
@@ -448,17 +507,25 @@ describe('records', () => {
     expect(await listEvents(db, 'rec_missing')).toEqual([])
   })
 
-  it('gives two simultaneous Inbox captures distinct sequence numbers', async () => {
+  it('gives two simultaneous Inbox captures distinct capture numbers', async () => {
     // Two rapid taps, each firing an un-awaited promise. Without serialisation
     // the second BEGIN throws and the first COMMIT commits the second's partial
-    // work — and the Inbox cannot fall back on the UNIQUE index to notice,
-    // because SQLite treats NULL activity_ids as distinct.
+    // work.
+    //
+    // The capture number is what this now measures, and it is the sharper test
+    // of the two it could have made. An Inbox record has no activity ordinal at
+    // all any more, so there is nothing there to collide; the capture number is
+    // the read-then-write (`MAX(capture_number) + 1`, then INSERT) that two
+    // interleaved transactions would both resolve to 1. The UNIQUE index would
+    // catch that pair — which is exactly why the assertion is worth making
+    // through the repository, where a caller would see a lost capture.
     const [first, second] = await Promise.all([
       createRecord(db, { activityId: null, kind: 'pin', fix: AMBIENT, deviceId }),
       createRecord(db, { activityId: null, kind: 'pin', fix: INSTANT, deviceId }),
     ])
 
-    expect([first.sequence, second.sequence].sort((a, b) => a - b)).toEqual([1, 2])
+    expect([first.captureNumber, second.captureNumber].sort((a, b) => a - b)).toEqual([1, 2])
+    expect([first.sequence, second.sequence]).toEqual([null, null])
     expect((await listUnfiledRecords(db)).map((r) => r.id).sort()).toEqual(
       [first.id, second.id].sort(),
     )
@@ -487,6 +554,330 @@ describe('records', () => {
         attributes: { species: 'Eucalyptus' },
       }),
     ).rejects.toThrow(/species/)
+  })
+})
+
+/**
+ * Filing (spec §10.2) and reordering — the two halves of the same renumbering.
+ *
+ * Every assertion about ordering reads the raw `record` table rather than
+ * `listRecords`, because tombstones are load-bearing here: `idx_record_sequence`
+ * has no `deleted_at` predicate, so a soft-deleted record still holds its
+ * ordinal and must shift along with the live ones. A test that could not see
+ * tombstones could not tell a correct renumbering from one that left a dead
+ * record sitting on a number a live record was about to be given.
+ */
+describe('filing and reordering', () => {
+  let db: Database
+  let activityId: string
+  let otherActivityId: string
+  let deviceId: string
+
+  /** Every record in an activity, tombstones included, in ordinal order. */
+  const placements = async (id: string): Promise<{ id: string; sequence: number }[]> =>
+    db.all<{ id: string; sequence: number }>(
+      'SELECT id, sequence FROM record WHERE activity_id = ? ORDER BY sequence ASC',
+      [id],
+    )
+
+  const captureNumbers = async (): Promise<Record<string, number>> => {
+    const rows = await db.all<{ id: string; capture_number: number }>(
+      'SELECT id, capture_number FROM record',
+    )
+    return Object.fromEntries(rows.map((row) => [row.id, row.capture_number]))
+  }
+
+  beforeEach(async () => {
+    db = await openTestDatabase()
+    await migrate(db)
+    deviceId = (
+      await registerDevice(db, {
+        installId: 'install-abc',
+        label: 'field-s24',
+        manufacturer: 'samsung',
+        brand: 'samsung',
+        modelName: 'Galaxy S24',
+        modelId: 'SM-S938B',
+        deviceType: 'phone',
+        osName: 'Android',
+        osVersion: '16',
+        isPhysical: true,
+        appVersion: '1.0.0',
+        appBuild: '1',
+      })
+    ).id
+    const project = await createProject(db, { name: 'Yarra Flats' })
+    activityId = (
+      await createActivity(db, { projectId: project.id, kind: 'survey', name: 'Survey 3' })
+    ).id
+    otherActivityId = (
+      await createActivity(db, { projectId: project.id, kind: 'survey', name: 'Survey 4' })
+    ).id
+  })
+  afterEach(async () => {
+    await db.close()
+  })
+
+  const capture = async (): Promise<string> =>
+    (await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })).id
+  const inboxCapture = async (): Promise<string> =>
+    (await createRecord(db, { activityId: null, kind: 'pin', fix: AMBIENT, deviceId })).id
+
+  it('appends to the end of an activity when no position is asked for', async () => {
+    const first = await capture()
+    const second = await capture()
+    const unfiled = await inboxCapture()
+
+    const filed = await fileRecord(db, { recordId: unfiled, activityId, deviceId })
+
+    expect(filed.sequence).toBe(3)
+    expect(await placements(activityId)).toEqual([
+      { id: first, sequence: 1 },
+      { id: second, sequence: 2 },
+      { id: unfiled, sequence: 3 },
+    ])
+  })
+
+  it('files into an empty activity as number 1', async () => {
+    const unfiled = await inboxCapture()
+    const filed = await fileRecord(db, { recordId: unfiled, activityId: otherActivityId, deviceId })
+    expect(filed.sequence).toBe(1)
+    expect(await placements(otherActivityId)).toEqual([{ id: unfiled, sequence: 1 }])
+  })
+
+  it('inserts into the middle, shifting live and soft-deleted records alike', async () => {
+    // THE test for the renumbering. Four records already in the survey, the
+    // second of them soft-deleted, and a fifth pushed in at position 2.
+    //
+    // The tombstone is the part that catches a wrong implementation twice
+    // over: it still holds ordinal 2, so a renumbering that filters tombstones
+    // leaves it there and the new record collides with a dead row; and it sits
+    // in the middle of the range, so the shift cannot be done as a single
+    // `UPDATE ... SET sequence = sequence + 1 WHERE sequence >= 2` — SQLite
+    // checks idx_record_sequence per row as that statement proceeds, walks the
+    // rows in ascending order through that very index, and fails with
+    // `UNIQUE constraint failed: record.activity_id, record.sequence` before it
+    // reaches the end.
+    const one = await capture()
+    const two = await capture()
+    const three = await capture()
+    const four = await capture()
+    await softDeleteRecord(db, two, deviceId)
+    const unfiled = await inboxCapture()
+    const before = await captureNumbers()
+
+    const filed = await fileRecord(db, { recordId: unfiled, activityId, deviceId, position: 2 })
+
+    expect(filed.sequence).toBe(2)
+    expect(await placements(activityId)).toEqual([
+      { id: one, sequence: 1 },
+      { id: unfiled, sequence: 2 },
+      { id: two, sequence: 3 },
+      { id: three, sequence: 4 },
+      { id: four, sequence: 5 },
+    ])
+    // The whole justification for letting ordinals move: the number written on
+    // the tube did not.
+    expect(await captureNumbers()).toEqual(before)
+  })
+
+  it('inserts at the front, so the first record becomes the second', async () => {
+    const one = await capture()
+    const two = await capture()
+    const unfiled = await inboxCapture()
+
+    await fileRecord(db, { recordId: unfiled, activityId, deviceId, position: 1 })
+
+    expect(await placements(activityId)).toEqual([
+      { id: unfiled, sequence: 1 },
+      { id: one, sequence: 2 },
+      { id: two, sequence: 3 },
+    ])
+  })
+
+  it('records the filing in the log, and on the row, in one transaction', async () => {
+    const unfiled = await inboxCapture()
+    const filed = await fileRecord(db, { recordId: unfiled, activityId, deviceId, fix: AMBIENT })
+
+    // The column is the list screen's answer to "was this filed later?" — a
+    // hundred records must not cost a hundred queries. The event is the source
+    // of truth for where and on which device it happened.
+    expect(filed.filedAt).not.toBeNull()
+    const events = await listEvents(db, unfiled)
+    expect(events.map((e) => e.action)).toEqual(['created', 'filed'])
+    const filing = events[1]
+    expect(filing?.activityId).toBe(activityId)
+    expect(filing?.detail).toBe('sequence 1')
+    expect(filing?.fixQuality).toBe('ambient')
+  })
+
+  it('leaves a record captured in place unmarked, so filing is visible after the fact', async () => {
+    // Without a contrast this assertion is vacuous: a column that is always
+    // null passes "filed_at is null for a capture" perfectly well.
+    const inPlace = await capture()
+    const unfiled = await inboxCapture()
+    await fileRecord(db, { recordId: unfiled, activityId, deviceId })
+
+    expect((await getRecord(db, inPlace))?.filedAt).toBeNull()
+    expect((await getRecord(db, unfiled))?.filedAt).not.toBeNull()
+  })
+
+  it('refuses to file a record that is already in an activity', async () => {
+    const record = await capture()
+    await expect(
+      fileRecord(db, { recordId: record, activityId: otherActivityId, deviceId }),
+    ).rejects.toThrow(/already filed into activity/)
+  })
+
+  it('refuses to file a record that does not exist, or one that has been deleted', async () => {
+    await expect(fileRecord(db, { recordId: 'rec_missing', activityId, deviceId })).rejects.toThrow(
+      /rec_missing does not exist/,
+    )
+    const unfiled = await inboxCapture()
+    await softDeleteRecord(db, unfiled, deviceId)
+    await expect(fileRecord(db, { recordId: unfiled, activityId, deviceId })).rejects.toThrow(
+      /has been deleted/,
+    )
+  })
+
+  it('refuses a position past the end of the activity, and leaves nothing half-done', async () => {
+    const one = await capture()
+    const unfiled = await inboxCapture()
+
+    // One record in the activity, so 1 and 2 are legal and 3 is not.
+    await expect(
+      fileRecord(db, { recordId: unfiled, activityId, deviceId, position: 3 }),
+    ).rejects.toThrow(/whole number from 1 to 2/)
+    await expect(
+      fileRecord(db, { recordId: unfiled, activityId, deviceId, position: 0 }),
+    ).rejects.toThrow(/whole number from 1 to 2/)
+
+    expect(await placements(activityId)).toEqual([{ id: one, sequence: 1 }])
+    expect((await getRecord(db, unfiled))?.activityId).toBeNull()
+    expect((await listEvents(db, unfiled)).map((e) => e.action)).toEqual(['created'])
+  })
+
+  it('moves a record up, shifting the records it displaces down', async () => {
+    const one = await capture()
+    const two = await capture()
+    const three = await capture()
+    const four = await capture()
+    const before = await captureNumbers()
+
+    const moved = await moveRecord(db, { recordId: four, position: 2, deviceId })
+
+    expect(moved.sequence).toBe(2)
+    expect(await placements(activityId)).toEqual([
+      { id: one, sequence: 1 },
+      { id: four, sequence: 2 },
+      { id: two, sequence: 3 },
+      { id: three, sequence: 4 },
+    ])
+    expect(await captureNumbers()).toEqual(before)
+  })
+
+  it('moves a record down, shifting the records it passes up', async () => {
+    const one = await capture()
+    const two = await capture()
+    const three = await capture()
+    const four = await capture()
+
+    await moveRecord(db, { recordId: one, position: 3, deviceId })
+
+    expect(await placements(activityId)).toEqual([
+      { id: two, sequence: 1 },
+      { id: three, sequence: 2 },
+      { id: one, sequence: 3 },
+      { id: four, sequence: 4 },
+    ])
+  })
+
+  it('moves a record past a soft-deleted one, which shifts like any other', async () => {
+    const one = await capture()
+    const two = await capture()
+    const three = await capture()
+    await softDeleteRecord(db, two, deviceId)
+
+    await moveRecord(db, { recordId: three, position: 1, deviceId })
+
+    expect(await placements(activityId)).toEqual([
+      { id: three, sequence: 1 },
+      { id: one, sequence: 2 },
+      { id: two, sequence: 3 },
+    ])
+  })
+
+  it('logs a reorder as an edit, not as a filing, and does not backdate filed_at', async () => {
+    // 'filed' in this log means a record reached an activity. A record that was
+    // already there and merely changed places did not, and a history that said
+    // otherwise would be wrong about the one thing it exists to record.
+    const one = await capture()
+    const two = await capture()
+
+    await moveRecord(db, { recordId: two, position: 1, deviceId })
+
+    const events = await listEvents(db, two)
+    expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+    expect(events[1]?.detail).toBe('sequence 2 to 1')
+    expect(events[1]?.activityId).toBe(activityId)
+    expect((await getRecord(db, two))?.filedAt).toBeNull()
+    expect((await getRecord(db, one))?.filedAt).toBeNull()
+  })
+
+  it('treats a move to the position it already holds as a no-op', async () => {
+    await capture()
+    const two = await capture()
+
+    const moved = await moveRecord(db, { recordId: two, position: 2, deviceId })
+
+    expect(moved.sequence).toBe(2)
+    // The log is append-only, so an entry saying it moved from 2 to 2 could
+    // never have been taken back.
+    expect((await listEvents(db, two)).map((e) => e.action)).toEqual(['created'])
+  })
+
+  it('refuses to move a record that is in the Inbox', async () => {
+    const unfiled = await inboxCapture()
+    await expect(moveRecord(db, { recordId: unfiled, position: 1, deviceId })).rejects.toThrow(
+      /is in the Inbox/,
+    )
+  })
+
+  it('refuses a move position outside the activity', async () => {
+    await capture()
+    const two = await capture()
+    await expect(moveRecord(db, { recordId: two, position: 3, deviceId })).rejects.toThrow(
+      /whole number from 1 to 2/,
+    )
+    await expect(moveRecord(db, { recordId: two, position: 1.5, deviceId })).rejects.toThrow(
+      /whole number from 1 to 2/,
+    )
+  })
+
+  it('keeps every capture number fixed across a filing and two reorders', async () => {
+    // The end-to-end version of the promise the tube label makes. Ordinals move
+    // three times; the labels are compared before and after the lot.
+    const one = await capture()
+    const two = await capture()
+    const unfiled = await inboxCapture()
+    const before = await captureNumbers()
+
+    // [unfiled, one, two] → [one, unfiled, two] → [one, two, unfiled]
+    await fileRecord(db, { recordId: unfiled, activityId, deviceId, position: 1 })
+    await moveRecord(db, { recordId: one, position: 1, deviceId })
+    await moveRecord(db, { recordId: two, position: 2, deviceId })
+
+    expect(await captureNumbers()).toEqual(before)
+    expect(await placements(activityId)).toEqual([
+      { id: one, sequence: 1 },
+      { id: two, sequence: 2 },
+      { id: unfiled, sequence: 3 },
+    ])
+    // The record captured second ended up second again, but by a different
+    // route, and the one captured last is now last — the ordinals genuinely
+    // moved, or the capture-number assertion above is about numbers nothing
+    // ever disturbed.
+    expect(before[unfiled]).toBe(3)
   })
 })
 
