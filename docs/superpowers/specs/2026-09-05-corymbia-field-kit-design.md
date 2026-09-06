@@ -303,7 +303,16 @@ Store **GPS time alongside device time**. Field tablets drift; a satellite fix c
 authoritative clock. Storing both costs nothing and rescues a dataset when the tablet clock
 is wrong.
 
-Record the **datum explicitly** — GDA2020 versus WGS84 matters in Victoria.
+Record the **datum explicitly**, and record the one actually measured. Android's location
+API returns **WGS84**, and the application performs no datum transformation, so WGS84 is what
+every device-derived position is stored as. Stamping a position with a datum it was not
+measured in is a lie of roughly 1.8 m — larger than the uncertainty of a good fix, in the very
+field whose purpose is honesty about uncertainty.
+
+**GDA2020 is not a valid destination datum**, contrary to an earlier draft of this section.
+The Victorian Biodiversity Atlas accepts exactly three — GDA94, AGD66 and WGS84 — so the
+stored vocabulary matches the destination's, and export becomes a lookup rather than a
+conversion. See `docs/research/2026-09-06-victorian-biodiversity-destinations.md` §5.3.
 
 ---
 
@@ -517,26 +526,50 @@ Out via the Android share sheet, and to a user-chosen folder through the system 
 Records from one or more days are grouped into a named batch, bound to a project, with a
 destination chosen and export status tracked.
 
-### 12.4 Destination research spike — first task of implementation
+### 12.4 Destinations — resolved
 
-The user currently uploads to **MapShareVic** and **DEECA NatureKit**, and records
-ultimately belong in Victorian biodiversity datasets.
+The spike is complete. Findings, with sources, are in
+`docs/research/2026-09-06-victorian-biodiversity-destinations.md`.
 
-**What is believed but not verified:** that MapShareVic and NatureKit are primarily map
-*viewers* rather than submission endpoints; that the Victorian Biodiversity Atlas is the
-actual ingestion system for species records; and that bulk submission there is a spreadsheet
-template upload rather than a public API.
+**Only one of the three systems ingests anything.**
 
-**The spike must establish:** what each of the three systems actually accepts, whether any
-public API exists, and the exact shape of any bulk import template. Written up in the repo.
+| System | What it accepts |
+| --- | --- |
+| MapShareVic | Nothing. No writable service exists, and it carries no biodiversity layers. |
+| DEECA NatureKit | Nothing. An anonymous viewer over a weekly VBA snapshot; its shapefile upload is a browser-session overlay only. |
+| Victorian Biodiversity Atlas | The sole ingestion point. A DEECA-approved account, then either the web form or a macro-enabled `.xlsm` batch template obtained by emailing `vba.help@deeca.vic.gov.au`. |
 
-Until it lands, the generic profiles above are built — they are useful regardless — and any
-destination-specific profile slots in behind the same interface afterwards.
+**There is no public submission API**, and DEECA's own mobile tool, VBA Go, has been offline
+since December 2023. A correctly-shaped file the user uploads is therefore not a fallback —
+it is the mechanism.
 
-**A browser extension is ruled out as the core mechanism.** Chrome on Android does not
-support extensions at all, so any extension would force the submission step onto a desktop.
-The highest-value thing the application can do is produce a file that is already in the
-right shape.
+**Two findings change the design.**
+
+*The VBA already models this application's central distinction.* It carries a mandatory
+`Positional accuracy (metres)` field and an explicit `GPS used (y, n)` flag. Deliberate fixes
+export as `y` with their measured accuracy; ambient ones export as `n`. The application must
+never emit `y` beside an optimistic accuracy.
+
+*And the distinction has consequences beyond this application.* DEECA splits its public
+extracts by spatial accuracy, and the flagship layers — the ones feeding habitat models and
+native-vegetation regulation — are explicitly "for sites with high spatial accuracy". An
+opportunistic fix passing as survey-grade does not merely weaken one record; it can drop that
+record out of the datasets that get used, or contaminate them. This is the evidence behind
+§8.2 being treated as load-bearing rather than fastidious.
+
+**Export targets, in the order they earn their place:** a VBA batch-template-shaped export;
+the generic CSV bundle, GPX and KMZ for everything else. The VBA template's exact column set,
+code lists and validation rules are transcribed in the research document.
+
+**A browser extension remains ruled out.** Chrome on Android supports no extensions, and with
+no API to drive there is nothing for one to automate that a correctly-shaped file does not
+already solve.
+
+**Still unresolved, and requiring DEECA rather than more reading:** whether southern-hemisphere
+latitude is entered unsigned in the template's decimal-degree form (its validation range and
+sample row suggest so), and the exact requiredness of the `GPS used` flag. Both are listed in
+the research document with what would settle them. Neither blocks building the generic
+profiles.
 
 ---
 

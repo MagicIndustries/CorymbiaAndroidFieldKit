@@ -20,7 +20,7 @@
 - **TypeScript `~6.0.3`, strict, with `noUncheckedIndexedAccess`.** No `any`.
 - **`expo run:android` never exits** — it keeps Metro alive by design. To confirm an install landed: `adb shell dumpsys package eco.corymbia.fieldkit | grep lastUpdateTime`.
 - **`app.json` changes only reach a build via `npx expo prebuild --platform android`.** Permissions are `app.json` config; skipping prebuild means the permission is not in the manifest and the request fails silently at runtime.
-- **Datum is recorded explicitly** on every stored position: `GDA2020` or `WGS84`. GDA2020 versus WGS84 matters in Victoria.
+- **Datum is recorded explicitly, and only ever the one actually measured.** Android returns **WGS84** and the app performs no transformation, so WGS84 is what every device-derived position stores. The permitted vocabulary is `WGS84 | GDA94 | AGD66` — the three the Victorian Biodiversity Atlas accepts, so export is a lookup rather than a conversion. **GDA2020 is not accepted by the VBA** and must not appear. See `docs/research/2026-09-06-victorian-biodiversity-destinations.md` §5.3.
 - **Store the fix summary, not every reading**: sample count, spread and hold duration on the record. Not one row per GPS sample.
 - **Store GPS time alongside device time.** Field tablets drift; a satellite fix carries an authoritative clock.
 - **Sequence numbers are per activity**, restarting with each one.
@@ -436,7 +436,7 @@ export const migration001: Migration = {
        name        TEXT NOT NULL CHECK (length(trim(name)) > 0),
        latitude    REAL,
        longitude   REAL,
-       datum       TEXT CHECK (datum IN ('GDA2020', 'WGS84')),
+       datum       TEXT CHECK (datum IN ('WGS84', 'GDA94', 'AGD66')),
        created_at  TEXT NOT NULL,
        updated_at  TEXT NOT NULL,
        deleted_at  TEXT
@@ -618,7 +618,7 @@ async function insertRecord(db: Database, over: Record<string, unknown> = {}): P
     longitude: 145.03318,
     accuracy_m: 4,
     altitude_m: 62,
-    datum: 'GDA2020',
+    datum: 'WGS84',
     fix_quality: 'deliberate',
     fix_age_seconds: null,
     fix_sample_count: 7,
@@ -706,8 +706,11 @@ describe('the record schema', () => {
     ).rejects.toThrow()
   })
 
-  it('refuses a datum it does not recognise — GDA2020 vs WGS84 matters in Victoria', async () => {
-    await expect(insertRecord(db, { id: 'r6', datum: 'AGD66' })).rejects.toThrow()
+  it('refuses a datum the destination does not accept', async () => {
+    // The VBA takes exactly WGS84, GDA94 and AGD66. GDA2020 is not one of them,
+    // and the app never produces it — Android returns WGS84 and nothing here
+    // transforms it. See docs/research/2026-09-06-victorian-biodiversity-destinations.md §5.3.
+    await expect(insertRecord(db, { id: 'r6', datum: 'GDA2020' })).rejects.toThrow()
   })
 
   it('keeps sequence numbers unique per activity, not per project', async () => {
@@ -787,7 +790,7 @@ export const migration002: Migration = {
        longitude         REAL,
        accuracy_m        REAL,
        altitude_m        REAL,
-       datum             TEXT CHECK (datum IS NULL OR datum IN ('GDA2020', 'WGS84')),
+       datum             TEXT CHECK (datum IS NULL OR datum IN ('WGS84', 'GDA94', 'AGD66')),
 
        fix_quality       TEXT NOT NULL CHECK (fix_quality IN ('deliberate', 'ambient', 'none')),
        fix_age_seconds   INTEGER,
@@ -1495,7 +1498,7 @@ git commit -m "feat(data): add project and activity repositories with spec-defau
 **Interfaces:**
 - Consumes: `Database`, `newId`, `nowIso`, `serialiseAttributes`, `RecordKind`.
 - Produces:
-  - `type Fix = { quality: 'deliberate'; latitude: number; longitude: number; accuracyM: number; altitudeM: number | null; datum: 'GDA2020' | 'WGS84'; sampleCount: number; spreadM: number; holdMs: number } | { quality: 'ambient'; latitude: number; longitude: number; accuracyM: number; altitudeM: number | null; datum: 'GDA2020' | 'WGS84'; ageSeconds: number } | { quality: 'none' }`
+  - `type Fix = { quality: 'deliberate'; latitude: number; longitude: number; accuracyM: number; altitudeM: number | null; datum: Datum; sampleCount: number; spreadM: number; holdMs: number } | { quality: 'ambient'; latitude: number; longitude: number; accuracyM: number; altitudeM: number | null; datum: Datum; ageSeconds: number } | { quality: 'none' }`
   - `type FieldRecord = { id: string; activityId: string | null; kind: RecordKind; sequence: number; title: string | null; description: string | null; fix: Fix; capturedAt: string; gpsTime: string | null; deviceId: string; attributes: Record<string, unknown> }`
   - `createRecord(db, input: { activityId: string | null; kind: RecordKind; fix: Fix; deviceId: string; title?: string; description?: string; gpsTime?: string; attributes?: unknown }): Promise<FieldRecord>`
   - `listRecords(db, activityId: string): Promise<FieldRecord[]>`
@@ -1527,7 +1530,7 @@ const DELIBERATE: Fix = {
   longitude: 145.03318,
   accuracyM: 4,
   altitudeM: 62,
-  datum: 'GDA2020',
+  datum: 'WGS84',
   sampleCount: 7,
   spreadM: 1.2,
   holdMs: 4200,
@@ -1539,7 +1542,7 @@ const AMBIENT: Fix = {
   longitude: 145.03402,
   accuracyM: 38,
   altitudeM: null,
-  datum: 'GDA2020',
+  datum: 'WGS84',
   ageSeconds: 240,
 }
 
@@ -1729,7 +1732,7 @@ describe('the event log', () => {
         longitude: 145.0,
         accuracyM: 38,
         altitudeM: null,
-        datum: 'GDA2020',
+        datum: 'WGS84',
         ageSeconds: 240,
       },
     })
@@ -1876,7 +1879,13 @@ import { serialiseAttributes, type RecordKind } from '../kinds'
 import { nowIso } from '../time'
 import { appendEvent } from './events'
 
-export type Datum = 'GDA2020' | 'WGS84'
+/**
+ * The three datums the Victorian Biodiversity Atlas accepts. GDA2020 is not one
+ * of them, and the app never produces it: Android returns WGS84 and no
+ * transformation is performed, so WGS84 is what device-derived positions store.
+ * GDA94 and AGD66 exist for coordinates typed in from another source.
+ */
+export type Datum = 'WGS84' | 'GDA94' | 'AGD66'
 
 /**
  * The three fix classes of spec §8.2, as a discriminated union so an
