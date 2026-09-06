@@ -1,4 +1,5 @@
 import { isUsableAccuracy } from './accuracy'
+import { mockedVerdict, type MockedVerdict } from './mocked'
 import type { Reading } from './classify'
 import type { LocationSource } from './location/port'
 
@@ -7,6 +8,21 @@ export type AmbientFix = {
   longitude: number
   accuracyM: number
   altitudeM: number | null
+  /**
+   * The cached reading's own vertical accuracy, where it reported one and
+   * reported a height for it to describe. The same pairing rule
+   * `averageReadings` applies: a vertical uncertainty with no altitude is
+   * metadata about nothing.
+   */
+  verticalAccuracyM: number | null
+  /**
+   * What the cached reading said about spoofing — its own answer, not the
+   * live one. The cache deliberately holds a reading that may be minutes old
+   * and is not necessarily the most recent thing the receiver produced, so a
+   * caller reading the current mocked flag off the screen and stamping it onto
+   * this fix would be describing a different reading entirely.
+   */
+  isMocked: MockedVerdict
   ageSeconds: number
 }
 
@@ -39,6 +55,14 @@ export function createAmbientCache(
     longitude: reading.longitude,
     accuracyM: reading.accuracyM,
     altitudeM: reading.altitudeM,
+    verticalAccuracyM:
+      reading.altitudeM !== null &&
+      reading.verticalAccuracyM !== null &&
+      reading.verticalAccuracyM !== undefined &&
+      isUsableAccuracy(reading.verticalAccuracyM)
+        ? reading.verticalAccuracyM
+        : null,
+    isMocked: mockedVerdict([reading]),
     // Clamped to zero deliberately, not merely for tidiness: a negative age
     // means the reading's timestamp is in the future relative to `now()` — a
     // device clock change, an NTP correction, or a bad platform timestamp —

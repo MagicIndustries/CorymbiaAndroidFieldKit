@@ -27,7 +27,38 @@ describe('the ambient position cache', () => {
       longitude: 145.03318,
       accuracyM: 38,
       altitudeM: 62,
+      verticalAccuracyM: null,
+      isMocked: 'notReported',
       ageSeconds: 240,
+    })
+  })
+
+  describe('the cached reading answers for itself, not for the live one', () => {
+    it('carries the cached reading’s vertical accuracy, where it reported one', () => {
+      const now = 1_000_000
+      const cache = createAmbientCache(createFakeLocationSource({}), () => now)
+      cache.record(reading({ altitudeM: 62, verticalAccuracyM: 3 }))
+      expect(cache.read()?.verticalAccuracyM).toBe(3)
+    })
+
+    it('reports no vertical accuracy for a reading with no height to describe', () => {
+      // The same pairing rule averageReadings applies: a vertical uncertainty
+      // belonging to no altitude is provenance about nothing.
+      const now = 1_000_000
+      const cache = createAmbientCache(createFakeLocationSource({}), () => now)
+      cache.record(reading({ altitudeM: null, verticalAccuracyM: 3 }))
+      expect(cache.read()?.verticalAccuracyM).toBeNull()
+    })
+
+    it.each([
+      [true, 'mocked'],
+      [false, 'notMocked'],
+      [undefined, 'notReported'],
+    ] as const)('reports isMocked %s as %s', (isMocked, expected) => {
+      const now = 1_000_000
+      const cache = createAmbientCache(createFakeLocationSource({}), () => now)
+      cache.record(reading({ isMocked }))
+      expect(cache.read()?.isMocked).toBe(expected)
     })
   })
 

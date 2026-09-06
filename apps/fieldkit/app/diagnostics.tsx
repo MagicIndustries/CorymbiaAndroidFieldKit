@@ -367,17 +367,6 @@ function DiagnosticsBody(props: BodyProps) {
       return
     }
 
-    // A fix that cannot show it was not spoofed is not evidence (spec §7.5).
-    // Rather than defaulting an unreported mock status to "false" — the exact
-    // claim nobody made — refuse to save and say so.
-    const mocked = props.mocked
-    if (mocked === undefined) {
-      props.setMessage(
-        'Cannot save — this platform never reported whether the position is mocked.',
-      )
-      return
-    }
-
     // averageReadings throws when every sample carries an unusable accuracy
     // (the device adapter maps a missing platform accuracy to Infinity, so a
     // device that declines to report accuracy hits exactly this). This is an
@@ -388,8 +377,22 @@ function DiagnosticsBody(props: BodyProps) {
     try {
       averaged = averageReadings(samples)
     } catch (error) {
+      props.setMessage(describeFailure('Could not average the held readings', error))
+      return
+    }
+
+    // A fix that cannot show it was not spoofed is not evidence (spec §7.5).
+    // Rather than defaulting an unreported mock status to "false" — the exact
+    // claim nobody made — refuse to save and say so.
+    //
+    // The verdict comes from the readings that were actually averaged, not
+    // from `props.mocked`, which is whatever the LATEST LIVE reading said. A
+    // hold ends when she releases the control; the live stream carries on, so
+    // the two are readings from different moments and stamping one onto a fix
+    // built from the others is provenance about the wrong thing.
+    if (averaged.isMocked === 'notReported') {
       props.setMessage(
-        `Could not average the held readings: ${error instanceof Error ? error.message : String(error)}`,
+        'Cannot save — this platform never reported whether the position is mocked.',
       )
       return
     }
@@ -432,8 +435,11 @@ function DiagnosticsBody(props: BodyProps) {
       longitude: averaged.longitude,
       accuracyM: averaged.accuracyM,
       datum: 'WGS84',
-      verticalAccuracyM: null,
-      isMocked: mocked,
+      // Measured by the platform, combined by the engine, and stored — the
+      // column was permanently NULL while `expo.ts` was mapping
+      // `coords.altitudeAccuracy` into every reading.
+      verticalAccuracyM: averaged.verticalAccuracyM,
+      isMocked: averaged.isMocked === 'mocked',
       // The satellite clock reading of this fix (spec §7.4), taken from the
       // last sample that went into the average.
       gpsTime: nowIso(new Date(lastSample.timestampMs)),
@@ -472,9 +478,11 @@ function DiagnosticsBody(props: BodyProps) {
 
   async function saveAmbient() {
     const fixNow = ambient.read()
-    const mocked = props.mocked
 
-    if (fixNow && mocked === undefined) {
+    // The cached reading's own answer, not the live one — the cache holds
+    // whatever reading it last accepted, which may be minutes old and is not
+    // necessarily the reading on screen.
+    if (fixNow && fixNow.isMocked === 'notReported') {
       props.setMessage(
         'Cannot save the cached position — this platform never reported whether it is mocked.',
       )
@@ -497,10 +505,12 @@ function DiagnosticsBody(props: BodyProps) {
           accuracyM: fixNow.accuracyM,
           datum: 'WGS84',
           ageSeconds: fixNow.ageSeconds,
-          verticalAccuracyM: null,
+          verticalAccuracyM: fixNow.verticalAccuracyM,
           // Guarded above: fixNow is truthy here, so the guard already
-          // returned if `mocked` were undefined.
-          isMocked: mocked as boolean,
+          // returned if the cached reading never reported a mocked flag. No
+          // cast and no `?? false` — the verdict is a string union precisely
+          // so this line has to state what it does about "never said".
+          isMocked: fixNow.isMocked === 'mocked',
           gpsTime: null,
           ...conditions,
           ...altitudeEvidence(fixNow.altitudeM),

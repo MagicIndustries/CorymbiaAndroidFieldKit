@@ -80,6 +80,113 @@ describe('averageReadings', () => {
     expect(result.altitudeM).toBe(62)
   })
 
+  describe('vertical accuracy — measured by the platform, and no longer thrown away', () => {
+    it('reports the largest vertical accuracy any contributing reading gave', () => {
+      // Not the mean (2.5), and emphatically not any √n improvement on it.
+      // Vertical error across readings a second apart is dominated by the same
+      // satellite geometry and multipath for the whole hold, so it does not
+      // average away the way independent horizontal error does — and the
+      // readings that reported nothing cannot be assumed to have been as good
+      // as the ones that did. The worst figure is the only one every
+      // contributing reading's own data supports.
+      const result = averageReadings([
+        reading({ altitudeM: 60, verticalAccuracyM: 2 }),
+        reading({ altitudeM: 64, verticalAccuracyM: 3 }),
+      ])
+      expect(result.verticalAccuracyM).toBe(3)
+    })
+
+    it('is not weighted by horizontal accuracy, which describes a different quantity', () => {
+      // The 2 m reading is horizontally 25 times the weight of the 10 m one and
+      // dominates the position completely. If the vertical figure were weighted
+      // by those same weights it would sit near 8.2; it is 30, because the
+      // vertical uncertainty of a reading is not a function of its horizontal
+      // one (vertical error is typically 1.5–3× horizontal, and depends on
+      // geometry differently).
+      const result = averageReadings([
+        reading({ accuracyM: 2, altitudeM: 60, verticalAccuracyM: 8 }),
+        reading({ accuracyM: 10, altitudeM: 64, verticalAccuracyM: 30 }),
+      ])
+      expect(result.verticalAccuracyM).toBe(30)
+    })
+
+    it('is null when no contributing reading reported one', () => {
+      expect(averageReadings([reading(), reading()]).verticalAccuracyM).toBeNull()
+    })
+
+    it('is null when there is no altitude for it to be the uncertainty of', () => {
+      // A vertical accuracy on a reading that supplied no height is provenance
+      // about nothing — the same pairing rule AltitudeEvidence enforces one
+      // level up.
+      const result = averageReadings([reading({ altitudeM: null, verticalAccuracyM: 3 })])
+      expect(result.altitudeM).toBeNull()
+      expect(result.verticalAccuracyM).toBeNull()
+    })
+
+    it('ignores a reading that has one but contributed no height', () => {
+      const result = averageReadings([
+        reading({ altitudeM: 62, verticalAccuracyM: 2 }),
+        reading({ altitudeM: null, verticalAccuracyM: 90 }),
+      ])
+      expect(result.altitudeM).toBe(62)
+      expect(result.verticalAccuracyM).toBe(2)
+    })
+
+    it('takes the reported figure even when only some readings reported one', () => {
+      const result = averageReadings([
+        reading({ altitudeM: 60, verticalAccuracyM: 4 }),
+        reading({ altitudeM: 64 }),
+      ])
+      expect(result.verticalAccuracyM).toBe(4)
+    })
+
+    it.each([0, -3, Number.NaN, Number.POSITIVE_INFINITY])(
+      'ignores a vertical accuracy of %s, which is not a report of anything',
+      (bogus) => {
+        // The same rule isUsableAccuracy applies horizontally, and what
+        // migration 003's record_vertical_accuracy_positive would refuse.
+        const result = averageReadings([
+          reading({ altitudeM: 60, verticalAccuracyM: 2 }),
+          reading({ altitudeM: 64, verticalAccuracyM: bogus }),
+        ])
+        expect(result.verticalAccuracyM).toBe(2)
+      },
+    )
+
+    it('reports null rather than a bogus figure when that is all there was', () => {
+      expect(
+        averageReadings([reading({ altitudeM: 62, verticalAccuracyM: 0 })]).verticalAccuracyM,
+      ).toBeNull()
+    })
+  })
+
+  describe('the mocked verdict comes from the readings that were averaged', () => {
+    // The full precedence table lives in mocked.test.ts; these pin that
+    // averageReadings actually consults the contributing readings rather than
+    // leaving the caller to stamp on whatever the live position last said.
+    it.each([
+      ['every reading mocked', true, 'mocked'],
+      ['every reading explicitly clean', false, 'notMocked'],
+      ['no reading saying', undefined, 'notReported'],
+    ] as const)('reports %s as %s', (_what, isMocked, expected) => {
+      expect(averageReadings([reading({ isMocked }), reading({ isMocked })]).isMocked).toBe(expected)
+    })
+
+    it('is mocked when one reading in the hold was, however little weight it carried', () => {
+      // The zero-accuracy mock reading earns no weight at all (see above), but
+      // it was in the hold and it said it was a mock.
+      const result = averageReadings([
+        reading({ isMocked: false }),
+        reading({ accuracyM: 0, isMocked: true }),
+      ])
+      expect(result.isMocked).toBe('mocked')
+    })
+
+    it('is notReported when one reading in the hold never said', () => {
+      expect(averageReadings([reading({ isMocked: false }), reading()]).isMocked).toBe('notReported')
+    })
+  })
+
   it('throws on an empty list rather than inventing a position', () => {
     expect(() => averageReadings([])).toThrow('Cannot average an empty set of readings.')
   })

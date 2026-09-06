@@ -1,5 +1,6 @@
 import { isUsableAccuracy } from './accuracy'
 import { distanceMetres } from './distance'
+import { mockedVerdict, type MockedVerdict } from './mocked'
 import type { Reading } from './classify'
 
 /**
@@ -78,9 +79,41 @@ function weightOf(reading: Reading): number | null {
  * Altitude stays a plain unweighted mean of the readings that have one. The
  * weights here are built from *horizontal* accuracy, which says nothing about
  * vertical uncertainty; weighting altitude by them would be borrowing the wrong
- * number. `Reading` carries an optional `verticalAccuracyM` for the day a
- * platform populates it, and until something does, altitude is averaged plainly
- * on purpose.
+ * number.
+ *
+ * The **vertical accuracy** reported alongside it is the *largest* figure any
+ * contributing reading gave, and it is null unless at least one reading that
+ * supplied an altitude also supplied one. Three decisions are packed into that:
+ *
+ * - **Not weighted, by anything.** The inverse-variance weights are built from
+ *   horizontal accuracy. Vertical and horizontal GNSS error are neither the
+ *   same quantity nor reliably proportional (vertical is typically one and a
+ *   half to three times horizontal, and depends on satellite geometry
+ *   differently), so weighting a vertical uncertainty by `1 / horizontal²`
+ *   would be dressing up the wrong number.
+ * - **The worst, not the mean, and no `√n` improvement.** The horizontal figure
+ *   may claim improvement from averaging because independent random error does
+ *   average away. Vertical error across readings a second apart is not
+ *   independent: it is dominated by the same satellite geometry and the same
+ *   multipath for the whole hold, so the argument that justifies the horizontal
+ *   improvement does not transfer, and no floor is needed here because nothing
+ *   is claimed. Taking the mean would also silently assume the readings that
+ *   never reported a vertical accuracy were as good as the ones that did. The
+ *   largest reported figure is the only number every contributing reading's own
+ *   data supports.
+ * - **Paired with the altitude it describes.** Only readings that supplied an
+ *   altitude are considered, because that is what the number is the uncertainty
+ *   *of*; a vertical accuracy taken from a reading that contributed no height
+ *   would be provenance borrowed from somewhere else. A figure that is not a
+ *   finite positive number of metres is not a report at all and is ignored, the
+ *   same rule `isUsableAccuracy` applies horizontally — and migration 003's
+ *   `record_vertical_accuracy_positive` would refuse it anyway.
+ *
+ * The **mocked verdict** is derived from the contributing readings, not taken
+ * from whatever the live position happened to say when the save button was
+ * pressed — see `mockedVerdict`. It is a `MockedVerdict` rather than a
+ * `boolean | undefined` so that a caller cannot `?? false` an unreported flag
+ * into a claim that the fix was clean.
  *
  * `accuracyM` is stored permanently on the record and later becomes the
  * Victorian Biodiversity Atlas's mandatory "Positional accuracy (metres)"
@@ -93,6 +126,8 @@ export function averageReadings(readings: Reading[]): {
   longitude: number
   accuracyM: number
   altitudeM: number | null
+  verticalAccuracyM: number | null
+  isMocked: MockedVerdict
   spreadM: number
   sampleCount: number
 } {
@@ -131,6 +166,15 @@ export function averageReadings(readings: Reading[]): {
       ? null
       : withAltitude.reduce((sum, r) => sum + r.altitudeM, 0) / withAltitude.length
 
+  // The vertical accuracies of the readings that actually contributed a height,
+  // ignoring anything that is not a finite positive number of metres — see the
+  // doc comment above for why the worst of them is what gets reported.
+  const verticalAccuracies = withAltitude
+    .map((r) => r.verticalAccuracyM)
+    .filter((v): v is number => v !== null && v !== undefined && isUsableAccuracy(v))
+  const verticalAccuracyM =
+    verticalAccuracies.length === 0 ? null : Math.max(...verticalAccuracies)
+
   const centre = { latitude, longitude }
   const spreadM = readings.reduce((max, r) => Math.max(max, distanceMetres(centre, r)), 0)
 
@@ -141,5 +185,16 @@ export function averageReadings(readings: Reading[]): {
   const combined = 1 / Math.sqrt(weightSum)
   const accuracyM = Math.max(combined, best / 3)
 
-  return { latitude, longitude, accuracyM, altitudeM, spreadM, sampleCount }
+  return {
+    latitude,
+    longitude,
+    accuracyM,
+    altitudeM,
+    verticalAccuracyM,
+    // Every reading that went into the hold, weighted or not — a mock reading
+    // that earned no weight still went into it.
+    isMocked: mockedVerdict(readings),
+    spreadM,
+    sampleCount,
+  }
 }

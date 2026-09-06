@@ -223,10 +223,32 @@ depends on satellite geometry in a different way. Weighting altitude by
 `1 / horizontal²` would be borrowing a number that describes something else and
 dressing the result up as a vertical uncertainty.
 
-The `Reading` type carries an optional `verticalAccuracyM` field for the day the
-platform layer populates it. Nothing does yet, so until something does, altitude
-is averaged plainly and no vertical uncertainty is claimed at all. This is a
-deliberate choice, not an oversight.
+### Vertical accuracy
+
+Android does supply a vertical accuracy on most devices, and the app records it.
+The device adapter maps it onto every reading, and a held fix stores **the
+largest figure any of the contributing readings gave**.
+
+Three things about that rule are deliberate:
+
+- **It is not weighted, by anything.** For the reason just given: the weights
+  describe horizontal error, and a vertical uncertainty built out of them would
+  be the wrong number wearing the right label.
+- **It is the worst reading's figure, not the average of them, and it claims no
+  improvement from averaging.** The horizontal figure is allowed to improve with
+  more samples because independent random error genuinely averages away. Vertical
+  error over a hold of a few seconds is not independent — it is dominated by the
+  same satellite geometry and the same reflections for the whole hold — so the
+  argument that justifies the horizontal improvement does not carry across. And
+  not every reading necessarily reports a vertical accuracy; averaging the ones
+  that did would quietly assume the silent ones were just as good.
+- **It travels with the altitude it describes.** Only readings that supplied a
+  height are considered, and if no reading supplied one there is no vertical
+  accuracy to report. A vertical uncertainty attached to no altitude is
+  provenance about nothing.
+
+Where no contributing reading reported a vertical accuracy, the field is stored
+as NULL — absent, not guessed, the same rule the rest of the record follows.
 
 ---
 
