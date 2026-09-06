@@ -50,7 +50,13 @@ export const migration003: Migration = {
                          CHECK (longitude IS NULL OR (longitude BETWEEN -180 AND 180)),
        accuracy_m        REAL CONSTRAINT record_accuracy_positive
                          CHECK (accuracy_m IS NULL OR accuracy_m > 0),
-       altitude_m        REAL,
+       -- The one magnitude with no natural sign rule, so it gets an explicit
+       -- envelope instead. The Dead Sea shore (-430 m) is the lowest dry land and
+       -- Everest is 8848 m; Victoria spans roughly 0 to 1986 m. A GNSS glitch
+       -- reporting -3000 or 40000 is not an altitude, and an unbounded column is
+       -- the one place a garbage number reaches an export unchallenged.
+       altitude_m        REAL CONSTRAINT record_altitude_range
+                         CHECK (altitude_m IS NULL OR (altitude_m BETWEEN -500 AND 9000)),
        datum             TEXT CONSTRAINT record_datum_known
                          CHECK (datum IS NULL OR datum IN ('WGS84', 'GDA94', 'AGD66')),
 
@@ -93,8 +99,13 @@ export const migration003: Migration = {
        gps_time          TEXT,
        device_id         TEXT NOT NULL REFERENCES device(id),
 
+       -- json_valid() alone admits scalars: '1234' and '"pin"' are valid JSON.
+       -- A scalar here does not fail loudly — json_extract() returns NULL for
+       -- every path, so the kind-specific fields arrive as silently missing
+       -- rather than as an error. The object requirement costs the same.
        attributes        TEXT NOT NULL DEFAULT '{}'
-                         CONSTRAINT record_attributes_are_json CHECK (json_valid(attributes)),
+                         CONSTRAINT record_attributes_are_json
+                         CHECK (json_valid(attributes) AND json_type(attributes) = 'object'),
 
        created_at        TEXT NOT NULL,
        updated_at        TEXT NOT NULL,
@@ -162,6 +173,16 @@ export const migration003: Migration = {
          (fix_sample_count = 1 AND fix_spread_m IS NULL) OR
          (fix_sample_count > 1 AND fix_spread_m IS NOT NULL)),
 
+       -- Half a coordinate is not a coordinate. This says so on its own, because
+       -- the three clauses above pair latitude and longitude only as a side
+       -- effect of the fix_quality discriminant: add a fourth quality value
+       -- without a fourth clause and position silently becomes unconstrained.
+       -- Defined after those clauses so a wrong deliberate or ambient row still
+       -- reports the class rule it actually broke.
+       CONSTRAINT record_position_is_paired CHECK (
+         (latitude IS NULL AND longitude IS NULL) OR
+         (latitude IS NOT NULL AND longitude IS NOT NULL)),
+
        -- A stored accuracy without its convention is a number whose meaning was lost.
        CONSTRAINT record_accuracy_has_convention CHECK (
          accuracy_m IS NULL OR accuracy_convention IS NOT NULL),
@@ -219,6 +240,16 @@ export const migration003: Migration = {
        fix_quality   TEXT CONSTRAINT event_fix_quality_known
                      CHECK (fix_quality IS NULL OR
                             fix_quality IN ('deliberate', 'ambient', 'none')),
+
+       -- Spec §7.5 asks that a mocked position be distinguishable from a real
+       -- one, and spec §8.5 writes a context stamp on every change. Without this
+       -- column a 'filed' or 'deleted' event carrying a spoofed position records
+       -- it as indistinguishable from a real one. Nullable and undefaulted for
+       -- the same reason as the record column: a default would make every
+       -- unexamined row assert "not spoofed".
+       is_mocked     INTEGER CONSTRAINT event_is_mocked_boolean
+                     CHECK (is_mocked IS NULL OR is_mocked IN (0, 1)),
+
        activity_id   TEXT REFERENCES activity(id),
        detail        TEXT,
 
@@ -226,10 +257,39 @@ export const migration003: Migration = {
          accuracy_m IS NULL OR accuracy_convention IS NOT NULL),
        CONSTRAINT event_position_has_datum CHECK (
          latitude IS NULL OR datum IS NOT NULL),
+
+       -- The event table enforced its 'none' class and neither of the other two,
+       -- so a stamp could claim a deliberate fix and carry no coordinates at all
+       -- — a row the record table makes impossible. The stamps come from the same
+       -- ContextStamp union, so the classes mean the same thing in both tables
+       -- and a table that will not state its own convention teaches the next
+       -- author that the rule is optional. The event table holds no age, sample
+       -- count, spread or hold, so these say what this table can say.
+       CONSTRAINT event_deliberate_has_position CHECK (
+         fix_quality IS NULL OR fix_quality <> 'deliberate' OR
+         (latitude IS NOT NULL AND longitude IS NOT NULL
+          AND accuracy_m IS NOT NULL AND datum IS NOT NULL
+          AND accuracy_convention IN ('radius68', 'radius95'))),
+       CONSTRAINT event_ambient_has_position CHECK (
+         fix_quality IS NULL OR fix_quality <> 'ambient' OR
+         (latitude IS NOT NULL AND longitude IS NOT NULL
+          AND accuracy_m IS NOT NULL AND datum IS NOT NULL)),
        CONSTRAINT event_none_has_no_position CHECK (
          fix_quality <> 'none' OR
          (latitude IS NULL AND longitude IS NULL AND accuracy_m IS NULL
-          AND accuracy_convention IS NULL AND datum IS NULL))
+          AND accuracy_convention IS NULL AND datum IS NULL
+          AND is_mocked IS NULL)),
+
+       -- Half a coordinate is not a coordinate, stated independently of the
+       -- discriminant for the same reason as on the record table.
+       CONSTRAINT event_position_is_paired CHECK (
+         (latitude IS NULL AND longitude IS NULL) OR
+         (latitude IS NOT NULL AND longitude IS NOT NULL)),
+
+       -- Spoofing is knowable exactly when there is a position to spoof.
+       CONSTRAINT event_mocked_known_when_positioned CHECK (
+         (latitude IS NULL AND is_mocked IS NULL) OR
+         (latitude IS NOT NULL AND is_mocked IS NOT NULL))
      )`,
 
     `CREATE INDEX idx_event_record ON event(record_id, occurred_at)`,

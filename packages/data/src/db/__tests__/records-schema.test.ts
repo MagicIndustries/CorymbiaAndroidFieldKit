@@ -144,6 +144,7 @@ async function insertEvent(db: Database, over: Record<string, unknown> = {}): Pr
     accuracy_convention: 'radius68',
     datum: 'WGS84',
     fix_quality: 'deliberate',
+    is_mocked: 0,
     activity_id: 'a1',
     detail: null,
     ...over,
@@ -362,7 +363,89 @@ describe('the record schema', () => {
     })
   })
 
+  describe('the vocabularies, one member at a time', () => {
+    // A negative test that rejects a bogus value stays green when a legitimate
+    // value is deleted from the IN list, and deleting one is the likeliest real
+    // edit to these lines. Each member below is therefore written successfully
+    // at least once, so its removal goes red.
+
+    it.each(['WGS84', 'GDA94', 'AGD66'])('accepts the datum %s', async (datum) => {
+      // The VBA's three accepted frames; see
+      // docs/research/2026-09-06-victorian-biodiversity-destinations.md §5.3.
+      await insertRecord(db, { id: `rv-${datum}`, datum })
+      const row = await db.first<{ datum: string }>('SELECT datum FROM record WHERE id = ?', [
+        `rv-${datum}`,
+      ])
+      expect(row?.datum).toBe(datum)
+    })
+
+    it.each(['radius68', 'radius95'])(
+      'accepts the accuracy convention %s on a deliberate fix',
+      async (convention) => {
+        await insertRecord(db, { id: `rc-${convention}`, accuracy_convention: convention })
+        const row = await db.first<{ accuracy_convention: string }>(
+          'SELECT accuracy_convention FROM record WHERE id = ?',
+          [`rc-${convention}`],
+        )
+        expect(row?.accuracy_convention).toBe(convention)
+      },
+    )
+
+    it("accepts the accuracy convention 'unknown' on an ambient fix", async () => {
+      await insertRecord(db, ambient({ id: 'rc-unknown', accuracy_convention: 'unknown' }))
+      const row = await db.first<{ accuracy_convention: string }>(
+        'SELECT accuracy_convention FROM record WHERE id = ?',
+        ['rc-unknown'],
+      )
+      expect(row?.accuracy_convention).toBe('unknown')
+    })
+
+    it.each(['wgs84Ellipsoid', 'meanSeaLevel'])(
+      'accepts the altitude reference %s',
+      async (reference) => {
+        await insertRecord(db, { id: `ra-${reference}`, altitude_reference: reference })
+        const row = await db.first<{ altitude_reference: string }>(
+          'SELECT altitude_reference FROM record WHERE id = ?',
+          [`ra-${reference}`],
+        )
+        expect(row?.altitude_reference).toBe(reference)
+      },
+    )
+
+    it.each(['deliberate', 'ambient', 'none'])('accepts the fix quality %s', async (quality) => {
+      const over =
+        quality === 'ambient'
+          ? ambient({})
+          : quality === 'none'
+            ? none({})
+            : { fix_quality: 'deliberate' }
+      await insertRecord(db, { ...over, id: `rq-${quality}` })
+      const row = await db.first<{ fix_quality: string }>(
+        'SELECT fix_quality FROM record WHERE id = ?',
+        [`rq-${quality}`],
+      )
+      expect(row?.fix_quality).toBe(quality)
+    })
+
+    it("accepts the record kind 'pin'", async () => {
+      await insertRecord(db, { id: 'rk-pin', kind: 'pin' })
+      const row = await db.first<{ kind: string }>('SELECT kind FROM record WHERE id = ?', [
+        'rk-pin',
+      ])
+      expect(row?.kind).toBe('pin')
+    })
+  })
+
   describe('conventions, without which the numbers mean nothing', () => {
+    it('accepts a record with no altitude at all — barometer off, or none fitted', async () => {
+      await insertRecord(db, { id: 'r10z', altitude_m: null, altitude_reference: null })
+      const row = await db.first<{ altitude_m: number | null }>(
+        'SELECT altitude_m FROM record WHERE id = ?',
+        ['r10z'],
+      )
+      expect(row?.altitude_m).toBeNull()
+    })
+
     it('refuses an accuracy stored without the convention that gives it meaning', async () => {
       await expect(
         insertRecord(db, ambient({ id: 'r10', accuracy_convention: null })),
@@ -479,6 +562,76 @@ describe('the record schema', () => {
         CHECK('record_sequence_positive'),
       )
     })
+
+    it('accepts an altitude anywhere Victoria reaches', async () => {
+      // Mt Bogong, the state's high point.
+      await insertRecord(db, { id: 'r12i', altitude_m: 1986 })
+      const row = await db.first<{ altitude_m: number }>(
+        'SELECT altitude_m FROM record WHERE id = ?',
+        ['r12i'],
+      )
+      expect(row?.altitude_m).toBe(1986)
+    })
+
+    it('refuses an altitude above the troposphere — a GNSS glitch, not a measurement', async () => {
+      await expect(insertRecord(db, { id: 'r12j', altitude_m: 40000 })).rejects.toThrow(
+        CHECK('record_altitude_range'),
+      )
+    })
+
+    it('refuses an altitude below the lowest dry land on earth', async () => {
+      await expect(insertRecord(db, { id: 'r12k', altitude_m: -3000 })).rejects.toThrow(
+        CHECK('record_altitude_range'),
+      )
+    })
+  })
+
+  describe('position pairing, independent of the fix-quality discriminant', () => {
+    // The three class clauses pair latitude and longitude only as a side effect
+    // of the discriminant. This rule says it on its own, so a fourth quality
+    // value added without a fourth clause cannot silently unconstrain position.
+    it('refuses half a coordinate that no class clause would catch', async () => {
+      const sql = `INSERT INTO record
+        (id, kind, sequence, latitude, longitude, fix_quality, captured_at, device_id,
+         created_at, updated_at)
+        VALUES (?, 'pin', 1, ?, NULL, 'none', ?, 'dev-1', ?, ?)`
+      // 'none' would ordinarily refuse a latitude, so this proves the pairing
+      // rule exists at all rather than that the class clause fired again.
+      await expect(db.execute(sql, ['r17', -37.82141, NOW, NOW, NOW])).rejects.toThrow(
+        /CHECK constraint failed: record_(none_has_no_position|position_is_paired|mocked_known_when_positioned)/,
+      )
+    })
+
+    it('states the pairing rule in the schema, not only as a side effect of a class', async () => {
+      const table = await db.first<{ sql: string }>(
+        `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'record'`,
+      )
+      expect(table?.sql).toMatch(/CONSTRAINT record_position_is_paired/)
+    })
+  })
+
+  describe("the none clause's conjuncts that no insert can isolate", () => {
+    // accuracy_m, altitude_m and is_mocked cannot be tested in isolation: any
+    // value for them also trips a pairing rule (record_accuracy_has_convention,
+    // record_altitude_has_reference, record_mocked_known_when_positioned), so
+    // deleting the conjunct alone leaves every insert-based test green. The
+    // schema text is the assertion that does go red — the same technique the
+    // Inbox-index test uses.
+    const noneClause = (sql: string): string => {
+      const start = sql.indexOf('CONSTRAINT record_none_has_no_position')
+      expect(start).toBeGreaterThan(-1)
+      return sql.slice(start, sql.indexOf('CONSTRAINT', start + 1))
+    }
+
+    it.each(['accuracy_m IS NULL', 'altitude_m IS NULL', 'is_mocked IS NULL'])(
+      'keeps `%s` a conjunct of record_none_has_no_position',
+      async (conjunct) => {
+        const table = await db.first<{ sql: string }>(
+          `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'record'`,
+        )
+        expect(noneClause(table?.sql ?? '')).toContain(conjunct)
+      },
+    )
   })
 
   describe('kind and attributes', () => {
@@ -508,6 +661,18 @@ describe('the record schema', () => {
         insertRecord(db, { id: 'r13c', attributes: '{species: Eucalyptus' }),
       ).rejects.toThrow(CHECK('record_attributes_are_json'))
     })
+
+    it.each(['1234', '"Eucalyptus"', 'null', 'true', '[1,2,3]'])(
+      'refuses attributes that are valid JSON but not an object: %s',
+      async (attributes) => {
+        // json_valid() alone accepts all of these, and json_extract then returns
+        // NULL for every path rather than erroring — so the kind-specific fields
+        // arrive as silently missing instead of as a failure.
+        await expect(insertRecord(db, { id: 'r13d', attributes })).rejects.toThrow(
+          CHECK('record_attributes_are_json'),
+        )
+      },
+    )
   })
 
   describe('activities, sequences and the Inbox', () => {
@@ -633,6 +798,7 @@ describe('the record schema', () => {
         accuracy_m: null,
         accuracy_convention: null,
         datum: null,
+        is_mocked: null,
       })
       expect(await db.all('SELECT id FROM event')).toHaveLength(1)
     })
@@ -641,6 +807,149 @@ describe('the record schema', () => {
       await expect(insertEvent(db, { id: 'e10', latitude: 145.03318 })).rejects.toThrow(
         CHECK('event_latitude_range'),
       )
+    })
+
+    it('refuses an event longitude beyond the meridian', async () => {
+      await expect(insertEvent(db, { id: 'e10a', longitude: 245.03318 })).rejects.toThrow(
+        CHECK('event_longitude_range'),
+      )
+    })
+
+    it('refuses a non-positive event accuracy', async () => {
+      await expect(insertEvent(db, { id: 'e10b', accuracy_m: 0 })).rejects.toThrow(
+        CHECK('event_accuracy_positive'),
+      )
+    })
+
+    it.each(['created', 'edited', 'media_added', 'filed', 'played', 'deleted', 'restored'])(
+      'records the action %s',
+      async (action) => {
+        // The negative test above ('teleported') stays green if a legitimate action
+        // is deleted from the IN list — and 'restored' is what the soft-delete flow
+        // depends on. Each member is written once, so its removal goes red.
+        await insertEvent(db, { id: `ea-${action}`, action })
+        const row = await db.first<{ action: string }>('SELECT action FROM event WHERE id = ?', [
+          `ea-${action}`,
+        ])
+        expect(row?.action).toBe(action)
+      },
+    )
+
+    it('records the full seven-action vocabulary in one log', async () => {
+      const actions = ['created', 'edited', 'media_added', 'filed', 'played', 'deleted', 'restored']
+      for (const [i, action] of actions.entries()) {
+        await insertEvent(db, { id: `es-${i}`, action })
+      }
+      const stored = await db.all<{ action: string }>('SELECT action FROM event ORDER BY id')
+      expect(stored.map((row) => row.action)).toEqual(actions)
+    })
+
+    it.each(['WGS84', 'GDA94', 'AGD66'])('accepts the event datum %s', async (datum) => {
+      await insertEvent(db, { id: `ed-${datum}`, datum })
+      const row = await db.first<{ datum: string }>('SELECT datum FROM event WHERE id = ?', [
+        `ed-${datum}`,
+      ])
+      expect(row?.datum).toBe(datum)
+    })
+
+    it.each(['radius68', 'radius95'])(
+      'accepts the event accuracy convention %s',
+      async (convention) => {
+        await insertEvent(db, { id: `ec-${convention}`, accuracy_convention: convention })
+        const row = await db.first<{ accuracy_convention: string }>(
+          'SELECT accuracy_convention FROM event WHERE id = ?',
+          [`ec-${convention}`],
+        )
+        expect(row?.accuracy_convention).toBe(convention)
+      },
+    )
+
+    it("accepts the event accuracy convention 'unknown' on an ambient stamp", async () => {
+      await insertEvent(db, {
+        id: 'ec-unknown',
+        fix_quality: 'ambient',
+        accuracy_convention: 'unknown',
+      })
+      const row = await db.first<{ accuracy_convention: string }>(
+        'SELECT accuracy_convention FROM event WHERE id = ?',
+        ['ec-unknown'],
+      )
+      expect(row?.accuracy_convention).toBe('unknown')
+    })
+
+    it('records a mocked event stamp as such, so a spoofed stamp is identifiable', async () => {
+      // Spec §7.5 wants a spoofed position distinguishable from a real one, and a
+      // 'filed' or 'deleted' stamp is a position like any other.
+      await insertEvent(db, { id: 'e14', action: 'filed', is_mocked: 1 })
+      const row = await db.first<{ is_mocked: number }>(
+        'SELECT is_mocked FROM event WHERE id = ?',
+        ['e14'],
+      )
+      expect(row?.is_mocked).toBe(1)
+    })
+
+    it('refuses a positioned event stamp that will not say whether it was spoofed', async () => {
+      await expect(insertEvent(db, { id: 'e14a', is_mocked: null })).rejects.toThrow(
+        CHECK('event_mocked_known_when_positioned'),
+      )
+    })
+
+    it('refuses an event is_mocked value that is neither true nor false', async () => {
+      await expect(insertEvent(db, { id: 'e14b', is_mocked: 2 })).rejects.toThrow(
+        CHECK('event_is_mocked_boolean'),
+      )
+    })
+
+    it('refuses a positionless stamp that claims the position it lacks was not spoofed', async () => {
+      await expect(
+        insertEvent(db, {
+          id: 'e14c',
+          fix_quality: 'none',
+          latitude: null,
+          longitude: null,
+          accuracy_m: null,
+          accuracy_convention: null,
+          datum: null,
+          is_mocked: 0,
+        }),
+      ).rejects.toThrow(
+        /CHECK constraint failed: event_(none_has_no_position|mocked_known_when_positioned)/,
+      )
+    })
+
+    it('refuses a deliberate event stamp with no coordinates', async () => {
+      // The record table makes this row impossible; the event table used to accept
+      // it, which teaches the next author that the class means nothing here.
+      await expect(
+        insertEvent(db, { id: 'e15', fix_quality: 'deliberate', latitude: null, is_mocked: null }),
+      ).rejects.toThrow(CHECK('event_deliberate_has_position'))
+    })
+
+    it("refuses a deliberate event stamp whose accuracy means 'unknown'", async () => {
+      await expect(
+        insertEvent(db, { id: 'e15a', fix_quality: 'deliberate', accuracy_convention: 'unknown' }),
+      ).rejects.toThrow(CHECK('event_deliberate_has_position'))
+    })
+
+    it('accepts an ambient event stamp', async () => {
+      await insertEvent(db, { id: 'e16', fix_quality: 'ambient', accuracy_m: 38 })
+      const row = await db.first<{ fix_quality: string }>(
+        'SELECT fix_quality FROM event WHERE id = ?',
+        ['e16'],
+      )
+      expect(row?.fix_quality).toBe('ambient')
+    })
+
+    it('refuses an ambient event stamp with no coordinates', async () => {
+      await expect(
+        insertEvent(db, { id: 'e16a', fix_quality: 'ambient', latitude: null, is_mocked: null }),
+      ).rejects.toThrow(CHECK('event_ambient_has_position'))
+    })
+
+    it('refuses half a coordinate on an event stamp, whatever the class', async () => {
+      await expect(
+        insertEvent(db, { id: 'e17', fix_quality: null, longitude: null }),
+      ).rejects.toThrow(CHECK('event_position_is_paired'))
     })
 
     it('refuses an event pointing at a record that does not exist', async () => {
@@ -684,9 +993,9 @@ describe('the record schema', () => {
         db.execute(
           `INSERT OR REPLACE INTO event
              (id, record_id, action, device_id, occurred_at, latitude, longitude, accuracy_m,
-              accuracy_convention, datum, fix_quality, activity_id, detail)
+              accuracy_convention, datum, fix_quality, is_mocked, activity_id, detail)
            VALUES (?, 'r1', 'deleted', 'dev-1', ?, -37.82141, 145.03318, 4,
-                   'radius68', 'WGS84', 'deliberate', 'a1', 'tampered')`,
+                   'radius68', 'WGS84', 'deliberate', 0, 'a1', 'tampered')`,
           ['e1', NOW],
         ),
       ).rejects.toThrow(/append-only/)
