@@ -2986,6 +2986,11 @@ describe('the expo-sqlite adapter', () => {
     expect(runAsync).toHaveBeenCalledWith('PRAGMA foreign_keys = ON')
   })
 
+  it('enables recursive triggers, without which the append-only log is bypassable', async () => {
+    await openDatabase()
+    expect(runAsync).toHaveBeenCalledWith('PRAGMA recursive_triggers = ON')
+  })
+
   it('passes parameters through positionally', async () => {
     const db = await openDatabase()
     await db.execute('INSERT INTO t (a) VALUES (?)', ['x'])
@@ -3038,6 +3043,11 @@ import type { Database, SqlValue } from './port'
 export async function openDatabase(name = 'fieldkit.db'): Promise<Database> {
   const db = await SQLite.openDatabaseAsync(name)
   await db.runAsync('PRAGMA foreign_keys = ON')
+  // Without this, INSERT OR REPLACE deletes a row WITHOUT firing the delete
+  // trigger, so the append-only event log can be silently rewritten. SQLite
+  // defaults it off. Verified: with it off the tamper succeeds and returns
+  // success; with it on the trigger aborts and the original row survives.
+  await db.runAsync('PRAGMA recursive_triggers = ON')
 
   return {
     async execute(sql, params = []) {
