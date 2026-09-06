@@ -1,6 +1,7 @@
 export type { Database, SqlValue } from './db/port'
 export { migrate } from './db/migrate'
 export type { Migration } from './db/migrate'
+export { openDatabase } from './db/expo'
 
 export { registerDevice, getDevice, listDevices } from './repositories/devices'
 export type { Device, DeviceFacts, DeviceType } from './repositories/devices'

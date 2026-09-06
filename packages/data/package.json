@@ -9,9 +9,13 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit"
   },
+  "peerDependencies": {
+    "expo-sqlite": "~57.0.2"
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "better-sqlite3": "^11.7.0",
+    "expo-sqlite": "~57.0.2",
     "jest-expo": "~57.0.0",
     "react": "19.2.3",
     "react-native": "0.86.3"
