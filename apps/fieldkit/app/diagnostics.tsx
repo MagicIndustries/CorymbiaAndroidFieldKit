@@ -21,6 +21,7 @@ import {
   type AltitudeEvidence,
   type Fix,
   type FieldRecord,
+  type StoredFix,
 } from '@corymbia/data'
 import { spacing } from '@corymbia/tokens'
 import { Button, Card, Screen, Type, useTheme } from '@corymbia/ui'
@@ -50,6 +51,23 @@ function altitudeEvidence(altitudeM: number | null): AltitudeEvidence {
 function describeMocked(mocked: boolean | undefined): string {
   if (mocked === undefined) return 'not reported'
   return mocked ? 'YES — spoofed position' : 'no'
+}
+
+/**
+ * The averaging evidence for a stored record, as a short suffix — sample
+ * count, spread and hold duration are what the field checklist asks the
+ * tester to check a held fix against, and they otherwise exist only inside
+ * the SQLite file (finding 1). Only `'deliberate'` fixes carry this evidence
+ * at all; `spreadM` is additionally absent on a single-reading capture
+ * (`sampleEvidence()`'s `sampleCount: 1` branch), so it is rendered only when
+ * present rather than printed as a placeholder.
+ */
+function deliberateEvidence(fix: StoredFix): string | null {
+  if (fix.quality !== 'deliberate') return null
+  const parts = [`n=${fix.sampleCount}`]
+  if (fix.spreadM !== null) parts.push(`spread=±${fix.spreadM.toFixed(1)}m`)
+  parts.push(`hold=${(fix.holdMs / 1000).toFixed(1)}s`)
+  return parts.join(' ')
 }
 
 export default function Diagnostics() {
@@ -174,7 +192,48 @@ function DiagnosticsBody(props: BodyProps) {
   const db = useDatabase()
   const device = useDevice()
   const { settings, updateSetting } = useSettings()
-  const { latest, readings, holding, held, ambient } = props
+  const { latest, readings, holding, held, ambient, setRecords } = props
+
+  // Guards every `setState` call below that follows an `await`. Directed
+  // deviation 5 covered the location subscription; the save handlers and the
+  // on-arrival load are equally capable of resolving after the screen has
+  // navigated away, and an update to an unmounted component is exactly what
+  // that deviation exists to prevent everywhere else.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  // Every `listRecords`-backed refresh (the on-arrival load below, and the
+  // two save handlers) takes this token before its awaits and only applies
+  // its result if no newer refresh has since been started. Without it, the
+  // on-arrival load — kicked off once on mount, reading whatever activity
+  // already exists — could still be in flight when a save completes, and a
+  // slower load resolving after a faster save would silently erase the
+  // just-saved record from view (it stays on disk; only the display would
+  // regress) simply because its query happened to finish last.
+  const refreshToken = useRef(0)
+
+  // Finding 2: load whatever is already on disk when the screen becomes
+  // ready, so a force-stop-and-relaunch check does not read as data loss
+  // just because nothing has been saved yet in this session. This must not
+  // create anything — an instrument that writes to the database merely by
+  // being opened corrupts the very thing it is measuring — so it looks for
+  // the most recent existing activity and shows nothing when there is none,
+  // rather than calling `ensureActivity()`.
+  useEffect(() => {
+    const token = ++refreshToken.current
+    void (async () => {
+      const existing = await mostRecentActivity(db)
+      if (!mountedRef.current || token !== refreshToken.current || !existing) return
+      const loaded = await listRecords(db, existing.id)
+      if (!mountedRef.current || token !== refreshToken.current) return
+      setRecords(loaded)
+    })()
+  }, [db, setRecords])
 
   /**
    * Conditions that apply to every position this device reports (spec §7.5).
@@ -241,6 +300,10 @@ function DiagnosticsBody(props: BodyProps) {
       return
     }
 
+    // Taken before the first await so a slower refresh in flight elsewhere
+    // (the on-arrival load, or an earlier save) can never win a race against
+    // this one — see `refreshToken` above.
+    const token = ++refreshToken.current
     const activityId = await ensureActivity()
     const previous = props.records[0]
     const duplicate =
@@ -287,7 +350,11 @@ function DiagnosticsBody(props: BodyProps) {
       fix,
       deviceId: device.id,
     })
-    props.setRecords(await listRecords(db, activityId))
+    const loaded = await listRecords(db, activityId)
+    // The screen may have navigated away, or a newer save/load may already
+    // have refreshed the list, while the two awaits above were in flight.
+    if (!mountedRef.current || token !== refreshToken.current) return
+    props.setRecords(loaded)
     props.setMessage(duplicate ? 'Saved — but within 5 m of the last one' : 'Saved')
   }
 
@@ -302,6 +369,7 @@ function DiagnosticsBody(props: BodyProps) {
       return
     }
 
+    const token = ++refreshToken.current
     const activityId = await ensureActivity()
     const fix: Fix = fixNow
       ? {
@@ -321,7 +389,9 @@ function DiagnosticsBody(props: BodyProps) {
         }
       : { quality: 'none' }
     await createRecord(db, { activityId, kind: 'pin', fix, deviceId: device.id })
-    props.setRecords(await listRecords(db, activityId))
+    const loaded = await listRecords(db, activityId)
+    if (!mountedRef.current || token !== refreshToken.current) return
+    props.setRecords(loaded)
     props.setMessage(fixNow ? `Saved ambient, ${fixNow.ageSeconds}s old` : 'Saved with no position')
   }
 
@@ -410,6 +480,9 @@ function DiagnosticsBody(props: BodyProps) {
             }
           }}
         />
+        <Type variant="small" dim>
+          Sample count includes the reading already on screen when the hold began.
+        </Type>
         <View style={{ height: spacing.sm }} />
         <Button label="Save single deliberate fix" kind="fast" size="field"
           onPress={() => void saveDeliberate(latest ? [latest] : [])} />
@@ -425,14 +498,18 @@ function DiagnosticsBody(props: BodyProps) {
 
         <View style={{ height: spacing.lg }} />
         <Type variant="label" dim>STORED RECORDS</Type>
-        {props.records.map((record) => (
-          <View key={record.id} style={{ paddingVertical: spacing.xs }}>
-            <Type variant="mono">
-              #{record.sequence} {record.fix.quality}
-              {record.fix.quality !== 'none' ? ` ±${record.fix.accuracyM.toFixed(1)}m` : ''}
-            </Type>
-          </View>
-        ))}
+        {props.records.map((record) => {
+          const evidence = deliberateEvidence(record.fix)
+          return (
+            <View key={record.id} style={{ paddingVertical: spacing.xs }}>
+              <Type variant="mono">
+                #{record.sequence} {record.fix.quality}
+                {record.fix.quality !== 'none' ? ` ±${record.fix.accuracyM.toFixed(1)}m` : ''}
+                {evidence ? ` ${evidence}` : ''}
+              </Type>
+            </View>
+          )
+        })}
         <View style={{ height: spacing.xxl }} />
       </ScrollView>
     </Screen>
