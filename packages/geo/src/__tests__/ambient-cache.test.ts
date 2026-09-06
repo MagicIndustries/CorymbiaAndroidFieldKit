@@ -83,6 +83,25 @@ describe('the ambient position cache', () => {
     cache.record(reading({ accuracyM: 38, timestampMs: 1_000_000 }))
     expect(cache.read()?.accuracyM).toBe(6)
   })
+
+  it('record() uses >= for timestamp comparison so equal timestamps favour the newer arrival', () => {
+    const cache = createAmbientCache(createFakeLocationSource({}))
+    const timestamp = 1_500_000
+    cache.record(reading({ accuracyM: 38, timestampMs: timestamp }))
+    cache.record(reading({ accuracyM: 6, timestampMs: timestamp }))
+    // The second reading (with better accuracy) should replace the first despite having the same timestamp
+    expect(cache.read()?.accuracyM).toBe(6)
+  })
+
+  it('refresh() uses >= for timestamp comparison so equal timestamps favour the last-known arrival', async () => {
+    const timestamp = 1_500_000
+    const source = createFakeLocationSource({ lastKnown: reading({ accuracyM: 6, timestampMs: timestamp }) })
+    const cache = createAmbientCache(source)
+    cache.record(reading({ accuracyM: 38, timestampMs: timestamp }))
+    await cache.refresh()
+    // The last-known reading (with better accuracy) should replace the cached one despite having the same timestamp
+    expect(cache.read()?.accuracyM).toBe(6)
+  })
 })
 
 describe("refresh() never throws, because it must never fail the save it's decorating", () => {
