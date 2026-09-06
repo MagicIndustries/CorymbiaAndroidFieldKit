@@ -1,0 +1,19 @@
+{
+  "name": "@corymbia/data",
+  "version": "0.0.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "jest",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "better-sqlite3": "^11.7.0",
+    "jest-expo": "~57.0.0",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  }
+}
