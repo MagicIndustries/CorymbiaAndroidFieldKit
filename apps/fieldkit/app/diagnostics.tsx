@@ -425,6 +425,94 @@ function buildLogRows(readings: Reading[], sessionStartMs: number | null): LogRo
   return rows
 }
 
+/**
+ * One row of the countdown transcript: what the capture control was showing at
+ * the instant one collected reading arrived.
+ *
+ * This exists because the reading log above cannot answer the question the
+ * trip is being taken to ask. That log renders the live `readings` buffer,
+ * which is trimmed to the most recent 20 and displayed 8 rows deep — so at
+ * roughly 1 Hz a 30 s countdown has lost its first ten seconds before it ends,
+ * and a 60 s countdown shows the last 8 of 60. It also has no marker of where
+ * a countdown began or ended, and it shows each reading's OWN accuracy while
+ * the frame shows the running average, so it cannot corroborate the number the
+ * operator was actually watching or the improvement claim made about it.
+ *
+ * Every field here is therefore computed at arrival rather than reconstructed
+ * afterwards, and the two accuracies sit side by side on purpose: `rawM` is
+ * what the receiver said about that one reading, `averagedM` is what
+ * `averageReadings` made of every sample so far — which is the figure the
+ * frame printed and the figure the override would have stored. `verdict` is
+ * `holdVerdict` over the same samples, so a row that says `plateaued` beside
+ * an average that is still falling is the finding, written down, at the moment
+ * it happened.
+ */
+type TranscriptRow = {
+  /**
+   * Seconds since the tap. Slightly negative on the first row, which is
+   * honest: the reading the tap recorded arrived just before the tap did.
+   */
+  elapsedS: number
+  /** This reading's own accuracy, as the receiver reported it. */
+  rawM: number
+  /** How many samples the countdown had collected, including this one. Unique within a transcript. */
+  sampleCount: number
+  /** What `averageReadings` made of those samples — the number the frame was showing. */
+  averagedM: number | null
+  /** What `holdVerdict` said about those samples, at that moment. */
+  verdict: HoldVerdict
+}
+
+const TR_ELAPSED_W = 6
+const TR_RAW_W = 6
+const TR_COUNT_W = 3
+const TR_AVERAGE_W = 7
+
+/** The transcript's column header, in `formatTranscriptRow`'s widths so it lines up under `mono`. */
+function formatTranscriptHeader(): string {
+  return [
+    's'.padStart(TR_ELAPSED_W),
+    'raw'.padStart(TR_RAW_W),
+    'n'.padStart(TR_COUNT_W),
+    'avg'.padStart(TR_AVERAGE_W),
+    'verdict',
+  ].join(' ')
+}
+
+function formatTranscriptRow(row: TranscriptRow): string {
+  return [
+    `${row.elapsedS.toFixed(1)}s`.padStart(TR_ELAPSED_W),
+    `${row.rawM.toFixed(1)}m`.padStart(TR_RAW_W),
+    String(row.sampleCount).padStart(TR_COUNT_W),
+    (row.averagedM === null ? '—' : `±${row.averagedM.toFixed(1)}m`).padStart(TR_AVERAGE_W),
+    row.verdict,
+  ].join(' ')
+}
+
+/**
+ * The row for a reading that has just been collected, from the samples as they
+ * stand with it included.
+ *
+ * Called from the location callback rather than from a render, so `averagedM`
+ * and `verdict` are the values that existed when the reading landed and not a
+ * later replay over a longer buffer. It goes through `previewOf` for the
+ * average deliberately: that is the same function the frame's readout uses, so
+ * the transcript cannot drift from the display it is supposed to corroborate.
+ */
+function buildTranscriptRow(
+  reading: Reading,
+  samplesSoFar: Reading[],
+  startedAtMs: number,
+): TranscriptRow {
+  return {
+    elapsedS: (reading.timestampMs - startedAtMs) / 1000,
+    rawM: reading.accuracyM,
+    sampleCount: samplesSoFar.length,
+    averagedM: previewOf(samplesSoFar)?.accuracyM ?? null,
+    verdict: holdVerdict(samplesSoFar),
+  }
+}
+
 export default function Diagnostics() {
   const status = useDatabaseStatus()
   const { theme } = useTheme()
@@ -447,6 +535,20 @@ export default function Diagnostics() {
   // to be anchored to a fixed point or the log's shape would shift under it
   // every time the buffer trims.
   const sessionStartMs = useRef<number | null>(null)
+  // The countdown transcript, and the tap it is anchored to. Both live up here
+  // beside `collected`, because the location callback that fills them is
+  // created once in this component and the body below is remounted whenever
+  // the database status flips.
+  //
+  // A ref rather than state for the same reason `collected` is one: a reading
+  // arrives roughly every second and re-rendering the whole screen from the
+  // callback would fight the ticker. Nothing is trimmed — the transcript is
+  // bounded by the countdown instead, which is at most 60 s at 1 Hz, and a
+  // trim is precisely the defect it exists to avoid.
+  const transcript = useRef<TranscriptRow[]>([])
+  // When the tap happened, or null when no countdown is collecting. Also the
+  // switch that stops transcript rows accruing outside a countdown.
+  const captureStartMs = useRef<number | null>(null)
   // Mirrors `collecting`. The subscription callback below is created once, when
   // this effect runs with an empty dependency array, so it closes over whatever
   // `collecting` was AT THAT MOMENT — permanently `false` — rather than the
@@ -484,7 +586,17 @@ export default function Diagnostics() {
         // than being defaulted here (spec §7.5 — see `describeMocked` above).
         setMocked(reading.isMocked)
         setReadings((previous) => [...previous.slice(-19), reading])
-        if (collectingRef.current) collected.current.push(reading)
+        if (collectingRef.current) {
+          collected.current.push(reading)
+          // The transcript row is built here, from the samples as they stand
+          // with this reading included, so it records what the control was
+          // showing at this instant rather than what a later render would
+          // recompute over a longer buffer.
+          const startedAtMs = captureStartMs.current
+          if (startedAtMs !== null) {
+            transcript.current.push(buildTranscriptRow(reading, collected.current, startedAtMs))
+          }
+        }
       })
 
       // The screen could have unmounted while `requestPermission`/`watch` was
@@ -526,6 +638,8 @@ export default function Diagnostics() {
       collecting={collecting}
       setCollecting={setCollecting}
       collected={collected}
+      transcript={transcript}
+      captureStartMs={captureStartMs}
       sessionStartMs={sessionStartMs}
       ambient={ambient}
       records={records}
@@ -546,6 +660,8 @@ type BodyProps = {
   collecting: boolean
   setCollecting: (v: boolean) => void
   collected: React.MutableRefObject<Reading[]>
+  transcript: React.MutableRefObject<TranscriptRow[]>
+  captureStartMs: React.MutableRefObject<number | null>
   sessionStartMs: React.MutableRefObject<number | null>
   ambient: ReturnType<typeof createAmbientCache>
   records: FieldRecord[]
@@ -560,10 +676,29 @@ function DiagnosticsBody(props: BodyProps) {
   const db = useDatabase()
   const device = useDevice()
   const { settings, updateSetting } = useSettings()
-  const { latest, readings, collected, sessionStartMs, ambient, setCollecting, setRecords } = props
+  const {
+    latest,
+    readings,
+    collected,
+    transcript,
+    captureStartMs,
+    sessionStartMs,
+    ambient,
+    setCollecting,
+    setRecords,
+  } = props
 
   const [countdown, setCountdownState] = useState<Countdown | null>(null)
   const [countdownSeconds, setCountdownSeconds] = useState<number>(DEFAULT_COUNTDOWN_S)
+  // The transcript's closing marker: how the last countdown ended, or null
+  // while one is running or before the first tap. Without it the transcript
+  // just stops, and "the countdown ended here" is indistinguishable from "the
+  // receiver went quiet".
+  const [transcriptEnd, setTranscriptEnd] = useState<string | null>(null)
+  // True from the instant of a tap until the countdown it starts is running.
+  // Only the ref decides — see `captureNow` — but the state has to exist so
+  // the button can show it and refuse the second press.
+  const [capturing, setCapturing] = useState(false)
   // Re-render clock. `collected` is a ref, so the readout beside the control
   // would otherwise only move when a new reading happened to arrive; the
   // seconds remaining have to fall whether or not the receiver is talking.
@@ -587,10 +722,47 @@ function DiagnosticsBody(props: BodyProps) {
     setCountdownState(next)
   }
 
+  /**
+   * Whether a tap is already being turned into a record.
+   *
+   * `countdownRef` cannot do this job. It is not set until `beginCountdown`,
+   * which is three awaits past the tap — `ensureActivity`, `createRecord`,
+   * `listRecords` — and on the first tap of a session the first of those also
+   * creates a project and an activity. Over that whole window `countdownRef`
+   * is still null and the `countdown` state the button read was null too, and
+   * `Button` is a bare `Pressable` with no debounce, so a second tap passed
+   * every guard and ran a whole second capture. Both reached `beginCountdown`
+   * and the later one won, leaving the first record on disk with one sample,
+   * no spread and a zero-length hold — a row indistinguishable from "the
+   * countdown produced no improvement", which is the exact measurement this
+   * screen is being carried outdoors to make.
+   *
+   * A ref, claimed synchronously at the top of `captureNow` before anything
+   * can await, is the only thing that closes that window. `capturing` mirrors
+   * it for the button; the ref is what enforces it.
+   */
+  const captureInFlightRef = useRef(false)
+
+  /**
+   * Ends a capture's claim on the control, on success and on every failure
+   * alike. The ref is cleared unconditionally — it is what the next tap tests,
+   * and leaving it set after a failure would wedge the one control on the
+   * screen for the life of the session — while the state that mirrors it is a
+   * `setState` after an `await` like any other, so it is guarded.
+   */
+  function releaseCapture() {
+    captureInFlightRef.current = false
+    if (mountedRef.current) setCapturing(false)
+  }
+
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      // A capture in flight when the screen goes away must not leave the flag
+      // set for the remounted body to inherit.
+      captureInFlightRef.current = false
+      captureStartMs.current = null
       // The location subscription lives in the parent, which outlives this body
       // whenever the database status flips away from `ready`. Leaving the
       // collection flag set would go on pushing readings into a buffer for a
@@ -599,7 +771,7 @@ function DiagnosticsBody(props: BodyProps) {
       collected.current = []
       setCollecting(false)
     }
-  }, [collected, setCollecting])
+  }, [captureStartMs, collected, setCollecting])
 
   // Every `listRecords`-backed refresh (the on-arrival load below, and the
   // save handlers) takes this token before its awaits and only applies its
@@ -682,11 +854,31 @@ function DiagnosticsBody(props: BodyProps) {
    * finish.
    */
   async function captureNow() {
-    if (countdownRef.current !== null) return
+    // The in-flight ref first, and it is the guard that matters — see
+    // `captureInFlightRef` above for why `countdownRef` alone let a double-tap
+    // through and what the phantom record it produced looked like. Claimed
+    // synchronously, before the first `await` exists, so a second tap anywhere
+    // in the window returns here.
+    if (captureInFlightRef.current || countdownRef.current !== null) return
+    captureInFlightRef.current = true
+    setCapturing(true)
 
     const startedAtMs = Date.now()
     const endsAtMs = startedAtMs + countdownSeconds * 1000
+
+    // The transcript is reset at the tap and not at the end of a countdown:
+    // the last countdown's rows stay on screen until this moment, which is the
+    // only way the evidence survives the trip.
+    transcript.current = []
+    setTranscriptEnd(null)
+    captureStartMs.current = startedAtMs
     collected.current = latest ? [latest] : []
+    if (latest !== null) {
+      // Row one, for the reading the tap actually recorded. Its elapsed time
+      // is slightly negative because that reading arrived just before the tap,
+      // which is the truth and worth seeing.
+      transcript.current.push(buildTranscriptRow(latest, collected.current, startedAtMs))
+    }
     setCollecting(true)
 
     // Doctrine rule 4: nothing blocks capture, including the absence of a
@@ -700,13 +892,15 @@ function DiagnosticsBody(props: BodyProps) {
     // accuracy is not storable as a position here). Neither is a reason to
     // discard the capture, and the countdown that follows may still give the
     // record a real fix once the receiver starts reporting one.
-    let fix: Fix = { quality: 'none' }
-    let unstorable: string | null = null
-    if (latest !== null) {
-      const attempt = buildDeliberateFix([latest])
-      if (attempt.ok) fix = attempt.fix
-      else unstorable = attempt.message
-    }
+    //
+    // `buildDeliberateFix` is asked even when there is no reading, rather than
+    // the empty case being short-circuited: it is the one place that knows the
+    // sentence for each way a fix can fail to exist, and going through it means
+    // EVERY `'none'` row leaves here with a reason attached rather than only
+    // the ones that had a reading to reject.
+    const attempt = buildDeliberateFix(latest ? [latest] : [])
+    const fix: Fix = attempt.ok ? attempt.fix : { quality: 'none' }
+    const unstorable = attempt.ok ? null : attempt.message
 
     // Taken before the first await so a slower refresh in flight elsewhere
     // (the on-arrival load, or an earlier save) can never win a race against
@@ -716,10 +910,7 @@ function DiagnosticsBody(props: BodyProps) {
     try {
       activityId = await ensureActivity()
     } catch (error) {
-      if (!mountedRef.current) return
-      setCollecting(false)
-      collected.current = []
-      props.setMessage(describeFailure('Could not open the diagnostics activity', error))
+      abandonCapture(describeFailure('Could not open the diagnostics activity', error))
       return
     }
 
@@ -737,37 +928,93 @@ function DiagnosticsBody(props: BodyProps) {
     // a GNSS altitude glitch is the one to expect. Unguarded, that became an
     // unhandled rejection and the screen simply did nothing — the instrument
     // silently failing to report the failure it was carried outdoors to catch.
+    //
+    // `detail` is why a `'none'` row has no position, written into the
+    // append-only `'created'` event. The row itself cannot carry it —
+    // `record_none_has_no_position` NULLs every positional column — and the
+    // on-screen sentence scrolls away, so on a device that never reports
+    // mocked status (where every capture of the trip is a `'none'` row) the
+    // explanation would otherwise exist nowhere at all.
     let record: FieldRecord
-    let loaded: FieldRecord[]
     try {
-      record = await createRecord(db, { activityId, kind: 'pin', fix, deviceId: device.id })
-      loaded = await listRecords(db, activityId)
+      record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix,
+        deviceId: device.id,
+        detail: unstorable ?? undefined,
+      })
     } catch (error) {
-      if (!mountedRef.current) return
-      setCollecting(false)
-      collected.current = []
-      props.setMessage(describeFailure('Save failed', error))
+      abandonCapture(describeFailure('Save failed', error))
       return
     }
-    // The screen may have navigated away while the two awaits were in flight.
-    if (!mountedRef.current) return
-    // A newer save or load may already have refreshed the list. The countdown
-    // still starts either way — it is about this capture, not about the list.
-    if (token === refreshToken.current) setRecords(loaded)
+    // The screen may have navigated away while the write was in flight. The
+    // unmount cleanup has already cleared the collection state; only the
+    // in-flight claim is this function's to give back.
+    if (!mountedRef.current) {
+      releaseCapture()
+      return
+    }
 
+    // The record is on disk from here, so the countdown starts from here —
+    // before the list is reloaded. The reload is a display concern; the
+    // refinement this countdown will perform is not, and the old code let a
+    // failed reload report "Save failed" and start no countdown at all,
+    // leaving a real record the screen had denied saving and that nothing
+    // would ever refine.
     beginCountdown({
       recordId: record.id,
       startAccuracyM: fix.quality === 'none' ? null : fix.accuracyM,
       endsAtMs,
     })
     setTickMs(Date.now())
-    props.setMessage(
+    releaseCapture()
+
+    const saved =
       unstorable === null
         ? `Saved ${describeRecord(record)}${duplicate ? ' — within 5 m of the last one' : ''}. ` +
           'Stand still.'
         : `Saved ${describeRecord(record)} with no position. ${unstorable} Standing still — ` +
-          'the countdown can still give it one.',
-    )
+          'the countdown can still give it one.'
+
+    // Both messages below are guarded by the token as well as by the mount
+    // flag. The countdown is already running by this point, so on a short
+    // countdown and a slow query it can complete while this reload is still in
+    // flight — and "Saved #4. Stand still." landing on top of "Countdown
+    // complete — #4 refined to ±3.2 m" would be a status line telling her to
+    // wait for something that has already finished. `finishCountdown` takes a
+    // newer token, so it wins.
+    let loaded: FieldRecord[]
+    try {
+      loaded = await listRecords(db, activityId)
+    } catch (error) {
+      if (!mountedRef.current || token !== refreshToken.current) return
+      props.setMessage(
+        `${saved} ${describeFailure(
+          'The list below could not be reloaded and may be stale — the record itself is saved',
+          error,
+        )}`,
+      )
+      return
+    }
+    if (!mountedRef.current || token !== refreshToken.current) return
+    setRecords(loaded)
+    props.setMessage(saved)
+  }
+
+  /**
+   * Gives up a capture that failed before its countdown could start: the
+   * collection stops, the transcript's anchor is dropped so no further rows
+   * accrue against a tap that produced nothing, the control is released, and
+   * the reason is said out loud.
+   */
+  function abandonCapture(message: string) {
+    collected.current = []
+    captureStartMs.current = null
+    releaseCapture()
+    if (!mountedRef.current) return
+    setCollecting(false)
+    props.setMessage(message)
   }
 
   /**
@@ -794,6 +1041,15 @@ function DiagnosticsBody(props: BodyProps) {
     setCollecting(false)
     const samples = [...collected.current]
     collected.current = []
+    // The transcript's anchor goes, so no further readings are recorded
+    // against a countdown that has ended — but the rows themselves stay. They
+    // are the evidence the trip exists to collect, and they remain on screen
+    // until the next tap clears them.
+    captureStartMs.current = null
+    setTranscriptEnd(
+      `ended by ${reason === 'override' ? 'the override' : 'the countdown'}, ` +
+        `${String(samples.length)} reading${samples.length === 1 ? '' : 's'} averaged`,
+    )
 
     const attempt = buildDeliberateFix(samples)
     if (!attempt.ok) {
@@ -802,33 +1058,65 @@ function DiagnosticsBody(props: BodyProps) {
       return
     }
 
+    // Every message below is guarded by this token as well as by the mount
+    // flag. A refinement can still be in flight when she taps again — the
+    // countdown ref is released at the top of this function, so the control is
+    // live from that instant — and a late line about the previous capture
+    // landing on top of the current one's is a status line describing the
+    // wrong record.
     const token = ++refreshToken.current
+
+    // The write and the reload have their own `try` each. Sharing one meant a
+    // failure of the RELOAD reported "Refinement failed — the record keeps the
+    // fix it was saved with", which is a false statement about what is on
+    // disk, about the one operation that had actually succeeded.
     let refined: FieldRecord
-    let loaded: FieldRecord[]
     try {
       refined = await refineRecordFix(db, {
         recordId: active.recordId,
         fix: attempt.fix,
         deviceId: device.id,
       })
-      loaded = await listRecords(db, await ensureActivity())
     } catch (error) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current || token !== refreshToken.current) return
       props.setMessage(
         describeFailure('Refinement failed — the record keeps the fix it was saved with', error),
       )
       return
     }
     if (!mountedRef.current) return
-    if (token === refreshToken.current) setRecords(loaded)
 
+    // Composed before the reload, because it is a statement about disk and the
+    // reload cannot change it.
+    //
+    // `refineRecordFix` refuses a `'none'` fix outright, so the null branch is
+    // unreachable — but it says "no position" rather than printing a number,
+    // because the previous `(now ?? 0).toFixed(1)` would have reported a
+    // fabricated "±0.0 m" if it ever were reached, and a made-up accuracy is
+    // the one thing this instrument must never put on screen.
     const now = refined.fix.quality === 'none' ? null : refined.fix.accuracyM
-    props.setMessage(
+    const outcome =
       `${reason === 'override' ? 'Accepted' : 'Countdown complete'} — ` +
-        `${describeRecord(refined)} refined to ±${(now ?? 0).toFixed(1)} m ` +
-        `from ${String(samples.length)} reading${samples.length === 1 ? '' : 's'} ` +
-        `(${describeImprovement(active.startAccuracyM, now)}).`,
-    )
+      `${describeRecord(refined)} refined to ${now === null ? 'no position' : `±${now.toFixed(1)} m`} ` +
+      `from ${String(samples.length)} reading${samples.length === 1 ? '' : 's'} ` +
+      `(${describeImprovement(active.startAccuracyM, now)}).`
+
+    let loaded: FieldRecord[]
+    try {
+      loaded = await listRecords(db, await ensureActivity())
+    } catch (error) {
+      if (!mountedRef.current || token !== refreshToken.current) return
+      props.setMessage(
+        `${outcome} ${describeFailure(
+          'The list below could not be reloaded and may be stale — the refinement itself is on disk',
+          error,
+        )}`,
+      )
+      return
+    }
+    if (!mountedRef.current || token !== refreshToken.current) return
+    setRecords(loaded)
+    props.setMessage(outcome)
   }
 
   // The latest `finishCountdown`, so the timer below can reach it without
@@ -904,9 +1192,18 @@ function DiagnosticsBody(props: BodyProps) {
       : { quality: 'none' }
     // Guarded for the same reason as the capture path above: this one had no
     // guard at all, so a refused insert vanished as an unhandled rejection.
+    // The `detail` is the same idea as on the capture path — a `'none'` row's
+    // columns cannot say why it has no position, and here the reason is a
+    // different one worth telling apart later.
     let loaded: FieldRecord[]
     try {
-      await createRecord(db, { activityId, kind: 'pin', fix, deviceId: device.id })
+      await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix,
+        deviceId: device.id,
+        detail: fixNow ? undefined : 'the ambient cache held no position to stamp',
+      })
       loaded = await listRecords(db, activityId)
     } catch (error) {
       if (!mountedRef.current) return
@@ -949,6 +1246,10 @@ function DiagnosticsBody(props: BodyProps) {
   // It moves the override to a solid fill and adds a sentence; the countdown
   // runs on regardless until it expires or she ends it.
   const plateaued = countdown !== null && holdVerdict(collected.current) === 'plateaued'
+  // Read at render time, like `collected.current` above: the ticker and the
+  // message updates are what re-render, and this reads whatever the location
+  // callback has pushed by then.
+  const transcriptRows = transcript.current
 
   return (
     // Doctrine rule 16: every screen carries a spoken description. This one is
@@ -1038,7 +1339,17 @@ function DiagnosticsBody(props: BodyProps) {
             borderStyle: grade === null || grade === 'poor' ? 'dashed' : 'solid',
             borderRadius: radii.xl,
             padding: spacing.md,
-            backgroundColor: props.theme.colors.surfaceRaised,
+            // Sunken, not raised. `captureAccurate` — the button's kind for
+            // most of every countdown, which is the state the one control on
+            // this screen occupies longest — resolves to exactly the same
+            // value as `surfaceRaised` in both themes, so the control was
+            // painted its own background and separated from it by a 2 px
+            // border alone. The one thing that has to be findable under a
+            // thumb in glare was at its least visible precisely when it
+            // mattered most. `surfaceSunken` is a step away from the button in
+            // both themes, so the control reads as an object sitting in the
+            // frame rather than as part of it.
+            backgroundColor: props.theme.colors.surfaceSunken,
           }}
         >
           <View
@@ -1080,28 +1391,77 @@ function DiagnosticsBody(props: BodyProps) {
           <View style={{ height: spacing.sm }} />
           <Button
             label={
-              countdown === null
-                ? 'RECORD FIX'
-                : plateaued
-                  ? 'ACCEPT NOW — NOT IMPROVING'
-                  : 'ACCEPT NOW'
+              capturing
+                ? 'SAVING…'
+                : countdown === null
+                  ? 'RECORD FIX'
+                  : plateaued
+                    ? 'ACCEPT NOW — NOT IMPROVING'
+                    : 'ACCEPT NOW'
             }
             spokenLabel={
-              countdown === null
-                ? 'Record the current fix now'
-                : 'Accept the fix accumulated so far and end the countdown'
+              capturing
+                ? 'Saving this capture'
+                : countdown === null
+                  ? 'Record the current fix now'
+                  : 'Accept the fix accumulated so far and end the countdown'
             }
             // Lime for the one-tap record, the fast action. During a countdown
             // the override is outlined until the fix stops improving, and solid
             // once it has — prominence, not a decision.
             kind={countdown === null ? 'fast' : plateaued ? 'primary' : 'accurate'}
             size="field"
+            // Only while the tap is being written. `capturing` is false again
+            // by the time `countdown` is set, so the override is live for every
+            // moment the countdown is running, which §9.1 requires. This is the
+            // visible half of the double-tap guard; `captureInFlightRef` is the
+            // half that actually enforces it, because a `Pressable` can be hit
+            // again before a `setState` has rendered.
+            disabled={capturing}
             onPress={() => {
               if (countdown === null) void captureNow()
               else void finishCountdown('override')
             }}
           />
         </View>
+
+        {/*
+          The countdown transcript, immediately below the frame it corroborates
+          (spec §9.4). One row per collected reading, kept until the next tap.
+
+          This is not the reading log further down and does not replace it. The
+          log is a live tail of the trimmed 20-reading buffer, 8 rows deep, so
+          it cannot hold a 30 s countdown let alone a 60 s one; and it shows
+          each reading's own accuracy, while the frame above shows the running
+          average. Only this block can be checked against what the button
+          actually said, which is the single question the field trip exists to
+          answer.
+        */}
+        <View style={{ height: spacing.sm }} />
+        <Card>
+          <Type variant="label" dim>COUNTDOWN TRANSCRIPT</Type>
+          <Type variant="small" dim>
+            Oldest first, from the tap. `raw` is that reading&apos;s own accuracy, `avg` is what the
+            frame was showing, and the verdict is what holdVerdict said — each at the moment the
+            reading arrived. Kept until the next tap.
+          </Type>
+          <View style={{ height: spacing.xs }} />
+          <Type variant="mono" dim>{formatTranscriptHeader()}</Type>
+          {transcriptRows.length === 0 ? (
+            <Type variant="mono" dim>—</Type>
+          ) : (
+            transcriptRows.map((r) => (
+              <Type key={r.sampleCount} variant="mono">{formatTranscriptRow(r)}</Type>
+            ))
+          )}
+          <View style={{ height: spacing.xs }} />
+          {/* Where the countdown began is row 1; this is where it ended. */}
+          <Type variant="small" dim>
+            {countdown !== null
+              ? `collecting — ${String(secondsLeft)}s left`
+              : (transcriptEnd ?? 'no countdown run yet')}
+          </Type>
+        </Card>
 
         <View style={{ height: spacing.sm }} />
         <Type variant="label" dim>COUNTDOWN</Type>
