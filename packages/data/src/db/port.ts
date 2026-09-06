@@ -24,8 +24,14 @@ export interface Database {
    * produce that overlap.
    *
    * `fn` must not call `transaction` again. There is nothing to nest into, and
-   * a serialising adapter turns the attempt into a deadlock rather than an
-   * error. Put every statement of a unit of work in one call.
+   * a serialising adapter would otherwise turn the attempt into a deadlock: the
+   * inner call waits for a queue that cannot advance until the outer body it is
+   * running inside returns. Put every statement of a unit of work in one call.
+   *
+   * An adapter MUST detect that and reject the inner call with an error naming
+   * the problem, rather than relying on nobody ever writing it. A hang has no
+   * error, no stack and nothing in the log; on a field tablet it looks exactly
+   * like a broken device, and the app stops mid-capture.
    */
   transaction<T>(fn: () => Promise<T>): Promise<T>
   close(): Promise<void>

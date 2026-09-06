@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import BetterSqlite3 from 'better-sqlite3'
 import type { Database, SqlValue } from './port'
 
@@ -47,18 +48,37 @@ export async function openTestDatabase(): Promise<Database> {
    * cannot wedge every later transaction behind a rejected link.
    *
    * A transaction body must not itself call `transaction()`. That would wait on
-   * a link that cannot settle until the body returns, which is a deadlock —
-   * a worse failure than the "transaction within a transaction" error it
-   * replaces. No repository does this: the bodies call `execute`/`first`
-   * directly, and a batch that needs several statements passes them all to one
-   * `transaction()` call.
+   * a link that cannot settle until the body returns, which is a deadlock — a
+   * worse failure than the "transaction within a transaction" error it
+   * replaces, because the app simply stops: no error, no stack, nothing in the
+   * log. On a field tablet mid-capture that is indistinguishable from a dead
+   * device. `insideTransaction` below makes it an immediate, named error.
+   *
+   * No repository nests today, but "no caller does this" is a survey, and plans
+   * 3 through 7 add media, batches, export and a capture screen all writing
+   * through this port. A guard outlives a survey.
    */
   let queue: Promise<void> = Promise.resolve()
+
+  /**
+   * Whether the caller is executing inside this database's transaction body.
+   *
+   * An in-flight boolean cannot answer that. A transaction is also open while a
+   * legitimately CONCURRENT caller waits its turn, and rejecting those would
+   * undo the serialisation this queue exists to provide. The question is not "is
+   * a transaction open" but "did this call originate inside one", and an async
+   * context is what tells them apart — it follows the body through every `await`
+   * the body makes, and does not leak to callers that merely overlap it.
+   *
+   * Created per database, so a transaction on one connection never reports the
+   * caller as being inside a different connection's transaction.
+   */
+  const insideTransaction = new AsyncLocalStorage<true>()
 
   async function runTransaction<T>(fn: () => Promise<T>): Promise<T> {
     db.prepare('BEGIN').run()
     try {
-      const result = await fn()
+      const result = await insideTransaction.run(true, fn)
       db.prepare('COMMIT').run()
       return result
     } catch (error) {
@@ -78,6 +98,18 @@ export async function openTestDatabase(): Promise<Database> {
       return (db.prepare(sql).get(...params) as T | undefined) ?? null
     },
     async transaction<T>(fn: () => Promise<T>) {
+      if (insideTransaction.getStore()) {
+        // Thrown before the queue is touched, so the guard costs the queue
+        // nothing: the transaction already in flight finishes normally (this
+        // rejection propagates out of its body, so it rolls back like any other
+        // failure), and the next caller runs exactly as it would have.
+        throw new Error(
+          'Nested transaction: this code is already running inside a transaction on this ' +
+            'database, and transactions here are serialised, so waiting for another one would ' +
+            'deadlock. Pass every statement of the unit of work to a single transaction() call ' +
+            'instead of opening a second one.',
+        )
+      }
       const result = queue.then(() => runTransaction(fn))
       queue = result.then(
         () => undefined,

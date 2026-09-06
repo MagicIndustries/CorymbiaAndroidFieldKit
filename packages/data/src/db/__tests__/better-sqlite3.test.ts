@@ -85,6 +85,56 @@ describe('the test database adapter', () => {
     expect(await db.all('SELECT id FROM t')).toEqual([{ id: 'survivor' }])
   })
 
+  it('rejects a nested transaction instead of deadlocking, and keeps serving the next caller', async () => {
+    // Serialising turns nesting from an error into a hang: the inner call waits
+    // for a queue that cannot advance until the outer body it is running inside
+    // returns. A hang has no error, no stack and nothing in the log — on a field
+    // tablet it is indistinguishable from a dead device. So it must be named.
+    //
+    // The "later callers still work" half is the one that matters. A guard that
+    // avoids a deadlock by wedging the queue behind it has not helped anyone.
+    await expect(
+      db.transaction(async () => {
+        await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['outer', 1])
+        await db.transaction(async () => {
+          await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['inner', 2])
+        })
+      }),
+    ).rejects.toThrow(/Nested transaction/)
+
+    // The outer transaction rolled back, as any failing body does.
+    expect(await db.all('SELECT id FROM t')).toEqual([])
+
+    // And the queue is unharmed: a normal transaction after the rejected one
+    // still runs and commits.
+    await db.transaction(async () => {
+      await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['after', 3])
+    })
+    expect(await db.all('SELECT id FROM t')).toEqual([{ id: 'after' }])
+  })
+
+  it('still queues genuinely concurrent callers rather than treating them as nested', async () => {
+    // The guard must key off "did this call originate inside a transaction
+    // body", not "is a transaction open" — a concurrent caller waiting its turn
+    // is also running while one is open, and rejecting it would undo the
+    // serialisation entirely. Each call here starts from its own context after
+    // an await, so a naive in-flight flag would fail this.
+    const start = async (id: string, n: number): Promise<void> => {
+      await Promise.resolve()
+      await db.transaction(async () => {
+        await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', [id, n])
+        await Promise.resolve()
+      })
+    }
+
+    await Promise.all([start('p', 1), start('q', 2), start('r', 3)])
+    expect(await db.all('SELECT id FROM t ORDER BY id')).toEqual([
+      { id: 'p' },
+      { id: 'q' },
+      { id: 'r' },
+    ])
+  })
+
   it('enforces foreign keys, which SQLite disables by default', async () => {
     await db.execute('CREATE TABLE child (id TEXT PRIMARY KEY, t_id TEXT NOT NULL REFERENCES t(id))')
     await expect(
