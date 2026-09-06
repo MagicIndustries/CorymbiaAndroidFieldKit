@@ -28,7 +28,8 @@ import type { Migration } from '../db/migrate'
  *  * `sequence` — the ordinal WITHIN an activity, which is what makes
  *    "Pin 023" mean something in the survey she is running. A record that is
  *    not in an activity does not have one, and filing a record into the middle
- *    of an activity renumbers the records at and after that position, so this
+ *    of an activity renumbers the records at and after that position — as does
+ *    refiling one out of an activity, which closes the gap behind it — so this
  *    number is explicitly not stable.
  */
 export const migration003: Migration = {
@@ -67,13 +68,22 @@ export const migration003: Migration = {
                          CONSTRAINT record_sequence_positive
                          CHECK (sequence IS NULL OR sequence > 0),
 
-       -- When this record was filed into an activity after the fact, rather
-       -- than captured straight into one. NULL means "captured in place" (or
-       -- still in the Inbox), so the Inbox screen can show at a glance which
-       -- records arrived by filing without asking the event log a question per
-       -- row. It is written in the same transaction as the filing, and by
-       -- nothing else; the 'filed' event remains the source of truth for where
-       -- and on which device the filing happened.
+       -- When this record was placed into the activity it is in NOW by a filing
+       -- decision, rather than captured straight into it. NULL means "captured
+       -- in place" (or still in the Inbox), so the Inbox screen can show at a
+       -- glance which records arrived by filing without asking the event log a
+       -- question per row.
+       --
+       -- "Now" matters because a record can be refiled from one activity to
+       -- another to correct a misfiling: refileRecord overwrites this, because
+       -- the record did not arrive in its new activity at capture either, and
+       -- keeping the older timestamp would leave the column answering a
+       -- question about an activity the record is no longer in. Reordering
+       -- within one activity never touches it.
+       --
+       -- It is written in the same transaction as the filing, and by nothing
+       -- else; the 'filed' events remain the source of truth for where, on
+       -- which device, and out of which activity each filing happened.
        filed_at          TEXT,
 
        title             TEXT,

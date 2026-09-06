@@ -302,10 +302,23 @@ activity, and it changes when records are inserted around it — filing into the
 survey renumbers everything at and after that position, and reordering within a survey is
 the same operation. That is why nothing durable may be keyed to it.
 
+**A record can be moved between activities, and the activity it leaves closes the gap.**
+Misfilings happen — a record captured into whichever survey was running, or filed into the
+wrong one from the Inbox — so refiling is supported. It is the same renumbering run twice in
+one transaction: the destination opens a slot at the position the record lands in, and the
+**source renumbers so it stays 1, 2, 3 with no hole** where the record used to be. Leaving a
+gap was considered and rejected: a survey showing 1, 2, 4, 5 invites the reading that
+something was lost, and the sequence is presentation order that is already expected to shift
+on every insertion. The capture number does not move, so a tube already labelled in marker
+stays correct — which is the whole reason the ordinal is allowed to.
+
 **Filing is visible after the fact.** A record filed into an activity later carries the time
 it was filed, alongside the `filed` entry in the event log (§8.5) that records where and on
 which device it happened. A list can therefore show which of its records arrived by filing
-without asking the log a question per row.
+without asking the log a question per row. The timestamp is about the activity the record is
+in **now**: refiling overwrites it, because a record does not arrive in its new activity at
+capture either, and a `filed` entry that names the activity it came from is what makes the
+move auditable. Reordering within one activity leaves it alone.
 
 **Trade-off accepted.** Two numbers is more to explain than one, and a screen showing both
 would be confusing. The alternative was worse: one number cannot be both immutable enough to

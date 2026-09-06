@@ -231,14 +231,25 @@ export type FieldRecord = {
    */
   sequence: number | null
   /**
-   * When this record was filed into an activity after the fact, or null when it
-   * was captured straight into one (or is still unfiled).
+   * When this record was placed into the activity it is in *now* by a filing
+   * decision, or null when it has been there since capture (or is still
+   * unfiled).
+   *
+   * "Now" is the load-bearing word once records can be refiled between
+   * activities. `fileRecord` sets it when a record leaves the Inbox;
+   * `refileRecord` overwrites it when a record is moved to a different
+   * activity, because the record did not arrive in that activity at capture
+   * either — it arrived by a filing decision, at that moment. Keeping the older
+   * timestamp would have the column answer a question about an activity the
+   * record is no longer in. `moveRecord` never touches it: a reorder does not
+   * change which activity the record arrived in, or when.
    *
    * A column rather than a question asked of the event log, because the Inbox
    * and activity lists show this per row and a hundred records must not cost a
    * hundred queries. It is written in the same transaction as the filing and by
-   * nothing else, so it cannot drift; the `'filed'` event remains the source of
-   * truth for where and on which device the filing happened.
+   * nothing else, so it cannot drift; the `'filed'` events remain the source of
+   * truth for where, on which device, and out of which activity each filing
+   * happened.
    */
   filedAt: string | null
   title: string | null
@@ -650,11 +661,15 @@ async function shiftRange(
  * corrupted one: it either violates the unique index or, worse, it does not,
  * and two records quietly share a label.
  *
- * Refuses a record that is already in an activity, naming `moveRecord` instead.
- * Filing and reordering share every line of their renumbering but not their
- * meaning — one changes where a record lives, the other changes where it sits —
- * and a single function that silently did whichever the record's current state
- * implied would give a caller no way to say which one it meant.
+ * Refuses a record that is already in an activity, naming `moveRecord` or
+ * `refileRecord` instead. The three share every line of their renumbering and
+ * none of their meaning — this one puts a record into an activity for the first
+ * time, `moveRecord` changes where it sits inside the one it is in, and
+ * `refileRecord` corrects which activity it is in at all — and a single
+ * function that silently did whichever the record's current state implied would
+ * give a caller no way to say which one it meant. A stale Inbox screen holding
+ * a record id that has since been filed would then quietly refile it instead of
+ * reporting that the world moved on.
  *
  * `fix` stamps the filing event with where it happened, the way creation and
  * deletion are stamped (spec §8.5), and is optional for the same reason: bulk
@@ -676,7 +691,8 @@ export async function fileRecord(
     if (existing.activity_id !== null) {
       throw new Error(
         `Record ${input.recordId} is already filed into activity ${existing.activity_id}. ` +
-          'Use moveRecord to change its position within that activity.',
+          'Use moveRecord to change its position within that activity, or refileRecord to ' +
+          'move it into a different one.',
       )
     }
 
@@ -784,6 +800,137 @@ export async function moveRecord(
 
   const record = await getRecord(db, input.recordId)
   if (!record) throw new Error(`Record ${input.recordId} vanished immediately after being moved.`)
+  return record
+}
+
+/**
+ * Moves a record from the activity it is in into a different one, appending to
+ * the end of the destination by default or inserting at a chosen position.
+ *
+ * This is the correction path: a record filed into the wrong survey, or
+ * captured into the survey that happened to be running rather than the one it
+ * belongs to. Spec §7.2 already makes the activity ordinal a position in a list
+ * rather than an identity, so both activities renumber:
+ *
+ *  - the **destination** opens a slot at `position`, exactly as `fileRecord`'s
+ *    insert path does;
+ *  - the **source closes the gap** the departing record leaves, so a survey
+ *    never shows a hole where a record used to be. This is the decision the
+ *    owner made, and it is the one consistent with insertion: a list you can
+ *    insert into is a list whose later numbers move, and a list you can remove
+ *    from is a list whose later numbers move back.
+ *
+ * The capture number — the number written in marker on the tube — is untouched
+ * by all of it, which is the whole reason ordinals are allowed to move.
+ *
+ * ## The order of the three steps, and why it needs no parking slot
+ *
+ * `moveRecord` has to park its record at `highest + 1` because the record it is
+ * moving is inside the range it has to shift. Here it is not, because the
+ * record leaves the source before the source is renumbered:
+ *
+ *  1. shift the destination's `[position, targetHighest]` **up** by one, highest
+ *     first, opening the slot;
+ *  2. write the record into the destination at `position` — the slot is free,
+ *     and the source now has a hole at the ordinal it vacated;
+ *  3. shift the source's `[from + 1, sourceHighest]` **down** by one, lowest
+ *     first, closing that hole.
+ *
+ * The two shifts run in opposite directions because they are opposite
+ * operations — one makes room, the other takes it back — and `shiftRange`
+ * already orders each one the way that leaves every destination free at the
+ * moment it is written. Step 2 sits between them so the record is in exactly
+ * one activity at every point: it is never in both, and never in neither.
+ * Doing the source first would leave the row at `from + 1` renumbering onto an
+ * ordinal the departing record still holds.
+ *
+ * Both `maxSequence` reads happen before anything is written, so a rejected
+ * position throws before the first `UPDATE` rather than midway through.
+ *
+ * All three steps and the event are one transaction. A record taken out of one
+ * activity but not landed in the other, or a source closed up while the
+ * destination never opened, is corrupted data of the worst kind — it does not
+ * necessarily violate the unique index, so it can sit there quietly with two
+ * records wearing the same label.
+ *
+ * ## What it refuses
+ *
+ * A record in the Inbox has no activity to be refiled *out of*; that is
+ * `fileRecord`. A "refile" into the activity the record is already in is
+ * refused rather than delegated to `moveRecord`, even though `moveRecord` would
+ * handle it: this function writes a `'filed'` event and overwrites `filed_at`,
+ * and `moveRecord` deliberately does neither, so delegating would make the
+ * postcondition depend on the data rather than on the call — the exact thing
+ * `fileRecord` and `moveRecord` were split apart to avoid. It would also have
+ * to invent a meaning for the appending default, silently reordering an
+ * activity that nobody asked to reorder.
+ *
+ * Logged as `'filed'`: the record did reach an activity, and `filed_at` moves
+ * with it. The event's `activity_id` is the destination, so `detail` carries
+ * the source activity and the ordinal it held there — a log entry that cannot
+ * say where something came from is not an audit trail.
+ */
+export async function refileRecord(
+  db: Database,
+  input: {
+    recordId: string
+    /** The destination. Must not be the activity the record is already in. */
+    activityId: string
+    deviceId: string
+    /** 1-based, in the destination. Omitted appends to its end. */
+    position?: number
+    fix?: Fix
+  },
+): Promise<FieldRecord> {
+  await db.transaction(async () => {
+    const existing = await placementOf(db, input.recordId, 'refile')
+    const sourceActivityId = existing.activity_id
+    const from = existing.sequence
+    if (sourceActivityId === null || from === null) {
+      throw new Error(
+        `Record ${input.recordId} is in the Inbox, so there is no activity to refile it out of. ` +
+          'Use fileRecord to put it into one.',
+      )
+    }
+    if (sourceActivityId === input.activityId) {
+      throw new Error(
+        `Record ${input.recordId} is already in activity ${input.activityId}, so refiling it ` +
+          'there would move it nowhere. Use moveRecord to change its position within an ' +
+          'activity: that writes an ‘edited’ event and leaves filed_at alone, which is what a ' +
+          'reorder is and what refiling is not.',
+      )
+    }
+
+    const sourceHighest = await maxSequence(db, sourceActivityId)
+    const targetHighest = await maxSequence(db, input.activityId)
+    // Appending is position `targetHighest + 1`, the same extra slot fileRecord
+    // allows, and the reason the bound is one past the last existing record.
+    const position = input.position ?? targetHighest + 1
+    checkPosition(position, targetHighest + 1, `in activity ${input.activityId}`)
+
+    const at = nowIso()
+    await shiftRange(db, input.activityId, position, targetHighest, 1, at)
+    await db.execute(
+      `UPDATE record SET activity_id = ?, sequence = ?, filed_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [input.activityId, position, at, at, input.recordId],
+    )
+    await shiftRange(db, sourceActivityId, from + 1, sourceHighest, -1, at)
+
+    await appendEvent(db, {
+      recordId: input.recordId,
+      action: 'filed',
+      deviceId: input.deviceId,
+      fix: input.fix,
+      activityId: input.activityId,
+      detail:
+        `refiled from activity ${sourceActivityId} sequence ${String(from)} ` +
+        `to sequence ${String(position)}`,
+    })
+  })
+
+  const record = await getRecord(db, input.recordId)
+  if (!record) throw new Error(`Record ${input.recordId} vanished immediately after being refiled.`)
   return record
 }
 

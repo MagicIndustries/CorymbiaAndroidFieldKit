@@ -1,6 +1,6 @@
 import { openTestDatabase } from '../../db/better-sqlite3'
 import { migrate } from '../../db/migrate'
-import type { Database } from '../../db/port'
+import type { Database, SqlValue } from '../../db/port'
 import { createActivity } from '../activities'
 import { createProject } from '../projects'
 import { registerDevice } from '../devices'
@@ -12,6 +12,7 @@ import {
   listRecords,
   listUnfiledRecords,
   moveRecord,
+  refileRecord,
   sampleEvidence,
   softDeleteRecord,
 } from '../records'
@@ -558,7 +559,8 @@ describe('records', () => {
 })
 
 /**
- * Filing (spec §10.2) and reordering — the two halves of the same renumbering.
+ * Filing (spec §10.2), reordering, and refiling between activities — three uses
+ * of the same renumbering.
  *
  * Every assertion about ordering reads the raw `record` table rather than
  * `listRecords`, because tombstones are load-bearing here: `idx_record_sequence`
@@ -567,7 +569,7 @@ describe('records', () => {
  * tombstones could not tell a correct renumbering from one that left a dead
  * record sitting on a number a live record was about to be given.
  */
-describe('filing and reordering', () => {
+describe('filing, reordering and refiling', () => {
   let db: Database
   let activityId: string
   let otherActivityId: string
@@ -618,8 +620,9 @@ describe('filing and reordering', () => {
     await db.close()
   })
 
-  const capture = async (): Promise<string> =>
-    (await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })).id
+  const captureInto = async (into: string): Promise<string> =>
+    (await createRecord(db, { activityId: into, kind: 'pin', fix: DELIBERATE, deviceId })).id
+  const capture = async (): Promise<string> => captureInto(activityId)
   const inboxCapture = async (): Promise<string> =>
     (await createRecord(db, { activityId: null, kind: 'pin', fix: AMBIENT, deviceId })).id
 
@@ -878,6 +881,297 @@ describe('filing and reordering', () => {
     // moved, or the capture-number assertion above is about numbers nothing
     // ever disturbed.
     expect(before[unfiled]).toBe(3)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Refiling: the same renumbering run twice, in opposite directions, on two
+  // activities at once. The destination opens a slot; the source closes the gap.
+  // ---------------------------------------------------------------------------
+
+  it('moves a record out of the middle of one survey into the middle of another', async () => {
+    const a1 = await capture()
+    const a2 = await capture()
+    const a3 = await capture()
+    const a4 = await capture()
+    const b1 = await captureInto(otherActivityId)
+    const b2 = await captureInto(otherActivityId)
+    const b3 = await captureInto(otherActivityId)
+    const before = await captureNumbers()
+
+    const refiled = await refileRecord(db, {
+      recordId: a2,
+      activityId: otherActivityId,
+      deviceId,
+      position: 2,
+    })
+
+    expect(refiled.activityId).toBe(otherActivityId)
+    expect(refiled.sequence).toBe(2)
+    // The source closes up: 1, 2, 3 with no hole where a2 used to be.
+    expect(await placements(activityId)).toEqual([
+      { id: a1, sequence: 1 },
+      { id: a3, sequence: 2 },
+      { id: a4, sequence: 3 },
+    ])
+    expect(await placements(otherActivityId)).toEqual([
+      { id: b1, sequence: 1 },
+      { id: a2, sequence: 2 },
+      { id: b2, sequence: 3 },
+      { id: b3, sequence: 4 },
+    ])
+    // The justification for letting the ordinals in BOTH surveys move: not one
+    // of the seven tube labels did.
+    expect(await captureNumbers()).toEqual(before)
+  })
+
+  it('shifts a tombstone behind the departing record, and leaves one in front of it alone', async () => {
+    // THE test for the gap-closing. idx_record_sequence has no deleted_at
+    // predicate, so a soft-deleted record still occupies its ordinal: a
+    // close-up that skipped tombstones would leave a4's dead row on 4 while
+    // a5 renumbered onto it — `UNIQUE constraint failed` — and a close-up that
+    // shifted the rows in front of the departure would corrupt ordinals nothing
+    // asked to move.
+    const a1 = await capture()
+    const a2 = await capture()
+    const a3 = await capture()
+    const a4 = await capture()
+    const a5 = await capture()
+    await softDeleteRecord(db, a2, deviceId) // in front of the departure
+    await softDeleteRecord(db, a4, deviceId) // behind it
+    const before = await captureNumbers()
+
+    await refileRecord(db, { recordId: a3, activityId: otherActivityId, deviceId })
+
+    expect(await placements(activityId)).toEqual([
+      { id: a1, sequence: 1 },
+      { id: a2, sequence: 2 }, // tombstone in front: unmoved
+      { id: a4, sequence: 3 }, // tombstone behind: shifted down like any other
+      { id: a5, sequence: 4 },
+    ])
+    expect(await placements(otherActivityId)).toEqual([{ id: a3, sequence: 1 }])
+    expect(await captureNumbers()).toEqual(before)
+  })
+
+  it('appends to the end of an empty activity when no position is asked for', async () => {
+    const a1 = await capture()
+    const a2 = await capture()
+
+    const refiled = await refileRecord(db, {
+      recordId: a2,
+      activityId: otherActivityId,
+      deviceId,
+    })
+
+    expect(refiled.sequence).toBe(1)
+    expect(await placements(activityId)).toEqual([{ id: a1, sequence: 1 }])
+    expect(await placements(otherActivityId)).toEqual([{ id: a2, sequence: 1 }])
+  })
+
+  it('refiles the only record in an activity, leaving that activity empty', async () => {
+    const only = await capture()
+    const b1 = await captureInto(otherActivityId)
+    const b2 = await captureInto(otherActivityId)
+    const before = await captureNumbers()
+
+    const refiled = await refileRecord(db, {
+      recordId: only,
+      activityId: otherActivityId,
+      deviceId,
+    })
+
+    expect(refiled.sequence).toBe(3)
+    // An empty source is a legal end state, not an error: closing a gap of one
+    // in a survey of one leaves nothing behind.
+    expect(await placements(activityId)).toEqual([])
+    expect(await placements(otherActivityId)).toEqual([
+      { id: b1, sequence: 1 },
+      { id: b2, sequence: 2 },
+      { id: only, sequence: 3 },
+    ])
+    expect(await captureNumbers()).toEqual(before)
+  })
+
+  it('logs the refiling as a filing that names the activity it came from', async () => {
+    // A log entry that cannot tell you where something was is not an audit
+    // trail. The event's activity_id is the destination, so the source and the
+    // ordinal it held there have to be in the detail or they are nowhere.
+    const a1 = await capture()
+    const a2 = await capture()
+    await captureInto(otherActivityId)
+
+    await refileRecord(db, {
+      recordId: a2,
+      activityId: otherActivityId,
+      deviceId,
+      position: 1,
+      fix: AMBIENT,
+    })
+
+    const events = await listEvents(db, a2)
+    expect(events.map((e) => e.action)).toEqual(['created', 'filed'])
+    const refiling = events[1]
+    expect(refiling?.activityId).toBe(otherActivityId)
+    expect(refiling?.detail).toBe(
+      `refiled from activity ${activityId} sequence 2 to sequence 1`,
+    )
+    expect(refiling?.fixQuality).toBe('ambient')
+    expect(refiling?.isMocked).toBe(false)
+    // a1 never moved, so nothing was written about it.
+    expect((await listEvents(db, a1)).map((e) => e.action)).toEqual(['created'])
+  })
+
+  it('stamps filed_at on a record that had been in its activity since capture', async () => {
+    // filed_at answers "did this record arrive in the activity it is in NOW by
+    // a filing decision, and when". A record captured straight into Survey 3
+    // and then refiled into Survey 4 did not arrive there at capture, so the
+    // column has to start saying so.
+    const captured = await capture()
+    expect((await getRecord(db, captured))?.filedAt).toBeNull()
+
+    const refiled = await refileRecord(db, {
+      recordId: captured,
+      activityId: otherActivityId,
+      deviceId,
+    })
+
+    expect(refiled.filedAt).not.toBeNull()
+  })
+
+  it('refuses to refile a record into the activity it is already in', async () => {
+    await capture()
+    const two = await capture()
+
+    await expect(
+      refileRecord(db, { recordId: two, activityId, deviceId, position: 1 }),
+    ).rejects.toThrow(/already in activity/)
+    // The sentence has to name the function that does what was probably meant.
+    await expect(
+      refileRecord(db, { recordId: two, activityId, deviceId, position: 1 }),
+    ).rejects.toThrow(/moveRecord/)
+    expect(await placements(activityId)).toHaveLength(2)
+    expect((await listEvents(db, two)).map((e) => e.action)).toEqual(['created'])
+  })
+
+  it('refuses to refile a record that is in the Inbox, a deleted one, or a missing one', async () => {
+    const unfiled = await inboxCapture()
+    await expect(
+      refileRecord(db, { recordId: unfiled, activityId, deviceId }),
+    ).rejects.toThrow(/is in the Inbox/)
+
+    await expect(
+      refileRecord(db, { recordId: 'rec_missing', activityId, deviceId }),
+    ).rejects.toThrow(/rec_missing does not exist/)
+
+    const deleted = await capture()
+    await softDeleteRecord(db, deleted, deviceId)
+    await expect(
+      refileRecord(db, { recordId: deleted, activityId: otherActivityId, deviceId }),
+    ).rejects.toThrow(/has been deleted/)
+  })
+
+  it('refuses a position past the end of the destination, leaving both activities untouched', async () => {
+    const a1 = await capture()
+    const a2 = await capture()
+    const b1 = await captureInto(otherActivityId)
+
+    // One record in the destination, so 1 and 2 are legal and 3 is not. The
+    // check runs before the first UPDATE, which is what "untouched" below is
+    // actually testing.
+    await expect(
+      refileRecord(db, { recordId: a2, activityId: otherActivityId, deviceId, position: 3 }),
+    ).rejects.toThrow(/whole number from 1 to 2/)
+    await expect(
+      refileRecord(db, { recordId: a2, activityId: otherActivityId, deviceId, position: 0 }),
+    ).rejects.toThrow(/whole number from 1 to 2/)
+
+    expect(await placements(activityId)).toEqual([
+      { id: a1, sequence: 1 },
+      { id: a2, sequence: 2 },
+    ])
+    expect(await placements(otherActivityId)).toEqual([{ id: b1, sequence: 1 }])
+    expect((await listEvents(db, a2)).map((e) => e.action)).toEqual(['created'])
+  })
+
+  /**
+   * The same database, with one statement made to fail — the only way to reach
+   * the middle of a transaction from outside it without editing the production
+   * code the test is supposed to be judging.
+   *
+   * It wraps `execute` only. `transaction` is spread through untouched, so
+   * BEGIN/COMMIT/ROLLBACK still run against the same connection and the
+   * rollback under test is the real one.
+   */
+  const failingOn = (
+    base: Database,
+    doomed: (sql: string, params: SqlValue[]) => boolean,
+  ): Database => ({
+    ...base,
+    async execute(sql, params = []) {
+      if (doomed(sql, params)) throw new Error('the tablet died mid-refile')
+      await base.execute(sql, params)
+    },
+  })
+
+  it('rolls BOTH activities back when the refile dies after the source has renumbered', async () => {
+    // The strongest partial state this implementation can reach: the
+    // destination has opened its slot, the record has landed in it, and the
+    // source has closed its gap over a3 — and then the last statement of all,
+    // a4's shift down, never happens. Nothing may survive.
+    const a1 = await capture()
+    const a2 = await capture()
+    const a3 = await capture()
+    const a4 = await capture()
+    const b1 = await captureInto(otherActivityId)
+    const b2 = await captureInto(otherActivityId)
+    const before = await captureNumbers()
+
+    const doomed = failingOn(
+      db,
+      (sql, params) => /UPDATE record SET sequence/.test(sql) && params.includes(a4),
+    )
+    await expect(
+      refileRecord(doomed, { recordId: a2, activityId: otherActivityId, deviceId, position: 1 }),
+    ).rejects.toThrow(/died mid-refile/)
+
+    expect(await placements(activityId)).toEqual([
+      { id: a1, sequence: 1 },
+      { id: a2, sequence: 2 },
+      { id: a3, sequence: 3 },
+      { id: a4, sequence: 4 },
+    ])
+    expect(await placements(otherActivityId)).toEqual([
+      { id: b1, sequence: 1 },
+      { id: b2, sequence: 2 },
+    ])
+    expect((await getRecord(db, a2))?.activityId).toBe(activityId)
+    expect((await getRecord(db, a2))?.filedAt).toBeNull()
+    expect((await listEvents(db, a2)).map((e) => e.action)).toEqual(['created'])
+    expect(await captureNumbers()).toEqual(before)
+  })
+
+  it('rolls BOTH activities back when the refile dies after the destination has opened its slot', async () => {
+    // The mirror partial state: the destination has made room and the record
+    // has not yet moved into it, so the destination is the half that is wrong.
+    // A rollback that only restored the source would leave b1 and b2 sitting on
+    // 2 and 3 with nothing on 1.
+    const a1 = await capture()
+    const a2 = await capture()
+    const b1 = await captureInto(otherActivityId)
+    const b2 = await captureInto(otherActivityId)
+
+    const doomed = failingOn(db, (sql) => /UPDATE record SET activity_id/.test(sql))
+    await expect(
+      refileRecord(doomed, { recordId: a2, activityId: otherActivityId, deviceId, position: 1 }),
+    ).rejects.toThrow(/died mid-refile/)
+
+    expect(await placements(activityId)).toEqual([
+      { id: a1, sequence: 1 },
+      { id: a2, sequence: 2 },
+    ])
+    expect(await placements(otherActivityId)).toEqual([
+      { id: b1, sequence: 1 },
+      { id: b2, sequence: 2 },
+    ])
   })
 })
 
