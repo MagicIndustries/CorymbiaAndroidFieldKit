@@ -3,6 +3,8 @@ import { migrate } from '../../db/migrate'
 import type { Database } from '../../db/port'
 import { createProject, getProject, listProjects } from '../projects'
 
+const FOREIGN_KEY = /FOREIGN KEY constraint failed/
+
 describe('projects', () => {
   let db: Database
   beforeEach(async () => {
@@ -74,5 +76,42 @@ describe('projects', () => {
       project.id,
     ])
     expect(await listProjects(db)).toEqual([])
+  })
+
+  it('rolls back the entire transaction if a location does not exist', async () => {
+    await expect(
+      createProject(db, { name: 'Yarra Flats', locationIds: ['location-does-not-exist'] }),
+    ).rejects.toThrow(FOREIGN_KEY)
+
+    // The critical assertion: the project row must not exist either
+    const projectRow = await db.all<{ id: string }>(
+      'SELECT id FROM project WHERE name = ? AND deleted_at IS NULL',
+      ['Yarra Flats'],
+    )
+    expect(projectRow).toEqual([])
+  })
+
+  it('sorts active projects before archived ones, regardless of update time', async () => {
+    const archived = await createProject(db, { name: 'Old Active' })
+    await new Promise((r) => setTimeout(r, 5))
+    const active = await createProject(db, { name: 'New Active' })
+
+    // Archive the first one and update it to be more recent than the active project
+    await db.execute('UPDATE project SET status = ?, updated_at = ? WHERE id = ?', [
+      'archived',
+      '2026-09-07T00:00:00+00:00',
+      archived.id,
+    ])
+    // Update the active project to have an older timestamp
+    await db.execute('UPDATE project SET updated_at = ? WHERE id = ?', [
+      '2026-01-01T00:00:00+00:00',
+      active.id,
+    ])
+
+    const listed = await listProjects(db)
+    expect(listed.map((p) => p.id)).toEqual([active.id, archived.id])
+    expect(listed).toHaveLength(2)
+    expect(listed[0]!.status).toBe('active')
+    expect(listed[1]!.status).toBe('archived')
   })
 })

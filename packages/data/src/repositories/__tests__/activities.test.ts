@@ -61,4 +61,30 @@ describe('activities', () => {
   it('returns null when nothing has been started yet', async () => {
     expect(await mostRecentActivity(db)).toBeNull()
   })
+
+  it('excludes soft-deleted activities from the most recent listing', async () => {
+    const older = await createActivity(db, { projectId, kind: 'survey', name: 'First' })
+    await new Promise((r) => setTimeout(r, 5))
+    const newer = await createActivity(db, { projectId, kind: 'survey', name: 'Second' })
+
+    // Soft-delete the more recent one
+    await db.execute('UPDATE activity SET deleted_at = ? WHERE id = ?', [
+      '2026-09-06T00:00:00Z',
+      newer.id,
+    ])
+
+    // mostRecentActivity should return the older one
+    const recent = await mostRecentActivity(db)
+    expect(recent?.id).toBe(older.id)
+  })
+
+  it('returns null for mostRecentActivity when the only activity is soft-deleted', async () => {
+    const activity = await createActivity(db, { projectId, kind: 'survey', name: 'Only One' })
+    await db.execute('UPDATE activity SET deleted_at = ? WHERE id = ?', [
+      '2026-09-06T00:00:00Z',
+      activity.id,
+    ])
+
+    expect(await mostRecentActivity(db)).toBeNull()
+  })
 })
