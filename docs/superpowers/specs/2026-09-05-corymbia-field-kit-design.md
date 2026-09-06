@@ -445,9 +445,16 @@ A small key-value store, in the same database, holding what the user has chosen 
 what she has recorded. Distinct from the domain tables on purpose: these are preferences, not
 observations, and they never appear in an export.
 
-What it holds today: the theme override, handedness, which capture control takes the dominant
-side, and the form density. Each has a default, so an unset key is not an error and a fresh
-install behaves correctly before anything is written.
+What it holds today: the theme override, handedness, and the form density. Each has a
+default, so an unset key is not an error and a fresh install behaves correctly before
+anything is written.
+
+It also still holds **`capturePrimary`**, which is no longer live settings content. It chose
+which of two capture boxes took the dominant side, and §9.1 replaced the pair with a single
+control, so there is nothing left for it to choose. The key and its column stay exactly where
+they are rather than being migrated away (§5.4): it is stored, shown on the diagnostics
+screen as the persistence proof it has always doubled as, and read by nothing. Plan 3 decides
+whether it acquires a new meaning or is retired.
 
 The reason it exists at all is that an override which resets at every launch is not an
 override — and the field conditions these settings exist for do not change between launches.
@@ -567,29 +574,78 @@ control takes the dominant side no longer means anything, because there is one (
 
 ### 9.2 The traffic-light frame
 
-A coloured frame around the entire capture screen, live at all times, doing two jobs:
+A coloured frame, live at all times, doing two jobs:
 
 - **Fix quality**, continuously — green, amber, red. Readable from peripheral vision in
   glare, with gloves, while moving.
-- **Hold progress**, charging around the perimeter as readings accumulate.
+- **Countdown progress**, charging around the perimeter as the wait runs down.
 
-Always backed by the word in the chip (`GOOD FIX` / `SHARPENING…` / `POOR FIX`), the numeric
+Two things changed with §9.1 and are stated here rather than left to be inferred:
+
+- **The frame is around the capture block, not around the whole screen.** It encloses the
+  readout and the control together, because §9.1.2 requires them to be one object within
+  sight of the thumb. A frame around the entire screen would put its own perimeter as far
+  from the button as the old readout panel was, which is the defect being fixed.
+- **The perimeter shows the countdown, not accumulated readings.** Under the superseded
+  press-and-hold model the only measure of progress was how many readings a hold had
+  gathered. There is now a fixed wait with a known end, so the perimeter is the honest
+  progress of *that* — it empties as the seconds run down and completes when the countdown
+  does. Sample count is still shown, as a number, inside the frame.
+
+Always backed by the word in the chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`), the numeric
 readout, and a dashed border when poor. Colour never carries the meaning alone.
 
-### 9.3 The accuracy gap bar
+**There is no separate `SHARPENING…` state.** That chip existed because a hold produced a
+provisional number that was not yet the saved one. Under §9.1 the record is already on disk
+and the countdown is refining it, so at every instant the frame grades the fix that would
+actually be stored if the wait ended now — which is a real graded fix, not a pending one.
+The countdown is shown by the seconds remaining and the perimeter, not by replacing the
+grade with a status word.
 
-A solid bar for current accuracy, a hatched extension for what a hold could add, and one
-sentence of plain English beneath it.
+### 9.3 What the countdown says in words
 
 **The verdict is derived from the observed trend, not from a hardware estimate.** While
-accuracy is still falling across recent readings: "Still improving — keep holding." Once it
-plateaus: "About as sharp as it gets here." This is honest, computable, and answers the only
-question she actually has.
+accuracy is still falling across recent readings: "Still improving — keep standing still."
+Once it plateaus: "About as sharp as it gets here — accepting now costs nothing." This is
+honest, computable, and answers the only question she actually has.
+
+That sentence **suggests and never decides** (§9.1.5). `holdVerdict` has been observed
+reading `plateaued` continuously through a stretch in which accuracy fell from 6.4 m to
+4.0 m. So the plateau line changes the wording and makes the override prominent, and the
+countdown carries on until it expires or she ends it.
+
+Beside it, in words rather than a bar: **how much sharper the fix is than it was at the
+tap**, signed. A countdown that made the fix *worse* is the single most useful thing this
+interaction could report, and a readout that only ever showed improvement would hide it.
+
+**The hatched gap bar is gone.** It drew a solid bar for current accuracy and a hatched
+extension for what a hold *could* add — a prediction about a future the app cannot make. It
+belonged to a model in which the saved fix did not exist yet. Now the fix is on disk from the
+tap and the question is not "what might I gain" but "has this stopped improving", which is
+the observed trend and is answered in the sentence above.
 
 ### 9.4 Supporting readouts
 
-Satellites, datum, altitude, and live coordinates in monospace. During a hold: readings
-averaged, and the improvement delta.
+Satellites, datum, altitude, and live coordinates in monospace. These are context about the
+receiver, are not about the convergence of the capture in hand, and may sit anywhere on the
+screen.
+
+**Readings averaged and the improvement delta are not supporting readouts.** They live
+inside the traffic-light frame with the control (§9.1.2). Separating them from the button is
+the exact defect §9.1 exists to fix, and this section previously prescribed that separation.
+
+**A countdown transcript**, on the diagnostics screen while the countdown length is still
+being settled: one row per reading collected since the tap, carrying the elapsed seconds,
+that reading's own accuracy, the sample count, the running averaged accuracy, and the
+verdict — each as it stood at the moment that reading arrived, so the rows are literally what
+the control was showing. It survives the countdown and stays until the next tap.
+
+It is a distinct thing from a live reading tail, and both exist because neither does the
+other's job: a tail is trimmed, shows raw per-reading accuracy, and has no marker of where a
+countdown began or ended, so it cannot corroborate the averaged number the operator was
+watching or the improvement claimed about it. Establishing when the plateau signal actually
+fires on real hardware is the whole reason for the field measurements §9.1 defers to Plan 3,
+and the transcript is the only record of it that survives the trip.
 
 ### 9.5 Duplicate guard
 
