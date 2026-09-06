@@ -145,17 +145,30 @@ Devices: Samsung S25 (development reference), Samsung S24 and a 10-inch tablet (
 width and must be complete on its own. Tablet layouts add space and adjacency, never
 features.
 
-**Size classes**, keyed on shortest-side dp, mirroring Android's own convention:
+Two separate questions, which an earlier draft of this spec wrongly collapsed into one.
 
-| Class | Width | Devices |
+**How much horizontal room is there right now?** Orientation-dependent, and it drives layout
+— two panes side by side, or one pane you navigate between. Answered by **size class**, from
+the current window width, mirroring Android's `WindowWidthSizeClass`:
+
+| Class | Current width | When |
 | --- | --- | --- |
-| `compact` | < 600dp | Both phones, portrait |
+| `compact` | < 600dp | Either phone, portrait |
 | `medium` | 600–839dp | 10-inch tablet, portrait |
-| `expanded` | ≥ 840dp | 10-inch tablet, landscape |
+| `expanded` | ≥ 840dp | 10-inch tablet landscape, and either phone in landscape |
 
-Components branch on size class only, never on raw dimensions, via a `useLayout()` hook that
-also reports orientation. Same discipline as the semantic tokens: one vocabulary, enforced
-by lint.
+**What kind of device is this?** Orientation-invariant, and it drives ergonomics. Answered by
+**device class**, from the shortest side: under 600dp is a `phone`, 600 and above a `tablet`.
+
+The distinction is load-bearing. Deriving both answers from one number is unworkable: keying
+on the shortest side means a rigid tablet can never become `expanded` by rotating, so every
+landscape layout is dead code; keying on width alone means a phone in landscape — genuinely
+915dp wide — inherits the tablet's reach ergonomics, and the capture controls end up in
+corners the user's thumbs cannot reach.
+
+Components branch on these named classes only, never on raw dimensions, via a `useLayout()`
+hook reporting size class, device class and orientation. Same discipline as the semantic
+tokens: one vocabulary, enforced by lint.
 
 **Type sizes and touch targets stay at roughly constant physical size across devices.**
 Extra tablet space becomes more content or calmer spacing — never larger widgets. Scaling
@@ -166,8 +179,9 @@ everything up is the most common tablet mistake and reads as an enlarged phone a
 On a 10-inch tablet held in two hands, the centre of the screen is hardest to reach and the
 corners are easiest. This inverts phone thinking.
 
-- Interactive controls live in the bottom third on `compact`, and hug the bottom corners on
-  `expanded`.
+- Interactive controls live in the bottom third by default, and hug the bottom corners only
+  on a **tablet in landscape** — the one case where the thumbs actually rest near the
+  corners. A phone in landscape keeps the bottom band despite being `expanded` by width.
 - Readouts occupy the centre — looked at, not touched.
 - **Reach zones are user-configurable.** A handedness and anchor setting determines which
   corner the working column occupies and which side primary actions sit on. Changing it
@@ -354,8 +368,8 @@ never discovers a hidden gesture. Side by side, the trade-off reads as speed on 
 quality on the right. During a hold the left box dims and the right relabels to `RELEASE TO
 SAVE`, so the screen only ever offers one live action.
 
-Placement follows the reach zone setting: bottom band on `compact`, bottom corners on
-`expanded` — one box under each thumb.
+Placement follows the reach zone setting: a bottom band by default, and one box under each
+thumb in the bottom corners on a tablet in landscape.
 
 ### 9.2 The traffic-light frame
 

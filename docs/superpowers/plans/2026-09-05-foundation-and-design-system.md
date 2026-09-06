@@ -23,6 +23,19 @@
 - **Target devices:** Samsung S25 (development), Samsung S24 and a 10-inch tablet (user). Tablet layouts are Plan 6; this plan must not regress on `compact`.
 - **Commit after every task.** Conventional commit prefixes (`feat:`, `test:`, `chore:`).
 
+## Execution Order
+
+Tasks are **not** executed in numeric order. Task 6 scaffolds the Expo application, and that
+is what pins the React and React Native versions every other package must match. Building
+`packages/ui` first would resolve those to arbitrary latest versions and then collide with
+Expo's pins.
+
+**Run in this order: 1, 2, 6, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13.**
+
+Task 6 is therefore written to depend only on `@corymbia/tokens`, with a plain smoke screen;
+Task 12 adds the `@corymbia/ui` and `@corymbia/brand` dependencies and wires the
+`ThemeProvider` into the app shell.
+
 ---
 
 ## File Structure
@@ -234,7 +247,9 @@ git commit -m "chore: initialise pnpm workspace with turborepo"
   - `darkTheme: Theme`, `lightTheme: Theme`
   - `type ThemeName = 'dark' | 'light'`
 
-**Why this task exists:** this is the only package permitted to contain hex literals. Everything downstream reads the semantic layer. The test enforces that dark and light expose an identical key set, which is what actually prevents light mode from shipping ninety percent complete.
+**Why this task exists:** this is the only package permitted to contain hex literals — and within it, only `ramp.ts`. Everything downstream reads the semantic layer. The test enforces that dark and light expose an identical key set, which is what actually prevents light mode from shipping ninety percent complete.
+
+**Note:** an earlier draft of this task put a handful of literals directly in `semantic.ts`, which contradicted that invariant and would have failed the lint rule in Task 5. Every colour now lives in `ramp.ts`; `semantic.ts` contains no hex at all. The code blocks below are the shipped versions.
 
 - [ ] **Step 1: Create the package manifest**
 
@@ -347,6 +362,9 @@ Expected: FAIL — `Cannot find module '../index'`.
  * Raw colour ramps. THIS IS THE ONLY FILE IN THE REPO PERMITTED TO CONTAIN HEX
  * LITERALS. Everything else consumes the semantic layer in `semantic.ts`.
  * Values are taken from design/logo/logo.svg and design/brochure/.
+ *
+ * Entries here are named for what the colour IS, never for where it is used
+ * or which theme it serves — that assignment happens in `semantic.ts`.
  */
 export const ramp = {
   /** Five-stop gradient from the logo mark, left to right. */
@@ -355,6 +373,7 @@ export const ramp = {
   /** Discrete brand greens, from the logo's spore dots. */
   brand: {
     lime: '#98D455',
+    limeDeep: '#4E9B22',
     grass: '#84CF69',
     mint: '#55D28C',
     teal: '#30CF9F',
@@ -380,19 +399,33 @@ export const ramp = {
     900: '#16212A',
   },
 
-  /** Semantic status hues. Deliberately outside the brand — they mean, not decorate. */
-  status: {
-    goodDark: '#30CF9F',
-    goodLight: '#12996F',
-    fair: '#E8B33D',
-    poor: '#E86A4D',
-  },
+  /** A deep, muted green — distinct from the brand greens above. */
+  deepGreen: '#12996F',
 
-  ink: {
-    onLime: '#12290A',
-    onTeal: '#04231A',
-    onFair: '#2B1C05',
-    onPoor: '#2B0C05',
+  /** Amber, as named in the spec. */
+  amber: '#E8B33D',
+  /** A darker ochre variant of amber, for use on light grounds. */
+  amberDark: '#9A6B10',
+
+  /** Rust, as named in the spec. */
+  rust: '#E86A4D',
+  /** A darker brick-red variant of rust, for use on light grounds. */
+  rustDark: '#B23A21',
+
+  /** Pale green-grey. */
+  paleGreenGrey: '#E6EDEA',
+  /** Blue-grey. */
+  blueGrey: '#8FA3AD',
+
+  /** Plain black, used as a scrim/overlay base. */
+  black: '#000000',
+
+  /** Four near-black tints, one per hue, for text/ink pairings on saturated fills. */
+  nearBlack: {
+    green: '#12290A',
+    teal: '#04231A',
+    brown: '#2B1C05',
+    red: '#2B0C05',
   },
 } as const
 ```
@@ -509,26 +542,26 @@ export const darkTheme: Theme = {
     border: ramp.slate[700],
     borderStrong: ramp.slate[600],
 
-    textPrimary: '#E6EDEA',
-    textDim: '#8FA3AD',
-    textOnAccent: ramp.ink.onTeal,
+    textPrimary: ramp.paleGreenGrey,
+    textDim: ramp.blueGrey,
+    textOnAccent: ramp.nearBlack.teal,
 
     accent: ramp.brand.teal,
     accentMuted: ramp.brand.mint,
 
     captureFast: ramp.brand.lime,
-    captureFastInk: ramp.ink.onLime,
+    captureFastInk: ramp.nearBlack.green,
     captureAccurate: ramp.slate[900],
-    captureAccurateInk: '#E6EDEA',
+    captureAccurateInk: ramp.paleGreenGrey,
 
-    statusGood: ramp.status.goodDark,
-    statusGoodInk: ramp.ink.onTeal,
-    statusFair: ramp.status.fair,
-    statusFairInk: ramp.ink.onFair,
-    statusPoor: ramp.status.poor,
-    statusPoorInk: ramp.ink.onPoor,
+    statusGood: ramp.brand.teal,
+    statusGoodInk: ramp.nearBlack.teal,
+    statusFair: ramp.amber,
+    statusFairInk: ramp.nearBlack.brown,
+    statusPoor: ramp.rust,
+    statusPoorInk: ramp.nearBlack.red,
 
-    overlay: '#000000',
+    overlay: ramp.black,
   },
 }
 
@@ -544,24 +577,24 @@ export const lightTheme: Theme = {
 
     textPrimary: ramp.paper[900],
     textDim: ramp.paper[600],
-    textOnAccent: '#FFFFFF',
+    textOnAccent: ramp.paper[0],
 
-    accent: ramp.status.goodLight,
+    accent: ramp.deepGreen,
     accentMuted: ramp.brand.mint,
 
-    captureFast: '#4E9B22',
-    captureFastInk: '#FFFFFF',
+    captureFast: ramp.brand.limeDeep,
+    captureFastInk: ramp.paper[0],
     captureAccurate: ramp.paper[0],
     captureAccurateInk: ramp.paper[900],
 
-    statusGood: ramp.status.goodLight,
-    statusGoodInk: '#FFFFFF',
-    statusFair: '#9A6B10',
-    statusFairInk: '#FFFFFF',
-    statusPoor: '#B23A21',
-    statusPoorInk: '#FFFFFF',
+    statusGood: ramp.deepGreen,
+    statusGoodInk: ramp.paper[0],
+    statusFair: ramp.amberDark,
+    statusFairInk: ramp.paper[0],
+    statusPoor: ramp.rustDark,
+    statusPoorInk: ramp.paper[0],
 
-    overlay: '#000000',
+    overlay: ramp.black,
   },
 }
 ```
@@ -583,7 +616,7 @@ Expected: PASS — 5 tests.
 - [ ] **Step 11: Commit**
 
 ```bash
-git add packages/tokens
+git add packages/tokens pnpm-lock.yaml
 git commit -m "feat(tokens): add brand ramps, scales, and dark/light semantic themes"
 ```
 
@@ -627,16 +660,21 @@ git commit -m "feat(tokens): add brand ramps, scales, and dark/light semantic th
     "react-native": "*"
   },
   "devDependencies": {
-    "@testing-library/react-native": "^12.8.1",
-    "jest-expo": "*",
-    "react": "*",
-    "react-native": "*",
-    "react-test-renderer": "*"
+    "@testing-library/react-native": "^14.0.1",
+    "jest-expo": "~57.0.0",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "test-renderer": "^1.2.0"
   }
 }
 ```
 
-> Versions marked `*` resolve to whatever the Expo SDK installed in Task 6 pins. Run `pnpm install` again after Task 6 and replace `*` with the resolved versions from `pnpm-lock.yaml`.
+> These versions are Expo SDK 57's pins, resolved during Task 6 and recorded in `README.md`
+> under `## Toolchain`. They must match the app exactly — a React version differing from the
+> app's pin causes a duplicate-React failure at runtime that is miserable to diagnose. The
+> `peerDependencies` above stay permissive; that is what peer ranges are for. After creating
+> the package, run `pnpm install` from the repo root and confirm no peer dependency warnings
+> for `react` or `react-native`.
 
 - [ ] **Step 2: Create `packages/ui/tsconfig.json`**
 
@@ -827,7 +865,7 @@ Expected: PASS — 4 tests.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add packages/ui
+git add packages/ui pnpm-lock.yaml
 git commit -m "feat(ui): add ThemeProvider and useTheme with system-aware dark default"
 ```
 
@@ -851,7 +889,18 @@ git commit -m "feat(ui): add ThemeProvider and useTheme with system-aware dark d
   - `resolveReach(input: { sizeClass: SizeClass; handedness: Handedness }): Reach`
   - `useLayout(): { sizeClass: SizeClass; orientation: 'portrait' | 'landscape'; width: number; height: number }`
 
-**Why the logic is split from the hook:** `sizeClassFor` and `resolveReach` are pure and therefore properly testable without mocking the window. `useLayout.ts` is the **only** file permitted to read window dimensions — enforced by lint in Task 5.
+**Why the logic is split from the hook:** the pure functions are testable without mocking a
+window. `useLayout.ts` is the **only** file permitted to read window dimensions — enforced by
+lint in Task 5.
+
+**As built, this task produced five files, not three.** An earlier draft derived the size
+class from `Math.min(width, height)`, which made `expanded` unreachable on a rigid tablet and
+would have turned every landscape layout into dead code. The corrected design separates two
+questions: `sizeClass` from the **current width** (orientation-dependent, drives layout) and
+`deviceClass` from the **shortest side** (orientation-invariant, drives ergonomics), with
+`orientationFor` extracted so the square case is documented rather than accidental. Reach is
+resolved from device class and orientation, never from size class. See `deviceClass.ts` and
+`orientation.ts` alongside the files below, and spec §5.3.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -927,17 +976,27 @@ Expected: FAIL — `Cannot find module '../sizeClass'`.
 
 ```ts
 /**
- * Window size classes, mirroring Android's own convention and keyed on the
- * shortest side in dp (spec §5.3). Components branch on these names only —
- * never on raw dimensions.
+ * Window size classes, mirroring Android's own `WindowWidthSizeClass`
+ * convention (spec §5.3): compact under 600dp, medium 600–839dp, expanded
+ * 840dp and up. Takes the **current window width** — this answers "how much
+ * horizontal room is there right now?", which drives layout decisions like
+ * "two panes side by side, or one pane you navigate between".
+ *
+ * This is orientation-*dependent* by design: rotating a device changes its
+ * window width, so it can (and should) change size class. Components branch
+ * on these names only — never on raw dimensions.
+ *
+ * Size class is a layout question, not an ergonomic one. For the
+ * orientation-*invariant* "what kind of device is this?" question that
+ * drives reach zones, see `deviceClassFor`.
  */
 export type SizeClass = 'compact' | 'medium' | 'expanded'
 
 export const BREAKPOINTS = { medium: 600, expanded: 840 } as const
 
-export function sizeClassFor(shortestSideDp: number): SizeClass {
-  if (shortestSideDp >= BREAKPOINTS.expanded) return 'expanded'
-  if (shortestSideDp >= BREAKPOINTS.medium) return 'medium'
+export function sizeClassFor(widthDp: number): SizeClass {
+  if (widthDp >= BREAKPOINTS.expanded) return 'expanded'
+  if (widthDp >= BREAKPOINTS.medium) return 'medium'
   return 'compact'
 }
 ```
@@ -945,7 +1004,8 @@ export function sizeClassFor(shortestSideDp: number): SizeClass {
 - [ ] **Step 4: Write `packages/ui/src/layout/reach.ts`**
 
 ```ts
-import type { SizeClass } from './sizeClass'
+import type { DeviceClass } from './deviceClass'
+import type { Orientation } from './orientation'
 
 export type Handedness = 'left' | 'right'
 export type ReachAnchor = 'bottomBand' | 'bottomCorners'
@@ -956,19 +1016,31 @@ export type Reach = {
 }
 
 /**
- * On a 10-inch tablet held in two hands the corners are easiest to reach and
- * the centre is hardest — the inverse of phone thinking (spec §5.4). Tablet
- * portrait keeps a bottom band because the corners are too far apart to pair.
+ * Reach is an ergonomic question, not a width question (spec §5.4), so it is
+ * decided from `deviceClass` and `orientation` — never from `SizeClass`.
+ *
+ * On a 10-inch tablet held in two hands in landscape, the corners are
+ * easiest to reach and the centre is hardest — the inverse of phone
+ * thinking — so only `tablet` + `landscape` gets bottom corners. Tablet
+ * portrait keeps a bottom band because the corners are too far apart to
+ * pair. A phone in landscape can be `expanded` by width (it's roughly
+ * 915dp wide), but its corners are still only a few centimetres apart, so
+ * it keeps the phone ergonomic — a bottom band — regardless of size class.
+ *
+ * Handedness only mirrors which side is primary; it never changes the
+ * anchor.
  */
 export function resolveReach({
-  sizeClass,
+  deviceClass,
+  orientation,
   handedness,
 }: {
-  sizeClass: SizeClass
+  deviceClass: DeviceClass
+  orientation: Orientation
   handedness: Handedness
 }): Reach {
   return {
-    anchor: sizeClass === 'expanded' ? 'bottomCorners' : 'bottomBand',
+    anchor: deviceClass === 'tablet' && orientation === 'landscape' ? 'bottomCorners' : 'bottomBand',
     primarySide: handedness,
   }
 }
@@ -979,25 +1051,37 @@ export function resolveReach({
 ```ts
 import { useWindowDimensions } from 'react-native'
 import { sizeClassFor, type SizeClass } from './sizeClass'
+import { deviceClassFor, type DeviceClass } from './deviceClass'
+import { orientationFor, type Orientation } from './orientation'
 
 export type LayoutInfo = {
   sizeClass: SizeClass
-  orientation: 'portrait' | 'landscape'
+  deviceClass: DeviceClass
+  orientation: Orientation
   width: number
   height: number
 }
 
 /**
  * THE ONLY PLACE IN THE REPO THAT READS WINDOW DIMENSIONS. Every other
- * component branches on `sizeClass`. Enforced by lint (Task 5).
+ * component branches on the composed values below. Enforced by lint (Task 5).
+ *
+ * Pure composition, no logic of its own: `sizeClass` from the current width
+ * (orientation-dependent — rotating the device can change it), `deviceClass`
+ * from the shortest side (orientation-invariant — rotating the device can't
+ * change it), `orientation` from both. Do not collapse these back into
+ * `sizeClassFor(Math.min(width, height))` — that conflation is the bug this
+ * module exists to prevent (a rigid device's shortest side never changes on
+ * rotation, so it can never reach `expanded`).
  */
 export function useLayout(): LayoutInfo {
   const { width, height } = useWindowDimensions()
   return {
     width,
     height,
-    sizeClass: sizeClassFor(Math.min(width, height)),
-    orientation: width > height ? 'landscape' : 'portrait',
+    sizeClass: sizeClassFor(width),
+    deviceClass: deviceClassFor(Math.min(width, height)),
+    orientation: orientationFor(width, height),
   }
 }
 ```
@@ -1079,7 +1163,12 @@ export default [
   // Raw hex is permitted ONLY in the ramp. Everything else reads the semantic layer.
   {
     files: ['packages/**/*.{ts,tsx}', 'apps/**/*.{ts,tsx}'],
-    ignores: ['packages/tokens/src/ramp.ts'],
+    // Two exemptions, both deliberate and both narrow:
+    //  - ramp.ts is the raw material layer; the colours have to live somewhere.
+    //  - the tokens package's own tests pin those values exactly. Asserting
+    //    ramp against ramp would prove nothing, so this is the one place a
+    //    literal is the point. Tests ANYWHERE ELSE assert against tokens.
+    ignores: ['packages/tokens/src/ramp.ts', 'packages/tokens/src/__tests__/**'],
     rules: {
       'no-restricted-syntax': [
         'error',
@@ -1185,9 +1274,12 @@ Create `packages/ui/src/__fixtures__/lint-violations.txt`:
 These three constructs are rejected by eslint.config.mjs. Each was verified to
 fire during Task 5 of the foundation plan.
 
-1. A raw hex literal anywhere except packages/tokens/src/ramp.ts
+1. A raw hex literal anywhere except packages/tokens/src/ramp.ts and the
+   tokens package's own __tests__ (which pin those values exactly)
      const c = '#FF0000'
    Why: components must consume the semantic layer, or light mode rots.
+   Tests outside the tokens package assert against tokens, not literals, so
+   they do not break every time a colour is tuned.
 
 2. Importing Dimensions or useWindowDimensions outside
    packages/ui/src/layout/useLayout.ts
@@ -1236,33 +1328,27 @@ Write the result into `README.md` under a `## Toolchain` heading, alongside the 
 
 - [ ] **Step 3: Add workspace dependencies to `apps/fieldkit/package.json`**
 
-Add to `dependencies`:
-
-```json
-"@corymbia/tokens": "workspace:*",
-"@corymbia/ui": "workspace:*",
-"@corymbia/brand": "workspace:*",
-"expo-router": "*",
-"react-native-svg": "*"
-```
-
-Then:
+Add `"@corymbia/tokens": "workspace:*"` to `dependencies`, then:
 
 ```bash
 cd apps/fieldkit && npx expo install expo-router react-native-svg && cd ../..
 pnpm install
 ```
 
-- [ ] **Step 4: Resolve the `*` versions in `packages/ui/package.json`**
+The `@corymbia/ui` and `@corymbia/brand` dependencies are added in Task 12, once those
+packages exist.
 
-Replace each `"*"` in `packages/ui` devDependencies and peerDependencies with the versions Expo pinned:
+- [ ] **Step 4: Record the React versions Expo pinned**
+
+Every package built after this one depends on these, and they must match Expo's pins exactly
+or React Native fails at runtime with a duplicate-React error that is miserable to diagnose.
 
 ```bash
-node -e "const p=require('./apps/fieldkit/package.json');console.log(JSON.stringify({react:p.dependencies.react,'react-native':p.dependencies['react-native']},null,2))"
+node -e "const p=require('./apps/fieldkit/package.json');console.log(JSON.stringify({react:p.dependencies.react,'react-native':p.dependencies['react-native'],'react-test-renderer':p.devDependencies&&p.devDependencies['react-test-renderer']},null,2))"
 ```
 
-Run: `pnpm install`
-Expected: no peer dependency warnings for `react` or `react-native`.
+Write the output into `README.md` under `## Toolchain`, beneath the Expo SDK version.
+Tasks 3, 7 and 12 use these values verbatim.
 
 - [ ] **Step 5: Configure `apps/fieldkit/app.json`**
 
@@ -1288,59 +1374,55 @@ Set these keys:
 
 - [ ] **Step 6: Write `apps/fieldkit/app/_layout.tsx`**
 
+Deliberately plain — `@corymbia/ui` does not exist yet. Task 12 wraps this in `ThemeProvider`.
+
 ```tsx
 import { Slot } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaView } from 'react-native'
-import { ThemeProvider, useTheme } from '@corymbia/ui'
-
-function Frame() {
-  const { theme, name } = useTheme()
-  return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }}>
-      <StatusBar style={name === 'dark' ? 'light' : 'dark'} />
-      <Slot />
-    </SafeAreaView>
-  )
-}
+import { darkTheme } from '@corymbia/tokens'
 
 export default function RootLayout() {
   return (
-    <ThemeProvider>
-      <Frame />
-    </ThemeProvider>
+    <SafeAreaView style={{ flex: 1, backgroundColor: darkTheme.colors.surface }}>
+      <StatusBar style="light" />
+      <Slot />
+    </SafeAreaView>
   )
 }
 ```
 
 - [ ] **Step 7: Write a placeholder `apps/fieldkit/app/index.tsx`**
 
-```tsx
-import { View, Text } from 'react-native'
-import { useTheme, useLayout } from '@corymbia/ui'
+A smoke screen proving the app boots and the tokens resolve on device. Task 12 replaces it
+with the real gallery.
 
-export default function Gallery() {
-  const { theme, name, setTheme } = useTheme()
-  const { sizeClass, orientation } = useLayout()
+```tsx
+import { View, Text, useWindowDimensions } from 'react-native'
+import { darkTheme, spacing } from '@corymbia/tokens'
+
+export default function Home() {
+  const { width, height } = useWindowDimensions()
+  const c = darkTheme.colors
   return (
-    <View style={{ flex: 1, padding: 16, backgroundColor: theme.colors.surface }}>
-      <Text style={{ color: theme.colors.textPrimary, fontSize: 20, fontWeight: '800' }}>
+    <View style={{ flex: 1, padding: spacing.lg, backgroundColor: c.surface }}>
+      <Text style={{ color: c.textPrimary, fontSize: 20, fontWeight: '800' }}>
         Corymbia Field Kit
       </Text>
-      <Text style={{ color: theme.colors.textDim, marginTop: 8 }}>
-        theme: {name} · size class: {sizeClass} · {orientation}
+      <Text style={{ color: c.textDim, marginTop: spacing.sm }}>
+        {Math.round(width)}x{Math.round(height)}dp - shortest side{' '}
+        {Math.round(Math.min(width, height))}dp
       </Text>
-      <Text
-        testID="toggleTheme"
-        onPress={() => setTheme(name === 'dark' ? 'light' : 'dark')}
-        style={{ color: theme.colors.accent, marginTop: 16, fontWeight: '700' }}
-      >
-        Toggle theme
+      <Text style={{ color: c.accent, marginTop: spacing.lg, fontWeight: '700' }}>
+        Tokens resolved
       </Text>
     </View>
   )
 }
 ```
+
+This is the one place `useWindowDimensions` is used outside `useLayout`, and Task 12 replaces
+it before the lint rule forbidding that could ever apply.
 
 - [ ] **Step 8: Run it on the S25**
 
@@ -1350,9 +1432,12 @@ Connect the S25 with USB debugging enabled, then:
 cd apps/fieldkit && npx expo run:android
 ```
 
-Expected: the application launches, shows `theme: dark · size class: compact · portrait`, and tapping **Toggle theme** flips the background from near-black to off-white.
+Expected: the application launches on a near-black slate background, title in pale green-grey,
+"Tokens resolved" in brand teal.
 
-If the device reports `size class: medium` or larger, the breakpoint or the dp conversion is wrong — stop and fix before continuing.
+Note the reported shortest side. On both Samsungs in portrait it must be well under 600dp —
+that is what Task 4's `compact` size class keys on. If it reports 600 or more, the dp
+conversion is wrong, and Task 4 would silently build the wrong layout for the primary device.
 
 - [ ] **Step 9: Commit**
 
@@ -1370,6 +1455,13 @@ git commit -m "feat(app): scaffold Expo shell with theme provider and layout rea
 - Generate: `packages/brand/src/markPath.ts` (from `design/logo/logo.svg`, see Step 1)
 - Test: `packages/brand/src/__tests__/CorymbiaMark.test.tsx`
 
+**Testing note (applies to every remaining UI task):** `@testing-library/react-native` is on
+v14, where `render` and `fireEvent` are **async** — `await` them. Matchers auto-register on
+import, so there is no `extend-expect` entry point. `test-renderer` replaces the deprecated
+`react-test-renderer`. To simulate what the OS reports for dark/light, use
+`mockSystemColorScheme` from `@corymbia/ui`'s `src/test-utils` — the React Native jest preset
+hard-mocks `useColorScheme`, so a test cannot set it any other way.
+
 **Interfaces:**
 - Consumes: `react-native-svg`.
 - Produces: `<CorymbiaMark size?: number crop?: 'tight' | 'square' />` — defaults `size = 26`, `crop = 'tight'`.
@@ -1378,8 +1470,16 @@ git commit -m "feat(app): scaffold Expo shell with theme provider and layout rea
 
 - [ ] **Step 1: Generate the path constant directly from the source SVG**
 
-The mark's outline is a 1950-character path. Generate it into a file rather than
-copying it by hand — a transcription error here is invisible until it renders wrong.
+The mark's outline is a 1950-character path. It is generated, never transcribed — a
+transcription error is invisible until it renders wrong. The generator is committed at
+`scripts/generate-brand-mark-path.mjs`; run `pnpm run generate:brand-mark`.
+
+**As built, the tight viewBox in this task's original text was wrong.** It was derived from
+transform arithmetic rather than measured, and clipped the leaf tips and the tail of the
+helix. Rasterising `design/logo/logo.svg` at 1500x1500 gives a true bounding box of
+x 420-1080, y 2-1498, so the tight crop is `414 0 672 1500` and the real aspect is 0.448.
+The component is sized by `height`, not width, because an app bar constrains height. A test
+asserts the viewBox contains those measured bounds, so a clipping crop fails.
 
 ```bash
 mkdir -p packages/brand/src
@@ -1440,12 +1540,12 @@ Group transform, verbatim: `matrix(1.2165365,0,0,1.2165365,141.72777,-162.40239)
     "react-native-svg": "*"
   },
   "devDependencies": {
-    "@testing-library/react-native": "^12.8.1",
-    "jest-expo": "*",
-    "react": "*",
-    "react-native": "*",
-    "react-native-svg": "*",
-    "react-test-renderer": "*"
+    "@testing-library/react-native": "^14.0.1",
+    "jest-expo": "~57.0.0",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-svg": "15.15.4",
+    "test-renderer": "^1.2.0"
   }
 }
 ```
@@ -1512,7 +1612,7 @@ Expected: FAIL — `Cannot find module '../index'`.
 
 - [ ] **Step 5: Write `packages/brand/src/CorymbiaMark.tsx`**
 
-`MARK_PATH` comes from the file generated in Step 1 — there is nothing to paste.
+`MARK_PATH` comes from the generated file — there is nothing to paste.
 
 ```tsx
 import React from 'react'
@@ -1541,17 +1641,22 @@ const SPORES = [
 ] as const
 
 const VIEW_BOX = {
-  tight: '405 165 660 1205',
+  // Full artwork height, ~6 units of horizontal breathing room either side. Verified
+  // (by rasterising design/logo/logo.svg at 1500x1500 and measuring the non-transparent
+  // bounding box) to contain the whole mark — see MEASURED_ARTWORK_BOUNDS in the test file.
+  tight: '414 0 672 1500',
   square: '0 0 1500 1500',
 } as const
 
-const ASPECT = { tight: 660 / 1205, square: 1 } as const
+/** width/height of each crop's viewBox, i.e. its true aspect ratio. */
+const ASPECT = { tight: 672 / 1500, square: 1 } as const
 
 export function CorymbiaMark({
-  size = 26,
+  height = 32,
   crop = 'tight',
 }: {
-  size?: number
+  /** Rendered height in dp. Width is derived from the crop's aspect ratio. */
+  height?: number
   crop?: 'tight' | 'square'
 }) {
   return (
@@ -1559,8 +1664,8 @@ export function CorymbiaMark({
       testID="corymbia-mark"
       accessibilityRole="image"
       accessibilityLabel="Corymbia"
-      width={size}
-      height={size / ASPECT[crop]}
+      width={height * ASPECT[crop]}
+      height={height}
       viewBox={VIEW_BOX[crop]}
     >
       <Defs>
@@ -1611,7 +1716,7 @@ Expected: PASS — 5 tests, no lint errors.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add packages/brand eslint.config.mjs
+git add packages/brand pnpm-lock.yaml
 git commit -m "feat(brand): add CorymbiaMark component extracted from logo.svg"
 ```
 
@@ -2759,7 +2864,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 export function GallerySections() {
   const { name, setTheme } = useTheme()
-  const { sizeClass, orientation, width, height } = useLayout()
+  const { sizeClass, deviceClass, orientation, width, height } = useLayout()
 
   return (
     <View>
@@ -2777,7 +2882,7 @@ export function GallerySections() {
 
       <Section title="Layout">
         <Type dim>
-          {sizeClass} · {orientation} · {Math.round(width)}×{Math.round(height)}dp
+          {sizeClass} · {deviceClass} · {orientation} · {Math.round(width)}×{Math.round(height)}dp
         </Type>
       </Section>
 
@@ -2854,7 +2959,49 @@ export function GallerySections() {
 }
 ```
 
-- [ ] **Step 2: Replace `apps/fieldkit/app/index.tsx`**
+- [ ] **Step 2: Add the workspace dependencies and wire the ThemeProvider**
+
+The app shell has run on `@corymbia/tokens` alone since Task 6. Now it gains the library.
+
+Add to `apps/fieldkit/package.json` `dependencies`:
+
+```json
+"@corymbia/ui": "workspace:*",
+"@corymbia/brand": "workspace:*"
+```
+
+Run: `pnpm install`
+Expected: both link as workspace packages, no peer warnings for `react` or `react-native`.
+
+Replace `apps/fieldkit/app/_layout.tsx` — the status bar now follows the active theme, so a
+light-mode screen does not get white-on-white status text:
+
+```tsx
+import { Slot } from 'expo-router'
+import { StatusBar } from 'expo-status-bar'
+import { SafeAreaView } from 'react-native'
+import { ThemeProvider, useTheme } from '@corymbia/ui'
+
+function Frame() {
+  const { theme, name } = useTheme()
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }}>
+      <StatusBar style={name === 'dark' ? 'light' : 'dark'} />
+      <Slot />
+    </SafeAreaView>
+  )
+}
+
+export default function RootLayout() {
+  return (
+    <ThemeProvider>
+      <Frame />
+    </ThemeProvider>
+  )
+}
+```
+
+- [ ] **Step 3: Replace `apps/fieldkit/app/index.tsx`**
 
 ```tsx
 import { ScrollView } from 'react-native'
@@ -2872,12 +3019,15 @@ export default function Gallery() {
 }
 ```
 
-- [ ] **Step 3: Run the full check**
+- [ ] **Step 4: Run the full check**
 
 Run: `pnpm turbo run test lint typecheck`
 Expected: PASS across `@corymbia/tokens`, `@corymbia/ui`, `@corymbia/brand`.
 
-- [ ] **Step 4: Review on the S25**
+The smoke screen's `useWindowDimensions` import is gone as of Step 3, so lint rule 2 now
+applies cleanly to the whole app.
+
+- [ ] **Step 5: Review on the S25**
 
 ```bash
 cd apps/fieldkit && npx expo run:android
@@ -2894,7 +3044,7 @@ Check each of these and fix anything that fails before committing:
 - [ ] The two capture buttons are comfortably thumb-reachable at the bottom of the screen and are visibly larger than the standard buttons.
 - [ ] Tapping the help `?` opens the popover; the target is easy to hit without aiming.
 
-- [ ] **Step 5: Take the device screenshots**
+- [ ] **Step 6: Take the device screenshots**
 
 Capture both themes and store them for the record:
 
@@ -2905,10 +3055,10 @@ adb exec-out screencap -p > docs/design-review/2026-09-05-gallery-dark.png
 adb exec-out screencap -p > docs/design-review/2026-09-05-gallery-light.png
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add apps/fieldkit docs/design-review
+git add apps/fieldkit docs/design-review pnpm-lock.yaml
 git commit -m "feat(app): add component gallery and capture device review screenshots"
 ```
 
