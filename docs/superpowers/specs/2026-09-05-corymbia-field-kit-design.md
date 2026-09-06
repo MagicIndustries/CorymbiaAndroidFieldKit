@@ -346,11 +346,17 @@ meaning cannot be recovered later from the number alone:
 was not spoofed has no chain of custody worth the name, and the platform tells us — so we
 store it.
 
-**What the platform does not expose is recorded as unknown, never guessed.** Satellite counts,
-which constellations contributed, and whether the receiver was dual-frequency all bear on how
-much to trust a fix, and none is available through the location API without native work. The
-schema has room for them; the honest value today is absent. That is a better answer than a
-plausible one.
+**What the platform does not expose is not modelled at all, rather than modelled as unknown.**
+Satellite counts, which constellations contributed, and whether the receiver was dual-frequency
+all bear on how much to trust a fix, and none is available through the location API without
+native work. They are therefore not nullable columns waiting to be filled — they are absent,
+and arrive with a migration when a native module makes them real. A column that could only ever
+hold a guess is worse than no column, because a null in a provenance field reads as "measured
+and found to be nothing" rather than "never asked".
+
+That distinction is not pedantry: adding a column to SQLite later costs one line, while
+tightening a constraint later requires rebuilding the table. Absence is cheap to reverse;
+a wrong guess recorded as data is not.
 
 ---
 
