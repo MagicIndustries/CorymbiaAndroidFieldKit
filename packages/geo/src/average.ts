@@ -1,3 +1,4 @@
+import { isUsableAccuracy } from './accuracy'
 import { distanceMetres } from './distance'
 import type { Reading } from './classify'
 
@@ -44,10 +45,11 @@ type WeightedReading = { reading: Reading; weight: number }
  */
 function weightOf(reading: Reading): number | null {
   const { accuracyM } = reading
-  // The accuracy is checked before it is squared: squaring throws the sign
-  // away, so -1 m would otherwise sail through as a perfectly respectable
-  // weight of 1.
-  if (!Number.isFinite(accuracyM) || accuracyM <= 0) return null
+  // The accuracy is checked (via the shared `isUsableAccuracy`, also used by
+  // the ambient cache) before it is squared: squaring throws the sign away,
+  // so -1 m would otherwise sail through as a perfectly respectable weight
+  // of 1.
+  if (!isUsableAccuracy(accuracyM)) return null
   const weight = 1 / (accuracyM * accuracyM)
   return Number.isFinite(weight) && weight > 0 ? weight : null
 }
