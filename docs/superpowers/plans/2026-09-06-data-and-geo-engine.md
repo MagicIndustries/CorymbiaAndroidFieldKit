@@ -21,6 +21,7 @@
 - **`expo run:android` never exits** — it keeps Metro alive by design. To confirm an install landed: `adb shell dumpsys package eco.corymbia.fieldkit | grep lastUpdateTime`.
 - **`app.json` changes only reach a build via `npx expo prebuild --platform android`.** Permissions are `app.json` config; skipping prebuild means the permission is not in the manifest and the request fails silently at runtime.
 - **Datum is recorded explicitly, and only ever the one actually measured.** Android returns **WGS84** and the app performs no transformation, so WGS84 is what every device-derived position stores. The permitted vocabulary is `WGS84 | GDA94 | AGD66` — the three the Victorian Biodiversity Atlas accepts, so export is a lookup rather than a conversion. **GDA2020 is not accepted by the VBA** and must not appear. See `docs/research/2026-09-06-victorian-biodiversity-destinations.md` §5.3.
+- **Preferences persist and are the user's, not the layout's.** Theme, handedness, which capture control takes the dominant side, and density are stored locally and survive a restart. `capturePrimary` is independent of `handedness`: `SAVE NOW` is the more frequent action but `SHARPEN` demands a sustained press, and which deserves the stronger thumb is hers to decide after a day in the field.
 - **Every record names the device that produced it**, by foreign key into a `device` table holding that device's fixed characteristics (spec §7.5). A coordinate from the tablet is not interchangeable with one from the phone.
 - **Three conventions are stored explicitly, never assumed**: the accuracy convention (Android's figure is the 68% confidence radius, not a maximum error), the altitude reference (Android reports above the WGS84 ellipsoid, several metres from mean sea level in Victoria), and the datum. Each is a number whose meaning cannot be recovered from the number alone.
 - **A mocked position must be distinguishable from a real one.** `expo-location` reports it; the schema stores it. A record that cannot show it was not spoofed has no chain of custody.
@@ -60,6 +61,7 @@ packages/data/
   src/migrations/001-projects.ts client, project, location, project_location, activity
   src/migrations/002-devices.ts  device registry
   src/migrations/003-records.ts  record, event
+  src/migrations/004-settings.ts persisted preferences
   src/migrations/index.ts        ordered list
   src/ids.ts                     UUID generation
   src/time.ts                    ISO-8601 helpers, device vs GPS clock
@@ -69,6 +71,7 @@ packages/data/
   src/repositories/activities.ts
   src/repositories/records.ts
   src/repositories/events.ts
+  src/repositories/settings.ts
   src/index.ts
   src/**/__tests__/*.test.ts
 
@@ -2665,7 +2668,269 @@ git commit -m "feat(data): add the record repository and the append-only event l
 
 ---
 
-### Task 8: The expo-sqlite adapter
+### Task 8: The settings store
+
+**Files:**
+- Create: `packages/data/src/migrations/004-settings.ts`, `src/repositories/settings.ts`
+- Modify: `packages/data/src/migrations/index.ts`, `packages/data/src/index.ts`
+- Test: `packages/data/src/repositories/__tests__/settings.test.ts`
+
+**Interfaces:**
+- Consumes: `Database`, `nowIso`, `migrate`.
+- Produces:
+  - `type Handedness = 'left' | 'right'`
+  - `type CapturePrimary = 'saveNow' | 'sharpen'`
+  - `type ThemePreference = 'system' | 'dark' | 'light'`
+  - `type Density = 'comfortable' | 'compact'`
+  - `type Settings = { theme: ThemePreference; handedness: Handedness; capturePrimary: CapturePrimary; density: Density }`
+  - `DEFAULT_SETTINGS: Settings`
+  - `readSettings(db): Promise<Settings>` — merges stored values over the defaults.
+  - `writeSetting<K extends keyof Settings>(db, key: K, value: Settings[K]): Promise<void>`
+
+**Why this is a separate table from everything else.** These are preferences, not observations.
+They record what the user chose, never what she measured, and they must never appear in an
+export. Keeping them in their own key-value table rather than adding columns to `device` also
+means a preference can be added without a migration.
+
+**Why it exists at all.** An override that resets at every launch is not an override. The theme
+toggle built in Plan 1 currently lives in React state and forgets itself on restart; handedness
+and capture-control order have nowhere to live at all. The field conditions these settings exist
+for — glare, gloves, which thumb reaches — do not change between launches, so neither should the
+settings.
+
+**Unknown keys and unreadable values must not break startup.** A settings row is not worth
+failing an application over: a device that cannot start because a preference was corrupted has
+lost a day's fieldwork over a colour scheme. Reading falls back to the default for any key that
+is missing, unrecognised, or holds a value outside its vocabulary.
+
+- [ ] **Step 1: Write the failing test**
+
+`packages/data/src/repositories/__tests__/settings.test.ts`:
+
+```ts
+import { openTestDatabase } from '../../db/better-sqlite3'
+import { migrate } from '../../db/migrate'
+import type { Database } from '../../db/port'
+import { DEFAULT_SETTINGS, readSettings, writeSetting } from '../settings'
+
+describe('settings', () => {
+  let db: Database
+  beforeEach(async () => {
+    db = await openTestDatabase()
+    await migrate(db)
+  })
+  afterEach(async () => {
+    await db.close()
+  })
+
+  it('returns the documented defaults on a fresh install', async () => {
+    expect(await readSettings(db)).toEqual(DEFAULT_SETTINGS)
+  })
+
+  it('defaults to following the system theme, right-handed, SAVE NOW dominant, comfortable', () => {
+    expect(DEFAULT_SETTINGS).toEqual({
+      theme: 'system',
+      handedness: 'right',
+      capturePrimary: 'saveNow',
+      density: 'comfortable',
+    })
+  })
+
+  it('persists a written value', async () => {
+    await writeSetting(db, 'handedness', 'left')
+    expect((await readSettings(db)).handedness).toBe('left')
+  })
+
+  it('overwrites rather than accumulating rows for the same key', async () => {
+    await writeSetting(db, 'theme', 'dark')
+    await writeSetting(db, 'theme', 'light')
+    expect((await readSettings(db)).theme).toBe('light')
+    const rows = await db.all('SELECT key FROM setting WHERE key = ?', ['theme'])
+    expect(rows).toHaveLength(1)
+  })
+
+  it('leaves other settings untouched when one is written', async () => {
+    await writeSetting(db, 'capturePrimary', 'sharpen')
+    const settings = await readSettings(db)
+    expect(settings.capturePrimary).toBe('sharpen')
+    expect(settings.theme).toBe(DEFAULT_SETTINGS.theme)
+    expect(settings.handedness).toBe(DEFAULT_SETTINGS.handedness)
+  })
+
+  it('swaps the capture controls independently of handedness', async () => {
+    await writeSetting(db, 'capturePrimary', 'sharpen')
+    const settings = await readSettings(db)
+    expect(settings.capturePrimary).toBe('sharpen')
+    expect(settings.handedness).toBe('right')
+  })
+
+  it('falls back to the default when a stored value is outside its vocabulary', async () => {
+    await db.execute('INSERT INTO setting (key, value, updated_at) VALUES (?, ?, ?)', [
+      'handedness',
+      'sideways',
+      '2026-09-06T00:00:00+10:00',
+    ])
+    expect((await readSettings(db)).handedness).toBe('right')
+  })
+
+  it('ignores a key it does not recognise rather than failing to start', async () => {
+    await db.execute('INSERT INTO setting (key, value, updated_at) VALUES (?, ?, ?)', [
+      'favouriteBird',
+      'lyrebird',
+      '2026-09-06T00:00:00+10:00',
+    ])
+    expect(await readSettings(db)).toEqual(DEFAULT_SETTINGS)
+  })
+})
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pnpm --filter @corymbia/data test settings`
+Expected: FAIL — `Cannot find module '../settings'`.
+
+- [ ] **Step 3: Write `packages/data/src/migrations/004-settings.ts`**
+
+```ts
+import type { Migration } from '../db/migrate'
+
+/**
+ * Preferences, not observations (spec §7.6).
+ *
+ * A key-value table rather than columns, so a new preference costs no migration.
+ * Deliberately separate from `device`: these record what the user chose, never
+ * what she measured, and they never appear in an export.
+ *
+ * No CHECK on `value` — vocabularies are enforced when reading, because a
+ * corrupted preference must never be able to stop the application starting. A
+ * device that will not open because of a colour scheme has lost a day's
+ * fieldwork.
+ */
+export const migration004: Migration = {
+  id: '004-settings',
+  up: [
+    `CREATE TABLE setting (
+       key         TEXT PRIMARY KEY,
+       value       TEXT NOT NULL,
+       updated_at  TEXT NOT NULL
+     )`,
+  ],
+}
+```
+
+- [ ] **Step 4: Write `packages/data/src/repositories/settings.ts`**
+
+```ts
+import type { Database } from '../db/port'
+import { nowIso } from '../time'
+
+export type Handedness = 'left' | 'right'
+export type CapturePrimary = 'saveNow' | 'sharpen'
+export type ThemePreference = 'system' | 'dark' | 'light'
+export type Density = 'comfortable' | 'compact'
+
+export type Settings = {
+  theme: ThemePreference
+  handedness: Handedness
+  /** Which capture control takes the dominant side (spec §5.4, §9.1). */
+  capturePrimary: CapturePrimary
+  density: Density
+}
+
+/**
+ * `capturePrimary` defaults to `saveNow` because it is the more frequent action.
+ * But `sharpen` demands a sustained press and may deserve the stronger thumb —
+ * which is hers to decide after a day in the field, and is why this is a setting
+ * rather than a layout decision. It is independent of handedness: swapping the
+ * controls does not mean she has changed hands.
+ */
+export const DEFAULT_SETTINGS: Settings = {
+  theme: 'system',
+  handedness: 'right',
+  capturePrimary: 'saveNow',
+  density: 'comfortable',
+}
+
+const VOCABULARIES: { [K in keyof Settings]: readonly Settings[K][] } = {
+  theme: ['system', 'dark', 'light'],
+  handedness: ['left', 'right'],
+  capturePrimary: ['saveNow', 'sharpen'],
+  density: ['comfortable', 'compact'],
+}
+
+function isSettingKey(key: string): key is keyof Settings {
+  return Object.prototype.hasOwnProperty.call(VOCABULARIES, key)
+}
+
+/**
+ * Stored values are merged over the defaults. Anything missing, unrecognised, or
+ * outside its vocabulary falls back — a preference is never worth failing a
+ * startup over.
+ */
+export async function readSettings(db: Database): Promise<Settings> {
+  const rows = await db.all<{ key: string; value: string }>('SELECT key, value FROM setting')
+  const settings: Settings = { ...DEFAULT_SETTINGS }
+
+  for (const row of rows) {
+    if (!isSettingKey(row.key)) continue
+    const allowed = VOCABULARIES[row.key] as readonly string[]
+    if (!allowed.includes(row.value)) continue
+    // Safe: the value was just checked against this key's own vocabulary.
+    settings[row.key] = row.value as Settings[typeof row.key]
+  }
+
+  return settings
+}
+
+export async function writeSetting<K extends keyof Settings>(
+  db: Database,
+  key: K,
+  value: Settings[K],
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO setting (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [key, value, nowIso()],
+  )
+}
+```
+
+- [ ] **Step 5: Register the migration and re-export**
+
+Add `migration004` to `packages/data/src/migrations/index.ts`, after `migration003`.
+
+Add to `packages/data/src/index.ts`:
+
+```ts
+export { readSettings, writeSetting, DEFAULT_SETTINGS } from './repositories/settings'
+export type {
+  Settings,
+  Handedness,
+  CapturePrimary,
+  ThemePreference,
+  Density,
+} from './repositories/settings'
+```
+
+> `Handedness` is also exported from `@corymbia/ui`'s layout module. They mean the same thing;
+> the UI package must not import from `@corymbia/data`, so the duplication is deliberate. If
+> they ever disagree, the one here is authoritative because it is what persists.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `pnpm --filter @corymbia/data test`
+Expected: PASS — the settings suite green alongside the others, and the constraint canary still green.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add packages/data
+git commit -m "feat(data): add the settings store so preferences survive a restart"
+```
+
+---
+
+### Task 9: The expo-sqlite adapter
 
 **Files:**
 - Create: `packages/data/src/db/expo.ts`
@@ -2818,7 +3083,7 @@ git commit -m "feat(data): add the expo-sqlite adapter"
 
 ---
 
-### Task 9: The `geo` package — distance, nearest location, duplicate guard
+### Task 10: The `geo` package — distance, nearest location, duplicate guard
 
 **Files:**
 - Create: `packages/geo/package.json`, `tsconfig.json`, `jest.config.js`, `babel.config.js`, `src/distance.ts`, `src/nearest.ts`, `src/duplicate.ts`, `src/index.ts`
@@ -3098,7 +3363,7 @@ git commit -m "feat(geo): add distance, nearest-place and duplicate detection"
 
 ---
 
-### Task 10: Fix classification, averaging and trend
+### Task 11: Fix classification, averaging and trend
 
 **Files:**
 - Create: `packages/geo/src/classify.ts`, `src/average.ts`, `src/trend.ts`
@@ -3402,7 +3667,7 @@ git commit -m "feat(geo): add accuracy grading, hold-averaging and the hold verd
 
 ---
 
-### Task 11: The location source and its fake
+### Task 12: The location source and its fake
 
 **Files:**
 - Create: `packages/geo/src/location/port.ts`, `src/location/fake.ts`, `src/location/expo.ts`
@@ -3637,7 +3902,7 @@ git commit -m "feat(geo): add the location source port with expo and scripted ad
 
 ---
 
-### Task 12: The ambient position cache
+### Task 13: The ambient position cache
 
 **Files:**
 - Create: `packages/geo/src/ambient-cache.ts`
@@ -3836,7 +4101,7 @@ git commit -m "feat(geo): add the ambient position cache with fix ageing"
 
 ---
 
-### Task 13: Wiring the database into the app
+### Task 14: Wiring the database into the app
 
 **Files:**
 - Create: `apps/fieldkit/src/db/provider.tsx`
@@ -3953,8 +4218,18 @@ export async function readDeviceFacts(): Promise<DeviceFacts> {
 - [ ] **Step 3: Write `apps/fieldkit/src/db/provider.tsx`**
 
 ```tsx
-import React, { createContext, useContext, useEffect, useState } from 'react'
-import { migrate, openDatabase, registerDevice, type Database, type Device } from '@corymbia/data'
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import {
+  DEFAULT_SETTINGS,
+  migrate,
+  openDatabase,
+  readSettings,
+  registerDevice,
+  writeSetting,
+  type Database,
+  type Device,
+  type Settings,
+} from '@corymbia/data'
 import { readDeviceFacts } from './device'
 
 type Status =
@@ -3965,6 +4240,8 @@ type Status =
 const DatabaseContext = createContext<{
   db: Database | null
   device: Device | null
+  settings: Settings
+  updateSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => Promise<void>
   status: Status
 } | null>(null)
 
@@ -3980,6 +4257,7 @@ const DatabaseContext = createContext<{
 export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   const [db, setDb] = useState<Database | null>(null)
   const [device, setDevice] = useState<Device | null>(null)
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [status, setStatus] = useState<Status>({ state: 'opening', error: null, applied: [] })
 
   useEffect(() => {
@@ -3993,12 +4271,17 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
         // carries a device foreign key, so nothing may be captured until the
         // device this app is running on is known.
         const registered = await registerDevice(opened, await readDeviceFacts())
+        // Preferences load before the first render that could read them, so the
+        // app never flashes the wrong theme or puts the capture controls on the
+        // wrong side while it catches up (spec §7.6).
+        const stored = await readSettings(opened)
         if (cancelled) {
           await opened.close()
           return
         }
         setDb(opened)
         setDevice(registered)
+        setSettings(stored)
         setStatus({ state: 'ready', error: null, applied })
       } catch (error) {
         if (cancelled) return
@@ -4015,8 +4298,19 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  const updateSetting = useCallback(
+    async <K extends keyof Settings>(key: K, value: Settings[K]) => {
+      if (!db) throw new Error('Cannot change a setting before the database is open.')
+      await writeSetting(db, key, value)
+      setSettings((current) => ({ ...current, [key]: value }))
+    },
+    [db],
+  )
+
   return (
-    <DatabaseContext.Provider value={{ db, device, status }}>{children}</DatabaseContext.Provider>
+    <DatabaseContext.Provider value={{ db, device, settings, updateSetting, status }}>
+      {children}
+    </DatabaseContext.Provider>
   )
 }
 
@@ -4031,6 +4325,22 @@ export function useDatabase(): Database {
   if (!value) throw new Error('useDatabase must be used within a DatabaseProvider')
   if (!value.db) throw new Error('The database is not open yet; check useDatabaseStatus first.')
   return value.db
+}
+
+/**
+ * The user's preferences, and a way to change one (spec §7.6).
+ *
+ * `updateSetting` writes through to the database and updates the in-memory copy,
+ * so a preference survives a restart. An override that resets at every launch is
+ * not an override.
+ */
+export function useSettings(): {
+  settings: Settings
+  updateSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => Promise<void>
+} {
+  const value = useContext(DatabaseContext)
+  if (!value) throw new Error('useSettings must be used within a DatabaseProvider')
+  return { settings: value.settings, updateSetting: value.updateSetting }
 }
 
 /** The registered device this app is running on. Every capture is attributed to it. */
@@ -4098,7 +4408,7 @@ git commit -m "feat(app): open the database, register the device, and migrate at
 
 ---
 
-### Task 14: The diagnostic screen, on hardware
+### Task 15: The diagnostic screen, on hardware
 
 **Files:**
 - Create: `apps/fieldkit/app/diagnostics.tsx`
@@ -4136,7 +4446,7 @@ import {
 } from '@corymbia/data'
 import { spacing } from '@corymbia/tokens'
 import { Button, Card, Screen, Type, useTheme } from '@corymbia/ui'
-import { useDatabase, useDatabaseStatus, useDevice } from '../src/db/provider'
+import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
 
 export default function Diagnostics() {
   const status = useDatabaseStatus()
@@ -4231,6 +4541,7 @@ type BodyProps = {
 function DiagnosticsBody(props: BodyProps) {
   const db = useDatabase()
   const device = useDevice()
+  const { settings, updateSetting } = useSettings()
   const { latest, readings, holding, held, ambient } = props
 
   /** The conventions this device's fixes are measured under (spec §7.5). */
@@ -4333,6 +4644,32 @@ function DiagnosticsBody(props: BodyProps) {
           <Type variant="label" dim>DATABASE</Type>
           {row('migrations', props.applied.length ? props.applied.join(', ') : 'already current')}
           {row('records shown', String(props.records.length))}
+        </Card>
+
+        <View style={{ height: spacing.md }} />
+        <Card>
+          <Type variant="label" dim>REACH</Type>
+          {row('handedness', settings.handedness)}
+          {row('dominant control', settings.capturePrimary)}
+          <View style={{ height: spacing.sm }} />
+          <Button
+            label={`Swap to ${settings.capturePrimary === 'saveNow' ? 'SHARPEN' : 'SAVE NOW'} on the dominant side`}
+            kind="secondary"
+            onPress={() =>
+              void updateSetting(
+                'capturePrimary',
+                settings.capturePrimary === 'saveNow' ? 'sharpen' : 'saveNow',
+              )
+            }
+          />
+          <View style={{ height: spacing.xs }} />
+          <Button
+            label={`Switch to ${settings.handedness === 'right' ? 'left' : 'right'}-handed`}
+            kind="secondary"
+            onPress={() =>
+              void updateSetting('handedness', settings.handedness === 'right' ? 'left' : 'right')
+            }
+          />
         </Card>
 
         <View style={{ height: spacing.md }} />
@@ -4459,6 +4796,7 @@ This is the deliverable. Work through it on the device, **outside with a clear v
 - [ ] Dropping a second pin on the spot reports the duplicate warning.
 - [ ] Stored records appear in the list with per-activity sequence numbers starting at 1.
 - [ ] Force-stop and relaunch: the records are still there, and the device row is reused rather than duplicated.
+- [ ] Swap the dominant capture control and the handedness, force-stop, relaunch — both survive. A preference that resets at every launch is not a preference, and this is the check that proves it.
 - [ ] The DEVICE panel reports a plausible model, type and OS — confirm the S25 registers as `phone`, and note anything the platform declines to report so the gaps are known rather than assumed.
 - [ ] The mocked flag reads `no`. If a mock-location app is installed for testing, enable it once and confirm the flag flips — a chain-of-custody guard that has never been seen to fire is not a guard.
 
@@ -4475,7 +4813,7 @@ git commit -m "feat(app): add the GPS and database diagnostic screen"
 
 ## Self-Review
 
-**Spec coverage.** §7.1 entities → Tasks 2, 4 (the tables this plan uses; `media`, `record_link`, `batch` and `batch_item` arrive with the plans that need them). §7.2 record spine, kinds, per-activity sequence → Tasks 4, 5, 7. §7.3 required-but-defaulted → Tasks 2, 6. §7.4 fix provenance, GPS time, datum → Tasks 4, 7, 10. §7.5 device registry and stored conventions → Tasks 3, 4, 7, 13. §8.1 context stamp → Task 7. §8.2 deliberate/ambient/none and the ambient cache → Tasks 4, 7, 12. §8.4 offline place names → Task 9. §8.5 event log → Task 7. §9.3 hold verdict → Task 10. §9.5 duplicate guard → Task 9. §10.1 resume the last activity → Task 6.
+**Spec coverage.** §7.1 entities → Tasks 2, 4 (the tables this plan uses; `media`, `record_link`, `batch` and `batch_item` arrive with the plans that need them). §7.2 record spine, kinds, per-activity sequence → Tasks 4, 5, 7. §7.3 required-but-defaulted → Tasks 2, 6. §7.4 fix provenance, GPS time, datum → Tasks 4, 7, 10. §7.5 device registry and stored conventions → Tasks 3, 4, 7, 14. §5.2 persisted theme, §5.4 swappable capture controls and §7.6 settings → Tasks 8, 14, 15. §8.1 context stamp → Task 7. §8.2 deliberate/ambient/none and the ambient cache → Tasks 4, 7, 12. §8.4 offline place names → Task 9. §8.5 event log → Task 7. §9.3 hold verdict → Task 10. §9.5 duplicate guard → Task 9. §10.1 resume the last activity → Task 6.
 
 **Deliberately out of scope**, each with a home: the capture screen and its traffic-light frame (Plan 3); media capture and storage (Plan 4); the launcher, projects UI and Inbox (Plan 5); export profiles (Plan 6); tablet layouts (Plan 7); voice mode (Plan 8).
 

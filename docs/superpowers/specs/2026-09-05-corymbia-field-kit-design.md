@@ -137,6 +137,10 @@ No Tamagui, no NativeWind.
 **Dark mode is the default.** Light mode exists for glare — a bright overcast sky can defeat
 a dark screen. The theme follows the system setting with a manual override in settings.
 
+**Preferences persist.** An override that resets at every launch is not an override. Theme,
+handedness, capture-control order and density are stored locally and survive a restart —
+which means the application needs a small settings store, described in §7.6.
+
 ### 5.3 Responsive layout
 
 Devices: Samsung S25 (development reference), Samsung S24 and a 10-inch tablet (the user's).
@@ -182,6 +186,12 @@ corners are easiest. This inverts phone thinking.
 - Interactive controls live in the bottom third by default, and hug the bottom corners only
   on a **tablet in landscape** — the one case where the thumbs actually rest near the
   corners. A phone in landscape keeps the bottom band despite being `expanded` by width.
+- **Which capture control sits on the dominant side is itself a preference**, not a fixed
+  decision. The two differ in what they demand: `SAVE NOW` is the frequent action, while
+  `SHARPEN` is the effortful one, needing a sustained press. Whether the dominant thumb
+  should be given frequency or effort depends on how she actually holds the device and for
+  how long — which is not knowable from a desk. So it is a setting, defaulting to `SAVE NOW`
+  on the dominant side, and swappable without changing handedness.
 - Readouts occupy the centre — looked at, not touched.
 - **Reach zones are user-configurable.** A handedness and anchor setting determines which
   corner the working column occupies and which side primary actions sit on. Changing it
@@ -358,6 +368,19 @@ That distinction is not pedantry: adding a column to SQLite later costs one line
 tightening a constraint later requires rebuilding the table. Absence is cheap to reverse;
 a wrong guess recorded as data is not.
 
+### 7.6 Settings
+
+A small key-value store, in the same database, holding what the user has chosen rather than
+what she has recorded. Distinct from the domain tables on purpose: these are preferences, not
+observations, and they never appear in an export.
+
+What it holds today: the theme override, handedness, which capture control takes the dominant
+side, and the form density. Each has a default, so an unset key is not an error and a fresh
+install behaves correctly before anything is written.
+
+The reason it exists at all is that an override which resets at every launch is not an
+override — and the field conditions these settings exist for do not change between launches.
+
 ---
 
 ## 8. Context stamping and provenance
@@ -423,6 +446,12 @@ SAVE`, so the screen only ever offers one live action.
 
 Placement follows the reach zone setting: a bottom band by default, and one box under each
 thumb in the bottom corners on a tablet in landscape.
+
+**Which control sits on which side is configurable** (§5.4). The default puts `SAVE NOW` on
+the dominant side because it is the more frequent action, but `SHARPEN` demands a sustained
+press and may deserve the stronger thumb — that is hers to decide after a day in the field,
+not a matter to settle in advance. Swapping them must not require changing handedness, since
+the two preferences are independent.
 
 ### 9.2 The traffic-light frame
 
