@@ -16,6 +16,24 @@ export type { Project } from './repositories/projects'
 export { createActivity, listActivities, mostRecentActivity } from './repositories/activities'
 export type { Activity, ActivityKind } from './repositories/activities'
 
+export {
+  createRecord,
+  listRecords,
+  listUnfiledRecords,
+  softDeleteRecord,
+} from './repositories/records'
+export type {
+  Fix,
+  FieldRecord,
+  Datum,
+  PositionConditions,
+  SampleEvidence,
+  AccuracyConvention,
+  AltitudeReference,
+} from './repositories/records'
+export { appendEvent, listEvents } from './repositories/events'
+export type { EventAction, EventEntry } from './repositories/events'
+
 export { newId } from './ids'
 export { nowIso } from './time'
 export { validateAttributes, serialiseAttributes } from './kinds'
