@@ -4,9 +4,13 @@
   "main": "expo-router/entry",
   "dependencies": {
     "@corymbia/brand": "workspace:*",
+    "@corymbia/data": "workspace:*",
+    "@corymbia/geo": "workspace:*",
     "@corymbia/tokens": "workspace:*",
     "@corymbia/ui": "workspace:*",
     "expo": "~57.0.20",
+    "expo-application": "~57.0.2",
+    "expo-device": "~57.0.1",
     "expo-location": "~57.0.16",
     "expo-router": "~57.0.19",
     "expo-sqlite": "~57.0.2",
