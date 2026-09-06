@@ -186,12 +186,20 @@ corners are easiest. This inverts phone thinking.
 - Interactive controls live in the bottom third by default, and hug the bottom corners only
   on a **tablet in landscape** — the one case where the thumbs actually rest near the
   corners. A phone in landscape keeps the bottom band despite being `expanded` by width.
-- **Which capture control sits on the dominant side is itself a preference**, not a fixed
-  decision. The two differ in what they demand: `SAVE NOW` is the frequent action, while
-  `SHARPEN` is the effortful one, needing a sustained press. Whether the dominant thumb
-  should be given frequency or effort depends on how she actually holds the device and for
-  how long — which is not knowable from a desk. So it is a setting, defaulting to `SAVE NOW`
-  on the dominant side, and swappable without changing handedness.
+- **There is one capture control, so there is no side to choose.** This bullet formerly made
+  which of two boxes took the dominant side a preference — `SAVE NOW` being the frequent
+  action and `SHARPEN` the effortful one, with no way to know from a desk which deserved the
+  stronger thumb. §9.1 has since replaced the pair with a single control, and a choice
+  between one thing is not a choice. Handedness still drives placement — which corner the
+  working column occupies, and which side the control sits on — it simply no longer has a
+  second box to trade against.
+- **`capturePrimary` stays in the schema, unread.** The setting and its column are left
+  exactly where they are rather than migrated away: removing a settings column costs a
+  migration, and the underlying question — what the dominant thumb should be given on the
+  real capture screen — is still open, merely no longer answerable by swapping two boxes.
+  Plan 3 decides whether it acquires a new meaning or is retired. Until then it is stored,
+  displayed on the diagnostics screen as the persistence proof it has always doubled as, and
+  read by nothing.
 - Readouts occupy the centre — looked at, not touched.
 - **Reach zones are user-configurable.** A handedness and anchor setting determines which
   corner the working column occupies and which side primary actions sit on. Changing it
@@ -497,24 +505,65 @@ and it is cheap to write now and expensive to retrofit.
 
 ## 9. The capture interaction
 
-### 9.1 Two controls, side by side
+### 9.1 One control: tap to record, then stand still
 
-- **Left — `⚡ SAVE NOW`**, in brand lime. Tap once, done.
-- **Right — `◎ SHARPEN`**, outlined in brand teal. Hold to improve, release to save.
+**This supersedes the two-control design**, which was `⚡ SAVE NOW` beside `◎ SHARPEN` — tap
+the left box to save at once, press and hold the right one to average readings and release
+to save, with which box took the dominant side a preference. That design was built and taken
+outdoors, and it failed on hardware for two reasons, neither of which was visible from a
+desk:
 
-Two visible boxes rather than one button with a hidden hold gesture: a non-technical user
-never discovers a hidden gesture. Side by side, the trade-off reads as speed on the left,
-quality on the right. During a hold the left box dims and the right relabels to `RELEASE TO
-SAVE`, so the screen only ever offers one live action.
+- **Pressing and holding moves the device.** A sustained press shifts a phone in the hand,
+  and shifts a 10-inch tablet held one-handed a great deal more. That movement is precisely
+  the error the averaging exists to remove, so the gesture was fighting its own purpose.
+- **The feedback was nowhere near the thumb.** Everything that responded to a hold —
+  accuracy, sample count, the verdict — sat in a panel far above the control, so while her
+  thumb was on the button the only part of the screen that moved was somewhere else
+  entirely.
 
-Placement follows the reach zone setting: a bottom band by default, and one box under each
-thumb in the bottom corners on a tablet in landscape.
+It is not forgotten and it is not deferred: it is replaced. There is now **one control**.
 
-**Which control sits on which side is configurable** (§5.4). The default puts `SAVE NOW` on
-the dominant side because it is the more frequent action, but `SHARPEN` demands a sustained
-press and may deserve the stronger thumb — that is hers to decide after a day in the field,
-not a matter to settle in advance. Swapping them must not require changing handedness, since
-the two preferences are independent.
+1. **One tap records the current fix immediately.** A real row on disk, not a draft held in
+   memory. If the app is killed, the battery goes, or she simply walks away, the capture
+   survives with the fix it had; only the sharpening is lost. This also makes the hurried
+   path exactly one tap, which is what the second box existed for.
+2. **The screen then counts down while she stands still**, showing the accuracy now, how
+   much it has improved since the tap, how many readings have gone into it, and how many
+   seconds remain. All of that sits inside the traffic-light frame with the button, within
+   sight of the thumb pressing it. **That adjacency is a requirement, not a layout
+   preference** — it is the specific defect this supersession exists to fix, and a design
+   that puts the countdown readout in a panel above the control has not implemented this
+   section.
+3. **When the countdown completes, the saved record is refined in place** with the averaged
+   fix. `refineRecordFix` writes the new fix and appends an `'edited'` event carrying **both
+   the previous and the new accuracy**, so the chain of custody shows a ±6 m fix that was
+   stood over and sharpened to ±3 m, rather than a record that was always ±3 m. The capture
+   number and the capture time do not move — the capture happened at the tap, and the number
+   may already be written on a tube.
+4. **An override accepts whatever has accumulated and ends the wait.** It is the same
+   control: during a countdown the button reads `ACCEPT NOW`. So exactly one action is ever
+   live, and the override is reachable at every moment the countdown is running.
+5. **A plateau suggests; it never decides.** When the fix appears to have stopped improving,
+   the screen says so and makes the override prominent — and the countdown carries on until
+   it expires or she ends it. This is deliberate. `holdVerdict` has been observed reading
+   `plateaued` continuously through a stretch in which accuracy fell from 6.4 m to 4.0 m, so
+   a signal allowed to end a capture on its own would end it in the middle of genuine
+   improvement. **Nothing auto-completes on a trend.**
+
+**A tap before the receiver has a lock still records.** Doctrine rule 4: nothing blocks
+capture. The row is written with an honest `'none'` position, and the countdown that follows
+is what gives it one — `refineRecordFix` accepts a refinement *from* no position for exactly
+this case, while refusing one *to* no position.
+
+**The countdown length is not yet settled**, and this section deliberately does not fix one.
+It is a choice on the diagnostics screen — 5, 10, 20, 30 and 60 seconds — because the
+tolerable wait is a fact about a survey day and the useful wait is a fact about the
+receiver, and neither is knowable at a desk. Plan 3 sets a default from what the field
+measurements say.
+
+Placement follows the reach zone setting: a bottom band by default, and the bottom corner
+under the dominant thumb on a tablet in landscape. Handedness still drives that. Which
+control takes the dominant side no longer means anything, because there is one (§5.4).
 
 ### 9.2 The traffic-light frame
 
