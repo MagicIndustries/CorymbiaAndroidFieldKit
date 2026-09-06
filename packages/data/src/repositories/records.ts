@@ -33,10 +33,23 @@ export type AltitudeReference = 'wgs84Ellipsoid' | 'meanSeaLevel'
  * to have been spoofed, and `record_none_has_no_position` requires every one of
  * these columns to be NULL.
  */
-export type PositionConditions = {
+export type PositionConditions<Mocked = boolean> = {
   verticalAccuracyM: number | null
   accuracyConvention: AccuracyConvention
-  isMocked: boolean
+  /**
+   * Whether the platform reported this position as mocked.
+   *
+   * The type parameter exists for the read path alone. Every writer must state
+   * this — `record_mocked_known_when_positioned` refuses a positioned row whose
+   * `is_mocked` is NULL — so `Fix`, the thing you construct, pins it to
+   * `boolean`. `StoredFix`, the thing that comes back out, widens it to
+   * `boolean | null`, because a row this build did not write (a restored
+   * backup, a sync peer, a database predating migration 003) can still carry
+   * NULL. Reading that as `false` would have the app assert "not spoofed" about
+   * a position it knows nothing about, on the one path that reaches an export —
+   * which is the exact claim the nullable, undefaulted column exists to prevent.
+   */
+  isMocked: Mocked
   /** Where the platform exposes it — 'gps', 'fused', 'network'. Null when it does not. */
   provider: string | null
   /**
@@ -116,22 +129,34 @@ export type SampleEvidence =
  *    time and no mocked flag — there is no position to have a provider or to
  *    have been spoofed.
  */
-export type Fix =
+export type Fix<Mocked = boolean> =
   | ({
       quality: 'deliberate'
       holdMs: number
       accuracyConvention: Exclude<AccuracyConvention, 'unknown'>
     } & PositionCore &
-      Omit<PositionConditions, 'accuracyConvention'> &
+      Omit<PositionConditions<Mocked>, 'accuracyConvention'> &
       AltitudeEvidence &
       SampleEvidence)
   | ({
       quality: 'ambient'
       ageSeconds: number
     } & PositionCore &
-      PositionConditions &
+      PositionConditions<Mocked> &
       AltitudeEvidence)
   | { quality: 'none' }
+
+/**
+ * A fix as it comes back out of the database, which is `Fix` with one thing
+ * relaxed: the mocked flag may be unknown.
+ *
+ * Writers still cannot produce that — `Fix` is what `createRecord` and
+ * `appendEvent` accept, and the schema refuses a positioned row without the
+ * flag. But a reader that meets one anyway must say "unknown", not "not
+ * spoofed". `Fix` is assignable to `StoredFix`, so anything you wrote still
+ * compares equal to what you read.
+ */
+export type StoredFix = Fix<boolean | null>
 
 export type FieldRecord = {
   id: string
@@ -147,7 +172,7 @@ export type FieldRecord = {
    * The position and its provenance. GPS time lives in here rather than beside
    * it: it belongs to the fix, and a positionless record has none.
    */
-  fix: Fix
+  fix: StoredFix
   capturedAt: string
   deviceId: string
   attributes: Record<string, unknown>
@@ -195,7 +220,7 @@ function toAltitude(row: RecordRow): AltitudeEvidence {
       }
 }
 
-function toFix(row: RecordRow): Fix {
+function toFix(row: RecordRow): StoredFix {
   if (row.fix_quality === 'none') return { quality: 'none' }
 
   const shared = {
@@ -204,7 +229,11 @@ function toFix(row: RecordRow): Fix {
     accuracyM: row.accuracy_m as number,
     datum: row.datum as Datum,
     verticalAccuracyM: row.vertical_accuracy_m,
-    isMocked: row.is_mocked === 1,
+    // `row.is_mocked === 1` alone reads NULL as `false` — the app asserting a
+    // position was not spoofed when it does not know. The column is nullable and
+    // undefaulted precisely so unknown stays unknown; the read path has to say
+    // so too, and this is the path that reaches an export.
+    isMocked: row.is_mocked === null ? null : row.is_mocked === 1,
     provider: row.location_provider,
     gpsTime: row.gps_time,
     ...toAltitude(row),
@@ -380,14 +409,51 @@ export async function listUnfiledRecords(db: Database): Promise<FieldRecord[]> {
   return rows.map(toRecord)
 }
 
-/** Soft, per spec §12.1 — the row is flagged and the history keeps the deletion. */
-export async function softDeleteRecord(db: Database, id: string, deviceId: string): Promise<void> {
+/**
+ * Soft, per spec §12.1 — the row is flagged and the history keeps the deletion.
+ *
+ * `fix` is optional and stamps the deletion event with where it happened, the
+ * way creation, editing, filing and playback are stamped (spec §8.5). A
+ * deletion is exactly the event whose location you would later want to know:
+ * "she removed it standing at the site" and "she removed it in the car park
+ * that evening" are different stories about the same record. Optional rather
+ * than required because a bulk tidy-up from a list has no single position to
+ * report, and inventing one would be worse than leaving it absent.
+ *
+ * Two edge cases, both of which previously misbehaved:
+ *
+ *  - Deleting an id that does not exist used to update nothing and then append
+ *    an event whose `record_id` had no referent, so the caller saw a FOREIGN KEY
+ *    error that read as though the delete had failed for some database reason.
+ *    It now throws a sentence that says what actually happened. Deleting
+ *    something that is not there is a stale screen or a bug upstream, and
+ *    swallowing it hides both.
+ *
+ *  - Deleting an already-deleted record used to overwrite `deleted_at` and
+ *    append a second `deleted` event, so the log said it was deleted twice and
+ *    the history lost the moment it was actually deleted. It is now a no-op:
+ *    deletion is a state, the second request asks for a state the record is
+ *    already in, and the first deletion is the true one. The event log is
+ *    append-only, so a spurious entry could never have been taken back.
+ */
+export async function softDeleteRecord(
+  db: Database,
+  id: string,
+  deviceId: string,
+  fix?: Fix,
+): Promise<void> {
   await db.transaction(async () => {
-    await db.execute('UPDATE record SET deleted_at = ?, updated_at = ? WHERE id = ?', [
-      nowIso(),
-      nowIso(),
-      id,
-    ])
-    await appendEvent(db, { recordId: id, action: 'deleted', deviceId })
+    const existing = await db.first<{ deleted_at: string | null }>(
+      'SELECT deleted_at FROM record WHERE id = ?',
+      [id],
+    )
+    if (!existing) {
+      throw new Error(`Record ${id} does not exist, so there is nothing to delete.`)
+    }
+    if (existing.deleted_at !== null) return
+
+    const at = nowIso()
+    await db.execute('UPDATE record SET deleted_at = ?, updated_at = ? WHERE id = ?', [at, at, id])
+    await appendEvent(db, { recordId: id, action: 'deleted', deviceId, fix })
   })
 }

@@ -24,6 +24,7 @@ export {
 } from './repositories/records'
 export type {
   Fix,
+  StoredFix,
   FieldRecord,
   Datum,
   PositionConditions,

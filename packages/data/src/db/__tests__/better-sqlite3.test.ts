@@ -49,6 +49,42 @@ describe('the test database adapter', () => {
     expect(await db.all('SELECT id FROM t')).toHaveLength(1)
   })
 
+  it('serialises overlapping transactions rather than interleaving them', async () => {
+    // Un-awaited and overlapping on purpose: this is the shape two rapid taps
+    // on the capture button produce. Interleaved, the second BEGIN throws and
+    // the first COMMIT commits the second's partial work.
+    const started: string[] = []
+    const run = (id: string, n: number): Promise<void> =>
+      db.transaction(async () => {
+        started.push(`begin ${id}`)
+        await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', [id, n])
+        // Yield mid-transaction, giving the other call every chance to cut in.
+        await Promise.resolve()
+        started.push(`commit ${id}`)
+      })
+
+    await Promise.all([run('x', 1), run('y', 2)])
+
+    expect(started).toEqual(['begin x', 'commit x', 'begin y', 'commit y'])
+    expect(await db.all('SELECT id FROM t')).toHaveLength(2)
+  })
+
+  it('keeps serialising after a transaction body throws, rather than wedging the queue', async () => {
+    // A rejected link left in the chain would make every later transaction
+    // hang or inherit the failure. The rollback must still be the only effect.
+    const failing = db.transaction(async () => {
+      await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['doomed', 1])
+      throw new Error('deliberate')
+    })
+    const following = db.transaction(async () => {
+      await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['survivor', 2])
+    })
+
+    await expect(failing).rejects.toThrow('deliberate')
+    await expect(following).resolves.toBeUndefined()
+    expect(await db.all('SELECT id FROM t')).toEqual([{ id: 'survivor' }])
+  })
+
   it('enforces foreign keys, which SQLite disables by default', async () => {
     await db.execute('CREATE TABLE child (id TEXT PRIMARY KEY, t_id TEXT NOT NULL REFERENCES t(id))')
     await expect(

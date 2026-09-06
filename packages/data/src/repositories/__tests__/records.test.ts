@@ -302,6 +302,92 @@ describe('records', () => {
     expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created', 'deleted'])
   })
 
+  it('reports an unknown mocked flag as unknown, not as "not spoofed"', async () => {
+    // The record path is the one that reaches an export, so a NULL here must
+    // stay NULL rather than becoming `false`.
+    //
+    // This build cannot write such a row — record_mocked_known_when_positioned
+    // refuses it, which is why the CHECKs have to be suspended to plant one.
+    // That is the point: the row does not come from here. It comes from a
+    // restored backup, a sync peer, or a database written before migration 003
+    // added the column, and the reader still has to be honest about it.
+    const record = await createRecord(db, { activityId, kind: 'pin', fix: AMBIENT, deviceId })
+    await db.execute('PRAGMA ignore_check_constraints = ON')
+    await db.execute('UPDATE record SET is_mocked = NULL WHERE id = ?', [record.id])
+    await db.execute('PRAGMA ignore_check_constraints = OFF')
+
+    const reread = await listRecords(db, activityId)
+    expect(reread[0]?.fix).toMatchObject({ isMocked: null })
+  })
+
+  it('stamps the deletion event with where the deletion happened', async () => {
+    // Spec §8.5: creation, edits, filing, playback and deletion each carry a
+    // context stamp. A deletion is exactly the one whose location matters later.
+    const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    await softDeleteRecord(db, record.id, deviceId, AMBIENT)
+
+    const deletion = (await listEvents(db, record.id)).find((e) => e.action === 'deleted')
+    expect(deletion?.fixQuality).toBe('ambient')
+    expect(deletion?.latitude).toBe(AMBIENT.quality === 'ambient' ? AMBIENT.latitude : null)
+    expect(deletion?.isMocked).toBe(false)
+  })
+
+  it('leaves the deletion event unstamped when no fix is offered', async () => {
+    // A bulk tidy-up from a list has no single position to report; inventing
+    // one would be worse than leaving it absent.
+    const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    await softDeleteRecord(db, record.id, deviceId)
+
+    const deletion = (await listEvents(db, record.id)).find((e) => e.action === 'deleted')
+    expect(deletion?.fixQuality).toBeNull()
+    expect(deletion?.isMocked).toBeNull()
+  })
+
+  it('treats a second deletion as a no-op, keeping the first deletion’s moment', async () => {
+    const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    await softDeleteRecord(db, record.id, deviceId)
+    const first = await db.first<{ deleted_at: string | null }>(
+      'SELECT deleted_at FROM record WHERE id = ?',
+      [record.id],
+    )
+
+    await softDeleteRecord(db, record.id, deviceId)
+
+    const second = await db.first<{ deleted_at: string | null }>(
+      'SELECT deleted_at FROM record WHERE id = ?',
+      [record.id],
+    )
+    expect(second?.deleted_at).toBe(first?.deleted_at)
+    // The log is append-only, so a second entry could never have been retracted.
+    expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created', 'deleted'])
+  })
+
+  it('says so plainly when asked to delete a record that does not exist', async () => {
+    // Previously this updated nothing and then appended an event whose
+    // record_id had no referent, surfacing as a FOREIGN KEY error that read as
+    // though the delete itself had failed.
+    await expect(softDeleteRecord(db, 'rec_missing', deviceId)).rejects.toThrow(
+      /rec_missing does not exist/,
+    )
+    expect(await listEvents(db, 'rec_missing')).toEqual([])
+  })
+
+  it('gives two simultaneous Inbox captures distinct sequence numbers', async () => {
+    // Two rapid taps, each firing an un-awaited promise. Without serialisation
+    // the second BEGIN throws and the first COMMIT commits the second's partial
+    // work — and the Inbox cannot fall back on the UNIQUE index to notice,
+    // because SQLite treats NULL activity_ids as distinct.
+    const [first, second] = await Promise.all([
+      createRecord(db, { activityId: null, kind: 'pin', fix: AMBIENT, deviceId }),
+      createRecord(db, { activityId: null, kind: 'pin', fix: INSTANT, deviceId }),
+    ])
+
+    expect([first.sequence, second.sequence].sort((a, b) => a - b)).toEqual([1, 2])
+    expect((await listUnfiledRecords(db)).map((r) => r.id).sort()).toEqual(
+      [first.id, second.id].sort(),
+    )
+  })
+
   it('rejects attributes that are not valid for the kind', async () => {
     await expect(
       createRecord(db, {
