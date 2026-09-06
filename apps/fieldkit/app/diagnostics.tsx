@@ -14,11 +14,13 @@ import {
   createActivity,
   createProject,
   createRecord,
+  listActivities,
+  listProjects,
   listRecords,
-  mostRecentActivity,
   nowIso,
   sampleEvidence,
   type AltitudeEvidence,
+  type Database,
   type Fix,
   type FieldRecord,
   type StoredFix,
@@ -26,6 +28,68 @@ import {
 import { spacing } from '@corymbia/tokens'
 import { Button, Card, Screen, Type, useTheme } from '@corymbia/ui'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
+
+/**
+ * The project and activity this screen owns, found by name.
+ *
+ * The screen must never write a test pin into a real survey. Deletion is soft
+ * everywhere (spec §6), so a diagnostic pin planted in the activity she was
+ * actually running is there permanently — it can be flagged deleted, never
+ * removed, and it still carries a sequence number in her survey. Adopting
+ * whatever `mostRecentActivity()` returned did exactly that from the moment
+ * the first real survey existed.
+ *
+ * Names rather than fixed ids because ids are minted by `newId()`; a name is
+ * the only handle a screen can look up in a database it did not create (a
+ * reinstall, a restored backup, a device that has run this screen before).
+ * Nothing else in the app creates a project called "Diagnostics", so the
+ * lookup cannot collide with real data — and if the user ever does name a
+ * survey that, the worst case is that this screen reuses it, which is the
+ * same failure mode as typing the name into the capture screen by hand.
+ */
+const DIAGNOSTICS_PROJECT_NAME = 'Diagnostics'
+const DIAGNOSTICS_ACTIVITY_NAME = 'Diagnostics run'
+
+/**
+ * The diagnostics activity if it already exists, and null otherwise —
+ * deliberately creating nothing. An instrument that writes to the database
+ * merely by being opened corrupts the very thing it is measuring, so the
+ * on-arrival load uses this and shows an empty list rather than minting a
+ * project for a screen that may only have been opened to read the migration
+ * list.
+ */
+async function findDiagnosticsActivity(db: Database): Promise<string | null> {
+  const project = (await listProjects(db)).find((p) => p.name === DIAGNOSTICS_PROJECT_NAME)
+  if (!project) return null
+  const activity = (await listActivities(db, project.id)).find(
+    (a) => a.name === DIAGNOSTICS_ACTIVITY_NAME,
+  )
+  return activity?.id ?? null
+}
+
+/**
+ * The same activity, created if this screen has never run on this database.
+ *
+ * Only a save calls this, so opening the screen still writes nothing. It
+ * never adopts an activity it did not create: the lookup is by this screen's
+ * own two names, and anything else on disk — including whatever survey she
+ * was running a minute ago — is left alone.
+ */
+async function ensureDiagnosticsActivity(db: Database): Promise<string> {
+  const existing = await findDiagnosticsActivity(db)
+  if (existing !== null) return existing
+
+  const projects = await listProjects(db)
+  const project =
+    projects.find((p) => p.name === DIAGNOSTICS_PROJECT_NAME) ??
+    (await createProject(db, { name: DIAGNOSTICS_PROJECT_NAME }))
+  const activity = await createActivity(db, {
+    projectId: project.id,
+    kind: 'survey',
+    name: DIAGNOSTICS_ACTIVITY_NAME,
+  })
+  return activity.id
+}
 
 /**
  * Pairs an altitude with the frame it was measured against, or nulls both
@@ -222,14 +286,20 @@ function DiagnosticsBody(props: BodyProps) {
   // just because nothing has been saved yet in this session. This must not
   // create anything — an instrument that writes to the database merely by
   // being opened corrupts the very thing it is measuring — so it looks for
-  // the most recent existing activity and shows nothing when there is none,
-  // rather than calling `ensureActivity()`.
+  // this screen's OWN activity and shows nothing when there is none, rather
+  // than calling `ensureActivity()`.
+  //
+  // It reads the diagnostics activity, not the most recent one: the list
+  // below has to show the pins this screen saved, and reading her live survey
+  // instead would put real records under a heading of test results — the same
+  // confusion of the instrument with the thing measured that the save path
+  // was fixed for.
   useEffect(() => {
     const token = ++refreshToken.current
     void (async () => {
-      const existing = await mostRecentActivity(db)
-      if (!mountedRef.current || token !== refreshToken.current || !existing) return
-      const loaded = await listRecords(db, existing.id)
+      const existing = await findDiagnosticsActivity(db)
+      if (!mountedRef.current || token !== refreshToken.current || existing === null) return
+      const loaded = await listRecords(db, existing)
       if (!mountedRef.current || token !== refreshToken.current) return
       setRecords(loaded)
     })()
@@ -255,16 +325,40 @@ function DiagnosticsBody(props: BodyProps) {
     </View>
   )
 
-  async function ensureActivity(): Promise<string> {
-    const existing = await mostRecentActivity(db)
-    if (existing) return existing.id
-    const project = await createProject(db, { name: 'Diagnostics' })
-    const activity = await createActivity(db, {
-      projectId: project.id,
-      kind: 'survey',
-      name: 'Diagnostics run',
-    })
-    return activity.id
+  /**
+   * The diagnostics activity, created at most once per screen.
+   *
+   * The promise itself is cached, not the id: two saves in quick succession
+   * both call this before either has finished writing, and two independent
+   * `ensureDiagnosticsActivity()` walks would each find nothing and each
+   * create an activity — two "Diagnostics run" rows, with the pins split
+   * between them and only one of them ever displayed. A rejected attempt
+   * clears the cache so the next save tries again rather than replaying the
+   * same failure for the life of the screen.
+   */
+  const activityPromise = useRef<Promise<string> | null>(null)
+  function ensureActivity(): Promise<string> {
+    if (activityPromise.current === null) {
+      activityPromise.current = ensureDiagnosticsActivity(db).catch((error: unknown) => {
+        activityPromise.current = null
+        throw error
+      })
+    }
+    return activityPromise.current
+  }
+
+  /**
+   * Turns any thrown value into the one sentence the message area can show.
+   *
+   * This screen is carried outdoors with no console attached, and the field
+   * checklist lists "a save reporting an error rather than a record" as a
+   * result to capture — so a failure has to be legible on the screen itself.
+   * The realistic one is a CHECK constraint: `record_altitude_range` refuses a
+   * GNSS altitude glitch, and SQLite names the constraint in the message,
+   * which is exactly what makes the report worth writing down.
+   */
+  function describeFailure(what: string, error: unknown): string {
+    return `${what}: ${error instanceof Error ? error.message : String(error)}`
   }
 
   async function saveDeliberate(samples: Reading[]) {
@@ -304,7 +398,13 @@ function DiagnosticsBody(props: BodyProps) {
     // (the on-arrival load, or an earlier save) can never win a race against
     // this one — see `refreshToken` above.
     const token = ++refreshToken.current
-    const activityId = await ensureActivity()
+    let activityId: string
+    try {
+      activityId = await ensureActivity()
+    } catch (error) {
+      props.setMessage(describeFailure('Could not open the diagnostics activity', error))
+      return
+    }
     const previous = props.records[0]
     const duplicate =
       previous && previous.fix.quality !== 'none'
@@ -344,13 +444,25 @@ function DiagnosticsBody(props: BodyProps) {
         samples.length > 1 ? lastSample.timestampMs - (samples[0] as Reading).timestampMs : 0,
     }
 
-    await createRecord(db, {
-      activityId,
-      kind: 'pin',
-      fix,
-      deviceId: device.id,
-    })
-    const loaded = await listRecords(db, activityId)
+    // `createRecord` can genuinely fail on real hardware: migration 003's
+    // CHECK constraints refuse a malformed row, and `record_altitude_range` on
+    // a GNSS altitude glitch is the one to expect. Unguarded, that became an
+    // unhandled rejection and the screen simply did nothing — the instrument
+    // silently failing to report the failure it was carried outdoors to catch.
+    let loaded: FieldRecord[]
+    try {
+      await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix,
+        deviceId: device.id,
+      })
+      loaded = await listRecords(db, activityId)
+    } catch (error) {
+      if (!mountedRef.current) return
+      props.setMessage(describeFailure('Save failed', error))
+      return
+    }
     // The screen may have navigated away, or a newer save/load may already
     // have refreshed the list, while the two awaits above were in flight.
     if (!mountedRef.current || token !== refreshToken.current) return
@@ -370,7 +482,13 @@ function DiagnosticsBody(props: BodyProps) {
     }
 
     const token = ++refreshToken.current
-    const activityId = await ensureActivity()
+    let activityId: string
+    try {
+      activityId = await ensureActivity()
+    } catch (error) {
+      props.setMessage(describeFailure('Could not open the diagnostics activity', error))
+      return
+    }
     const fix: Fix = fixNow
       ? {
           quality: 'ambient',
@@ -388,8 +506,17 @@ function DiagnosticsBody(props: BodyProps) {
           ...altitudeEvidence(fixNow.altitudeM),
         }
       : { quality: 'none' }
-    await createRecord(db, { activityId, kind: 'pin', fix, deviceId: device.id })
-    const loaded = await listRecords(db, activityId)
+    // Guarded for the same reason as the deliberate path above: this one had
+    // no guard at all, so a refused insert vanished as an unhandled rejection.
+    let loaded: FieldRecord[]
+    try {
+      await createRecord(db, { activityId, kind: 'pin', fix, deviceId: device.id })
+      loaded = await listRecords(db, activityId)
+    } catch (error) {
+      if (!mountedRef.current) return
+      props.setMessage(describeFailure('Save failed', error))
+      return
+    }
     if (!mountedRef.current || token !== refreshToken.current) return
     props.setRecords(loaded)
     props.setMessage(fixNow ? `Saved ambient, ${fixNow.ageSeconds}s old` : 'Saved with no position')
