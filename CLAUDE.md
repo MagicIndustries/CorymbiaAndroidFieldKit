@@ -18,6 +18,27 @@ Commands, from the repository root:
 - `pnpm run lint:verify-rules` — proves the three architectural lint rules actually
   fire under a real per-workspace invocation, not just that they are configured
 - `cd apps/fieldkit && npx expo run:android` — build and run on a connected device
+- `pnpm run generate:app-icons` — regenerates the launcher icons from
+  `design/logo/logo.svg` (see below)
+
+## Native builds
+
+`apps/fieldkit/android/` is generated and git-ignored. Two things about it have
+already cost time once each:
+
+- **`expo run:android` never exits.** It keeps the Metro bundler alive by design, so
+  waiting for the process to end waits forever. To tell whether an install actually
+  landed, check `adb shell dumpsys package eco.corymbia.fieldkit | grep lastUpdateTime`.
+- **Changes to `app.json` do not reach a build on their own.** `expo run:android`
+  compiles whatever is already in `android/`; icons, the app name, orientation and
+  similar config only get written into native resources by `npx expo prebuild
+  --platform android`. Run it after editing `app.json`, then build. Prebuild also
+  reports config that needs a package installed to work at all — it is worth reading
+  its output rather than skipping past it.
+
+A release build (`npx expo run:android --variant release`) embeds the JavaScript
+bundle, so the APK runs with no development machine attached. That is the build to
+use for judging the app in the field.
 
 ## Design and UI rules
 
