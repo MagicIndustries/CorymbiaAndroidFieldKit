@@ -8,7 +8,20 @@ import type { Migration } from '../db/migrate'
  * becomes "Corymbia (internal)" and a skipped location "Office / Lab", so the data
  * stays well-formed when she types a name and moves on.
  *
- * Soft deletion throughout: `deleted_at` is set, rows are never removed.
+ * Soft deletion on every entity table here — client, location, project and
+ * activity each carry `deleted_at`, which is set rather than removing the row
+ * (spec §6, §12.1).
+ *
+ * `project_location` is deliberately exempt, and it is a join table rather than
+ * an oversight. It holds no content anyone authored: the fact it records is
+ * "this project is at that location", and taking that link back is not the
+ * deletion of a thing, it is the correction of a relationship — both sides
+ * survive it, and both sides keep their own history. It also has no room for a
+ * tombstone: its primary key is the pair, so a soft-deleted link would block
+ * the very row that re-establishing the link needs to insert, and the schema
+ * would need a surrogate key and a partial unique index to allow what a plain
+ * DELETE already allows. Nothing in the app deletes from this table yet; when
+ * something does, it deletes the row.
  */
 export const migration001: Migration = {
   id: '001-projects',

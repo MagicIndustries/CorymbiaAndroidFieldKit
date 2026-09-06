@@ -1,5 +1,6 @@
 import { openTestDatabase } from '../better-sqlite3'
 import { migrate, readAppliedMigrationIds } from '../migrate'
+import { migrations } from '../../migrations'
 import type { Database } from '../port'
 
 async function tableNames(db: Database): Promise<string[]> {
@@ -28,6 +29,19 @@ describe('migrate', () => {
 
   it('reports which migrations it applied', async () => {
     expect(await migrate(db)).toContain('001-projects')
+  })
+
+  it('names every migration so that sorting the ids reproduces the order they run in', async () => {
+    // `readAppliedMigrationIds` orders by `applied_at, id`, and the id tiebreak
+    // is what makes its promise ("in the order they were applied") true at all:
+    // every migration in a fresh database commits inside the same millisecond,
+    // so `applied_at` alone leaves them unordered. That works only while ids
+    // carry a zero-padded ordinal prefix matching their position in this list.
+    // Add `add-media` without one and the tiebreak silently stops meaning the
+    // order it claims — which is what this assertion is here to prevent.
+    const ids = migrations.map((migration) => migration.id)
+    expect(ids).toEqual([...ids].sort())
+    for (const id of ids) expect(id).toMatch(/^\d{3}-/)
   })
 
   it('is idempotent — running twice applies nothing the second time', async () => {

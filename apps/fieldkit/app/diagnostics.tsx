@@ -208,7 +208,7 @@ export default function Diagnostics() {
 
   if (status.state !== 'ready') {
     return (
-      <Screen>
+      <Screen spokenDescription={`Diagnostics. The database is ${status.state}.`}>
         <Type variant="title">Database {status.state}</Type>
         {status.error ? <Type dim>{status.error.message}</Type> : null}
       </Screen>
@@ -533,7 +533,12 @@ function DiagnosticsBody(props: BodyProps) {
   }
 
   return (
-    <Screen>
+    // Doctrine rule 16: every screen carries a spoken description. This one is
+    // a development instrument rather than a designed screen, but it ships in
+    // the release APK and is reachable from the launcher, so it is a screen
+    // like any other — and a one-line prop is cheaper than an exemption the
+    // next instrument would inherit.
+    <Screen spokenDescription="Diagnostics. A development instrument for proving the GPS and database engine on real hardware. Live GPS readings, device facts, and controls for saving test fixes into a dedicated diagnostics activity.">
       <ScrollView showsVerticalScrollIndicator={false}>
         <Type variant="title">Diagnostics</Type>
         <Type dim>Not a design. An instrument for proving the engine on hardware.</Type>

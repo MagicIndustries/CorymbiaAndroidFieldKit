@@ -48,6 +48,18 @@ export async function migrate(db: Database): Promise<string[]> {
  * Reads the ids of migrations already recorded as committed in
  * `schema_migration`, in the order they were applied.
  *
+ * "In the order they were applied" needs the id tiebreak below to be true at
+ * all. `applied_at` is millisecond-resolution and every migration in a fresh
+ * database commits inside the same millisecond, so ordering by it alone leaves
+ * the result unordered among ties — SQLite is free to return them in any order
+ * for equal keys, and a promise kept only by the accident of insertion order is
+ * not a promise. Migration ids carry a zero-padded ordinal prefix
+ * (`001-projects`, `002-devices`, …) and `migrations` in ../migrations/index.ts
+ * is that same sequence, so sorting the tie by id reproduces the order they
+ * were applied in. That convention is asserted by test — if a future migration
+ * is named without an ordinal, the tiebreak stops meaning this and the test
+ * says so.
+ *
  * `migrate` only returns the ids it itself ran to completion in this call: if
  * it throws partway through, that return value is lost with the throw, even
  * though every earlier migration committed in its own transaction and is
@@ -69,6 +81,8 @@ export async function readAppliedMigrationIds(db: Database): Promise<string[]> {
   )
   if (!table) return []
 
-  const rows = await db.all<{ id: string }>('SELECT id FROM schema_migration ORDER BY applied_at')
+  const rows = await db.all<{ id: string }>(
+    'SELECT id FROM schema_migration ORDER BY applied_at, id',
+  )
   return rows.map((row) => row.id)
 }

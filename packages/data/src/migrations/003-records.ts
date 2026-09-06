@@ -76,10 +76,29 @@ export const migration003: Migration = {
        vertical_accuracy_m  REAL CONSTRAINT record_vertical_accuracy_positive
                             CHECK (vertical_accuracy_m IS NULL OR vertical_accuracy_m > 0),
 
-       -- Nullable and undefaulted on purpose. Spec §7.5: what the platform does
-       -- not expose is recorded as unknown, never guessed. A DEFAULT 0 would make
-       -- every unexamined row assert "not spoofed", which is a claim the app was
-       -- never in a position to make.
+       -- Nullable and undefaulted on purpose, but NOT so that a platform which
+       -- declines to report mocked status can write NULL here:
+       -- record_mocked_known_when_positioned below makes NULL unreachable for
+       -- any row that carries a position, so a capture whose platform never
+       -- said is refused rather than stored as unknown. That refusal is the
+       -- intended behaviour — a fix that cannot show it was not spoofed is not
+       -- evidence (spec §7.5) — and the caller has to deal with it before the
+       -- insert, not by writing a NULL.
+       --
+       -- Two things need the column nullable anyway:
+       --
+       --  * The 'none' class. record_none_has_no_position requires
+       --    is_mocked IS NULL: with no position there was nothing to spoof and
+       --    no question to ask, so NOT NULL here would make a positionless
+       --    record unwritable.
+       --  * Rows this build did not write. A restored backup, a sync peer, or a
+       --    database predating this migration can carry NULL under a position,
+       --    and the read path types it "boolean or null" so such a row reads as
+       --    "unknown" rather than as "not spoofed".
+       --
+       -- A DEFAULT 0 is refused for a third reason: it would make every
+       -- unexamined row assert "not spoofed", a claim the app was never in a
+       -- position to make, and it would silently break the 'none' class.
        is_mocked            INTEGER CONSTRAINT record_is_mocked_boolean
                             CHECK (is_mocked IS NULL OR is_mocked IN (0, 1)),
        location_provider    TEXT,
