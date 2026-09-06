@@ -7,6 +7,8 @@ import {
   gradeAccuracy,
   holdVerdict,
   isProbableDuplicate,
+  type FixGrade,
+  type HoldVerdict,
   type PermissionState,
   type Reading,
 } from '@corymbia/geo'
@@ -134,6 +136,83 @@ function deliberateEvidence(fix: StoredFix): string | null {
   return parts.join(' ')
 }
 
+/**
+ * How many rows the reading log shows.
+ *
+ * Enough to show the shape of a convergence — several steps of the accuracy
+ * estimate settling — without growing past what fits on screen alongside the
+ * panels above it (spec: fit one screenshot). `readings` itself holds up to
+ * 20; this is a display window onto its tail, not a second buffer.
+ */
+const LOG_ROWS = 8
+
+/** One row of the reading log: a reading, plus the verdict as it stood then. */
+type LogRow = {
+  timestampMs: number
+  elapsedS: number
+  accuracyM: number
+  grade: FixGrade
+  verdict: HoldVerdict
+}
+
+const LOG_ELAPSED_W = 5
+const LOG_ACCURACY_W = 7
+const LOG_GRADE_W = 6
+
+/**
+ * The reading log's column header, in the same fixed widths `formatLogRow`
+ * uses, so it lines up with the data rows below it under the `mono` font.
+ */
+function formatLogHeader(): string {
+  return ['s'.padStart(LOG_ELAPSED_W), 'm'.padStart(LOG_ACCURACY_W), 'grade'.padEnd(LOG_GRADE_W), 'verdict'].join(
+    ' ',
+  )
+}
+
+function formatLogRow(row: LogRow): string {
+  return [
+    `${row.elapsedS}s`.padStart(LOG_ELAPSED_W),
+    `${row.accuracyM.toFixed(1)}m`.padStart(LOG_ACCURACY_W),
+    row.grade.padEnd(LOG_GRADE_W),
+    row.verdict,
+  ].join(' ')
+}
+
+/**
+ * The last `LOG_ROWS` readings, newest first, each carrying the verdict as it
+ * stood *at that reading* — not today's verdict replayed over old data.
+ *
+ * `holdVerdict` only looks at its own `WINDOW` (4) most recent readings, so
+ * calling it on `readings.slice(0, i + 1)` for each `i` reproduces exactly
+ * what the screen would have said at that point in the stream: readings after
+ * position `i` cannot influence it, because `holdVerdict` never sees them.
+ *
+ * Newest first: this log exists to catch a verdict that lags what the
+ * accuracy is actually doing (finding: verdict read `plateaued` for a full
+ * minute while accuracy fell from 6.4 m to 4.0 m). The way to check a
+ * suspicious verdict on a row is to look at the fresher rows above it — with
+ * newest first, "above" is later in time, so a `plateaued` row sitting under
+ * still-falling accuracy is right there without scrolling down and losing
+ * the row you started from.
+ */
+function buildLogRows(readings: Reading[], sessionStartMs: number | null): LogRow[] {
+  if (sessionStartMs === null) return []
+  const oldestIndex = Math.max(0, readings.length - LOG_ROWS)
+  const rows: LogRow[] = []
+  for (let i = readings.length - 1; i >= oldestIndex; i--) {
+    const reading = readings[i]
+    if (!reading) continue
+    rows.push({
+      timestampMs: reading.timestampMs,
+      elapsedS: Math.round((reading.timestampMs - sessionStartMs) / 1000),
+      accuracyM: reading.accuracyM,
+      grade: gradeAccuracy(reading.accuracyM),
+      verdict: holdVerdict(readings.slice(0, i + 1)),
+    })
+  }
+  return rows
+}
+
 export default function Diagnostics() {
   const status = useDatabaseStatus()
   const { theme } = useTheme()
@@ -148,6 +227,14 @@ export default function Diagnostics() {
   const source = useRef(createExpoLocationSource()).current
   const ambient = useRef(createAmbientCache(source)).current
   const held = useRef<Reading[]>([])
+  // The anchor for the reading log's "elapsed seconds" column below. Set once,
+  // from the first reading this screen ever sees, and never from `readings[0]`
+  // — that buffer is trimmed to the most recent 20 (see `setReadings` below),
+  // so after a long session `readings[0]` is not the first reading of the
+  // session at all, it is just the oldest one still on hand. Elapsed time has
+  // to be anchored to a fixed point or the log's shape would shift under it
+  // every time the buffer trims.
+  const sessionStartMs = useRef<number | null>(null)
   // Mirrors `holding`. The subscription callback below is created once, when
   // this effect runs with an empty dependency array, so it closes over
   // whatever `holding` was AT THAT MOMENT — permanently `false` — rather than
@@ -176,6 +263,7 @@ export default function Diagnostics() {
       if (state !== 'granted') return
 
       const unsubscribe = await source.watch((reading) => {
+        if (sessionStartMs.current === null) sessionStartMs.current = reading.timestampMs
         ambient.record(reading)
         // expo-location reports whether a position came from a mock provider
         // only on some platforms; `reading.isMocked` stays `undefined` rather
@@ -224,6 +312,7 @@ export default function Diagnostics() {
       holding={holding}
       setHolding={setHolding}
       held={held}
+      sessionStartMs={sessionStartMs}
       ambient={ambient}
       records={records}
       setRecords={setRecords}
@@ -243,6 +332,7 @@ type BodyProps = {
   holding: boolean
   setHolding: (v: boolean) => void
   held: React.MutableRefObject<Reading[]>
+  sessionStartMs: React.MutableRefObject<number | null>
   ambient: ReturnType<typeof createAmbientCache>
   records: FieldRecord[]
   setRecords: (r: FieldRecord[]) => void
@@ -256,7 +346,7 @@ function DiagnosticsBody(props: BodyProps) {
   const db = useDatabase()
   const device = useDevice()
   const { settings, updateSetting } = useSettings()
-  const { latest, readings, holding, held, ambient, setRecords } = props
+  const { latest, readings, holding, held, sessionStartMs, ambient, setRecords } = props
 
   // Guards every `setState` call below that follows an `await`. Directed
   // deviation 5 covered the location subscription; the save handlers and the
@@ -317,6 +407,8 @@ function DiagnosticsBody(props: BodyProps) {
    * constant.
    */
   const conditions = { accuracyConvention: 'radius68', provider: null } as const
+
+  const logRows = buildLogRows(readings, sessionStartMs.current)
 
   const row = (label: string, value: string) => (
     <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 }}>
@@ -637,6 +729,28 @@ function DiagnosticsBody(props: BodyProps) {
             <Type style={{ color: props.theme.colors.accent }}>{props.message}</Type>
           </>
         ) : null}
+
+        {/*
+          Below the hold/save controls, not beside the live GPS card above,
+          so this addition cannot push those controls further down the
+          scroll — they are being replaced in a separate change right after
+          this one and need to stay exactly where they are.
+        */}
+        <View style={{ height: spacing.lg }} />
+        <Card>
+          <Type variant="label" dim>READING LOG</Type>
+          <Type variant="small" dim>
+            Newest first. Verdict is what holdVerdict said at that reading, from
+            only the readings before it — not replayed with today&apos;s data.
+          </Type>
+          <View style={{ height: spacing.xs }} />
+          <Type variant="mono" dim>{formatLogHeader()}</Type>
+          {logRows.length === 0 ? (
+            <Type variant="mono" dim>—</Type>
+          ) : (
+            logRows.map((r) => <Type key={r.timestampMs} variant="mono">{formatLogRow(r)}</Type>)
+          )}
+        </Card>
 
         <View style={{ height: spacing.lg }} />
         <Type variant="label" dim>STORED RECORDS</Type>
