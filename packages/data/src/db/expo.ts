@@ -1,6 +1,6 @@
-import { AsyncLocalStorage } from 'node:async_hooks'
 import { openDatabaseAsync } from 'expo-sqlite'
 import type { Database, SqlValue } from './port'
+import { createTransactionRunner, type TransactionRunnerOptions } from './transactions'
 
 /**
  * The on-device adapter. `expo-sqlite` does not run in Node, so this file is
@@ -11,11 +11,11 @@ import type { Database, SqlValue } from './port'
  *
  * Deliberately thin otherwise: everything interesting lives in the
  * repositories, which are tested against real SQL through the better-sqlite3
- * adapter. What this file must get right is the translation, the two pragmas,
- * and — because on device this is the only `Database` implementation that
- * ever runs — the same transaction-safety behaviour the test adapter has.
- * See `better-sqlite3.ts` for the long-form reasoning; it is not repeated
- * here, only replicated.
+ * adapter. What this file must get right is the translation and the two
+ * pragmas. Transaction safety is no longer replicated here — it is imported
+ * from `./transactions`, the single module the test adapter also uses, so the
+ * two cannot drift. Nothing in this package may run on device with a different
+ * transaction guard from the one the tests exercise.
  *
  * `PRAGMA foreign_keys = ON` — SQLite disables foreign keys by default, so
  * without it the schema's relationships are decorative and orphaned rows
@@ -29,35 +29,28 @@ import type { Database, SqlValue } from './port'
  * event log is what makes chain-of-custody real rather than aspirational, so
  * this is not optional.
  */
-export async function openDatabase(name = 'fieldkit.db'): Promise<Database> {
+export interface OpenDatabaseOptions {
+  /**
+   * How long a queued transaction waits for its turn before it is reported as
+   * a nested transaction. See `./transactions`.
+   */
+  readonly transactionStartTimeoutMs?: number
+}
+
+export async function openDatabase(
+  name = 'fieldkit.db',
+  options: OpenDatabaseOptions = {},
+): Promise<Database> {
   const db = await openDatabaseAsync(name)
   await db.runAsync('PRAGMA foreign_keys = ON')
   await db.runAsync('PRAGMA recursive_triggers = ON')
 
-  // The tail of the transaction queue. See better-sqlite3.ts for why
-  // overlapping `transaction()` calls must be serialised rather than
-  // interleaved: this one connection has no nested transactions, and two
-  // rapid taps on the capture button are enough to produce the overlap.
-  let queue: Promise<void> = Promise.resolve()
-
-  // Whether the caller is executing inside this database's transaction body,
-  // tracked with an async context so a transaction body that calls
-  // `transaction()` again is rejected immediately rather than deadlocking the
-  // queue — a hang here has no error, no stack, and nothing in the log, which
-  // on a field tablet is indistinguishable from a dead device.
-  const insideTransaction = new AsyncLocalStorage<true>()
-
-  async function runTransaction<T>(fn: () => Promise<T>): Promise<T> {
-    await db.runAsync('BEGIN')
-    try {
-      const result = await insideTransaction.run(true, fn)
-      await db.runAsync('COMMIT')
-      return result
-    } catch (error) {
-      await db.runAsync('ROLLBACK')
-      throw error
-    }
+  const runnerOptions: TransactionRunnerOptions = {
+    startTimeoutMs: options.transactionStartTimeoutMs,
   }
+  const transaction = createTransactionRunner(async (sql) => {
+    await db.runAsync(sql)
+  }, runnerOptions)
 
   return {
     async execute(sql, params = []) {
@@ -69,26 +62,7 @@ export async function openDatabase(name = 'fieldkit.db'): Promise<Database> {
     async first<T>(sql: string, params: SqlValue[] = []) {
       return ((await db.getFirstAsync(sql, params)) as T | undefined | null) ?? null
     },
-    async transaction<T>(fn: () => Promise<T>) {
-      if (insideTransaction.getStore()) {
-        // Thrown before the queue is touched, so the guard costs the queue
-        // nothing: the transaction already in flight finishes normally (this
-        // rejection propagates out of its body, so it rolls back like any
-        // other failure), and the next caller runs exactly as it would have.
-        throw new Error(
-          'Nested transaction: this code is already running inside a transaction on this ' +
-            'database, and transactions here are serialised, so waiting for another one would ' +
-            'deadlock. Pass every statement of the unit of work to a single transaction() call ' +
-            'instead of opening a second one.',
-        )
-      }
-      const result = queue.then(() => runTransaction(fn))
-      queue = result.then(
-        () => undefined,
-        () => undefined,
-      )
-      return result
-    },
+    transaction,
     async close() {
       await db.closeAsync()
     },

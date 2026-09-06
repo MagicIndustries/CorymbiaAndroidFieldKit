@@ -32,6 +32,12 @@ export interface Database {
    * the problem, rather than relying on nobody ever writing it. A hang has no
    * error, no stack and nothing in the log; on a field tablet it looks exactly
    * like a broken device, and the app stops mid-capture.
+   *
+   * Both adapters detect it the same way, through the shared runner in
+   * `./transactions`: React Native has no async-context primitive, so the
+   * detection is a bound on how long a transaction may wait for its turn, and
+   * exceeding it raises a `NestedTransactionError`. Read that file for what
+   * that does and does not catch before relying on it.
    */
   transaction<T>(fn: () => Promise<T>): Promise<T>
   close(): Promise<void>

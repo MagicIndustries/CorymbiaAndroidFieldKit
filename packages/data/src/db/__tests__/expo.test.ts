@@ -117,16 +117,23 @@ describe('the expo-sqlite adapter', () => {
     expect(mockRunAsync).toHaveBeenCalledWith('COMMIT')
   })
 
-  it('rejects a nested transaction instead of deadlocking, and keeps serving the next caller', async () => {
-    await expect(
-      db.transaction(async () => {
-        await db.transaction(async () => undefined)
-      }),
-    ).rejects.toThrow(/Nested transaction/)
+  it('fails a nested transaction with a named error instead of deadlocking, and keeps serving the next caller', async () => {
+    // The guard is a bound on how long a transaction may wait for its turn (see
+    // ../transactions), so this database gets a short one rather than the
+    // five-second production default. That the default IS five seconds is
+    // pinned in better-sqlite3.test.ts, against the same shared runner.
+    const nesting = await openDatabase('nesting.db', { transactionStartTimeoutMs: 50 })
+
+    const attempt = nesting.transaction(async () => {
+      await nesting.transaction(async () => undefined)
+    })
+    await expect(attempt).rejects.toThrow(/Nested transaction/)
+    await expect(attempt).rejects.toMatchObject({ name: 'NestedTransactionError' })
+    expect(mockRunAsync).toHaveBeenCalledWith('ROLLBACK')
 
     // The queue is unharmed: a normal transaction after the rejected one still
     // runs and commits.
-    await expect(db.transaction(async () => undefined)).resolves.toBeUndefined()
+    await expect(nesting.transaction(async () => undefined)).resolves.toBeUndefined()
     expect(mockRunAsync).toHaveBeenCalledWith('COMMIT')
   })
 

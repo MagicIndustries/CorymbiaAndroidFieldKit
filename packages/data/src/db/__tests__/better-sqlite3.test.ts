@@ -1,5 +1,16 @@
 import { openTestDatabase } from '../better-sqlite3'
 import type { Database } from '../port'
+import { DEFAULT_TRANSACTION_START_TIMEOUT_MS } from '../transactions'
+
+/**
+ * The nested-transaction guard is a bound on how long a transaction may wait
+ * for its turn (see ../transactions for why React Native leaves no alternative),
+ * so a test that provokes it necessarily waits that long. The production
+ * default is five seconds; these tests open their own database with a small
+ * one, and a separate test below pins the default so shrinking it here cannot
+ * quietly shrink it on device.
+ */
+const SHORT_START_TIMEOUT_MS = 50
 
 describe('the test database adapter', () => {
   let db: Database
@@ -85,32 +96,76 @@ describe('the test database adapter', () => {
     expect(await db.all('SELECT id FROM t')).toEqual([{ id: 'survivor' }])
   })
 
-  it('rejects a nested transaction instead of deadlocking, and keeps serving the next caller', async () => {
-    // Serialising turns nesting from an error into a hang: the inner call waits
-    // for a queue that cannot advance until the outer body it is running inside
-    // returns. A hang has no error, no stack and nothing in the log — on a field
-    // tablet it is indistinguishable from a dead device. So it must be named.
-    //
-    // The "later callers still work" half is the one that matters. A guard that
-    // avoids a deadlock by wedging the queue behind it has not helped anyone.
-    await expect(
-      db.transaction(async () => {
-        await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['outer', 1])
-        await db.transaction(async () => {
-          await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['inner', 2])
-        })
-      }),
-    ).rejects.toThrow(/Nested transaction/)
+  describe('when a transaction body opens a second transaction', () => {
+    let nesting: Database
 
-    // The outer transaction rolled back, as any failing body does.
-    expect(await db.all('SELECT id FROM t')).toEqual([])
-
-    // And the queue is unharmed: a normal transaction after the rejected one
-    // still runs and commits.
-    await db.transaction(async () => {
-      await db.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['after', 3])
+    beforeEach(async () => {
+      nesting = await openTestDatabase({ transactionStartTimeoutMs: SHORT_START_TIMEOUT_MS })
+      await nesting.execute('CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER NOT NULL)')
     })
-    expect(await db.all('SELECT id FROM t')).toEqual([{ id: 'after' }])
+
+    afterEach(async () => {
+      await nesting.close()
+    })
+
+    it('fails with a named error instead of deadlocking, and keeps serving the next caller', async () => {
+      // Serialising turns nesting from an error into a hang: the inner call
+      // waits for a queue that cannot advance until the outer body it is
+      // running inside returns. A hang has no error, no stack and nothing in
+      // the log — on a field tablet it is indistinguishable from a dead device.
+      // So it must be named.
+      //
+      // The "later callers still work" half is the one that matters. A guard
+      // that avoids a deadlock by wedging the queue behind it has not helped
+      // anyone.
+      const attempt = nesting.transaction(async () => {
+        await nesting.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['outer', 1])
+        await nesting.transaction(async () => {
+          await nesting.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['inner', 2])
+        })
+      })
+
+      await expect(attempt).rejects.toThrow(/Nested transaction/)
+      await expect(attempt).rejects.toMatchObject({ name: 'NestedTransactionError' })
+
+      // The outer transaction rolled back, as any failing body does — and the
+      // inner body never ran, so the row it would have written is absent too.
+      expect(await nesting.all('SELECT id FROM t')).toEqual([])
+
+      // And the queue is unharmed: a normal transaction after the rejected one
+      // still runs and commits.
+      await nesting.transaction(async () => {
+        await nesting.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['after', 3])
+      })
+      expect(await nesting.all('SELECT id FROM t')).toEqual([{ id: 'after' }])
+    })
+
+    it('never runs the abandoned body, even long after the outer transaction unwinds', async () => {
+      // The inner call gives up while still queued, but its queue link is real
+      // and settles once the outer transaction rolls back. If the runner then
+      // ran the body anyway, the inner INSERT would land in a transaction of
+      // its own, after its caller had already been told it failed.
+      let innerBodyRan = false
+      await expect(
+        nesting.transaction(async () => {
+          await nesting.transaction(async () => {
+            innerBodyRan = true
+            await nesting.execute('INSERT INTO t (id, n) VALUES (?, ?)', ['inner', 2])
+          })
+        }),
+      ).rejects.toThrow(/Nested transaction/)
+
+      await nesting.transaction(async () => undefined)
+      expect(innerBodyRan).toBe(false)
+      expect(await nesting.all('SELECT id FROM t')).toEqual([])
+    })
+  })
+
+  it('waits five seconds before calling a stalled transaction nested', () => {
+    // Pinned deliberately. The tests above shorten this to keep the suite fast,
+    // and a default shortened to match them would start rejecting honest
+    // transactions on a slow device.
+    expect(DEFAULT_TRANSACTION_START_TIMEOUT_MS).toBe(5_000)
   })
 
   it('still queues genuinely concurrent callers rather than treating them as nested', async () => {
