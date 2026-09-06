@@ -5,6 +5,17 @@ export type { Migration } from './db/migrate'
 export { registerDevice, getDevice, listDevices } from './repositories/devices'
 export type { Device, DeviceFacts, DeviceType } from './repositories/devices'
 
+export {
+  createProject,
+  getProject,
+  listProjects,
+  DEFAULT_CLIENT_ID,
+  DEFAULT_LOCATION_ID,
+} from './repositories/projects'
+export type { Project } from './repositories/projects'
+export { createActivity, listActivities, mostRecentActivity } from './repositories/activities'
+export type { Activity, ActivityKind } from './repositories/activities'
+
 export { newId } from './ids'
 export { nowIso } from './time'
 export { validateAttributes, serialiseAttributes } from './kinds'
