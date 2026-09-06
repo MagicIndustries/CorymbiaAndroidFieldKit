@@ -43,6 +43,21 @@ import ts from 'typescript'
  * `ExternalModuleReference`) — only a specifier assembled at runtime from a
  * non-literal expression can still hide from this walker. The barrel is the
  * boundary that matters, because the barrel is what the app imports.
+ *
+ * The walker also flags Node-only *globals* reached with no import at all:
+ * `Buffer`, `__dirname`, `__filename`, and a bare `require(...)` call. This
+ * closes a gap the specifier-only check above cannot: none of those need an
+ * import statement to be reachable, so a specifier walk alone is blind to
+ * them. `process` is treated differently from the other three rather than
+ * banned outright — see `nodeGlobalReferences`'s doc comment for why. What
+ * the global check does not catch: it does no real scope analysis, so a
+ * local declaration (variable, parameter, destructured binding, or import)
+ * spelled the same as a flagged global suppresses that name for the *whole
+ * file*, not just the scope the declaration is actually in — see
+ * `collectDeclaredNames`. It also does not follow destructuring
+ * (`const { exit } = process` is invisible to it, unlike `process.exit`), and
+ * a bare reference to `require` that is never called (passed around as a
+ * value, say) is not flagged — only an actual `require(...)` call is.
  */
 
 const PACKAGE_ROOT = path.resolve(__dirname, '..', '..')
@@ -59,6 +74,12 @@ const NODE_BUILTINS = new Set<string>([
 interface Reference {
   readonly importer: string
   readonly specifier: string
+}
+
+/** A Node-only global `importer` reaches with no import needed to see it. */
+interface GlobalHit {
+  readonly importer: string
+  readonly description: string
 }
 
 /**
@@ -107,6 +128,167 @@ function emittedSpecifiers(file: string): string[] {
   return specifiers
 }
 
+/** Node-only globals that resolve to a bare identifier, with no import needed to reach them. */
+const NODE_ONLY_GLOBALS = new Set<string>(['Buffer', '__dirname', '__filename'])
+
+/**
+ * Recursively collects every name a file declares as a local binding —
+ * `const`/`let`/`var` (including destructured), function/class declarations
+ * and expressions, parameters, and import bindings — anywhere in the file.
+ *
+ * Used only to decide whether a bare identifier spelled the same as a
+ * Node-only global might actually be a local binding rather than the global
+ * itself: a local variable, parameter, destructured binding, or imported
+ * name spelled `Buffer` is not a Node global, and flagging it would make the
+ * guard cry wolf. This check is file-wide, not scope-aware — it has no
+ * binder or type checker to consult, only the syntax tree — so a name
+ * declared anywhere in the file suppresses every bare reference to that name
+ * in the file, even outside where the declaration is actually in scope. That
+ * trades a rare false negative (a real global access elsewhere in the same
+ * file, coincidentally sharing a name with an unrelated local declared in a
+ * different scope) for never crying wolf at a shadowed local. A guard that is
+ * simple and honest about that limit was chosen over one that attempts real
+ * scope resolution and gets it wrong.
+ */
+function collectDeclaredNames(source: ts.SourceFile): Set<string> {
+  const names = new Set<string>()
+
+  const addBindingName = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) {
+      names.add(name.text)
+      return
+    }
+    for (const element of name.elements) {
+      if (ts.isBindingElement(element)) addBindingName(element.name)
+    }
+  }
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+      addBindingName(node.name)
+    } else if (
+      (ts.isFunctionDeclaration(node) ||
+        ts.isClassDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isClassExpression(node)) &&
+      node.name !== undefined
+    ) {
+      names.add(node.name.text)
+    } else if (ts.isImportClause(node) && node.name !== undefined) {
+      names.add(node.name.text)
+    } else if (ts.isNamespaceImport(node) || ts.isImportSpecifier(node)) {
+      names.add(node.name.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+
+  visit(source)
+  return names
+}
+
+/**
+ * True when `node` is an identifier position that cannot be a reference to
+ * an outer binding at all — the name a declaration is introducing, a
+ * property key, a statement label, or a type position (erased before Metro
+ * ever sees it, same reasoning as the `import type` handling above) — so it
+ * cannot be a Node global reference no matter what it is spelled.
+ */
+function isNonValueIdentifier(node: ts.Identifier): boolean {
+  const parent = node.parent
+  if (ts.isVariableDeclaration(parent) && parent.name === node) return true
+  if (ts.isParameter(parent) && parent.name === node) return true
+  if (ts.isBindingElement(parent) && (parent.name === node || parent.propertyName === node)) {
+    return true
+  }
+  if (
+    (ts.isFunctionDeclaration(parent) ||
+      ts.isClassDeclaration(parent) ||
+      ts.isFunctionExpression(parent) ||
+      ts.isClassExpression(parent)) &&
+    parent.name === node
+  ) {
+    return true
+  }
+  if (ts.isImportClause(parent) && parent.name === node) return true
+  if (ts.isNamespaceImport(parent) && parent.name === node) return true
+  if (ts.isImportSpecifier(parent) && (parent.name === node || parent.propertyName === node)) {
+    return true
+  }
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) return true
+  if (ts.isPropertyAssignment(parent) && parent.name === node) return true
+  if (
+    (ts.isMethodDeclaration(parent) ||
+      ts.isMethodSignature(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent) ||
+      ts.isPropertyDeclaration(parent) ||
+      ts.isPropertySignature(parent)) &&
+    parent.name === node
+  ) {
+    return true
+  }
+  if (ts.isEnumMember(parent) && parent.name === node) return true
+  if (ts.isLabeledStatement(parent) && parent.label === node) return true
+  if ((ts.isBreakStatement(parent) || ts.isContinueStatement(parent)) && parent.label === node) {
+    return true
+  }
+  if (ts.isTypeReferenceNode(parent) && parent.typeName === node) return true
+  if (ts.isQualifiedName(parent) && parent.right === node) return true
+  if (ts.isTypeQueryNode(parent) && parent.exprName === node) return true
+  return false
+}
+
+/**
+ * The Node-only globals `file` reaches with no import statement at all: a
+ * bare `Buffer`, `__dirname` or `__filename`; a bare `require(...)` call
+ * (any call to an identifier named `require`); and any `process.<member>`
+ * access other than `process.env.<member>`.
+ *
+ * `process` is deliberately not just added to `NODE_ONLY_GLOBALS` and banned
+ * outright: React Native supplies a real `process` shim, so the bare
+ * identifier is not Node-only, and `process.env.NODE_ENV` specifically is
+ * substituted by the bundler at build time, so it — and the rest of
+ * `process.env` — is legitimate on device too. Everything else hanging off
+ * `process` — `.cwd()`, `.exit()`, `.argv`, and so on — is not part of that
+ * shim and is `undefined` at runtime, so it is flagged like any other
+ * Node-only global.
+ */
+function nodeGlobalReferences(file: string): string[] {
+  const source = ts.createSourceFile(
+    file,
+    fs.readFileSync(file, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  )
+  const declared = collectDeclaredNames(source)
+  const hits: string[] = []
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isIdentifier(node) &&
+      NODE_ONLY_GLOBALS.has(node.text) &&
+      !isNonValueIdentifier(node) &&
+      !declared.has(node.text)
+    ) {
+      hits.push(node.text)
+    } else if (ts.isCallExpression(node)) {
+      const callee = node.expression
+      if (ts.isIdentifier(callee) && callee.text === 'require' && !declared.has('require')) {
+        hits.push('require(...)')
+      }
+    } else if (ts.isPropertyAccessExpression(node)) {
+      const target = node.expression
+      if (ts.isIdentifier(target) && target.text === 'process' && !declared.has('process')) {
+        if (node.name.text !== 'env') hits.push(`process.${node.name.text}`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+
+  visit(source)
+  return hits
+}
+
 /** Resolves a relative specifier the way a bundler would, or null if it is not a file. */
 function resolveRelative(importer: string, specifier: string): string | null {
   const base = path.resolve(path.dirname(importer), specifier)
@@ -144,12 +326,15 @@ interface Walk {
   readonly external: Reference[]
   /** Specifiers that looked first-party but could not be resolved to a file. */
   readonly unresolved: Reference[]
+  /** Node-only globals reached with no import at all — see `nodeGlobalReferences`. */
+  readonly globals: GlobalHit[]
 }
 
 function walkFrom(entry: string): Walk {
   const visited = new Set<string>()
   const external: Reference[] = []
   const unresolved: Reference[] = []
+  const globals: GlobalHit[] = []
   const pending = [entry]
 
   while (pending.length > 0) {
@@ -157,8 +342,9 @@ function walkFrom(entry: string): Walk {
     if (file === undefined || visited.has(file)) continue
     visited.add(file)
 
+    const importer = path.relative(PACKAGE_ROOT, file)
+
     for (const specifier of emittedSpecifiers(file)) {
-      const importer = path.relative(PACKAGE_ROOT, file)
       if (specifier.startsWith('.')) {
         const resolved = resolveRelative(file, specifier)
         if (resolved === null) unresolved.push({ importer, specifier })
@@ -171,17 +357,25 @@ function walkFrom(entry: string): Walk {
         external.push({ importer, specifier })
       }
     }
+
+    for (const description of nodeGlobalReferences(file)) {
+      globals.push({ importer, description })
+    }
   }
 
   return {
     files: [...visited].map((file) => path.relative(PACKAGE_ROOT, file)).sort(),
     external,
     unresolved,
+    globals,
   }
 }
 
 const describeReference = ({ importer, specifier }: Reference): string =>
   `${importer} imports '${specifier}'`
+
+const describeGlobalHit = ({ importer, description }: GlobalHit): string =>
+  `${importer} references ${description}`
 
 describe("the public entry point's import graph", () => {
   const walk = walkFrom(ENTRY_POINT)
@@ -217,5 +411,9 @@ describe("the public entry point's import graph", () => {
   it('contains no Node built-in, because Metro cannot resolve one on device', () => {
     const offenders = walk.external.filter(({ specifier }) => NODE_BUILTINS.has(specifier))
     expect(offenders.map(describeReference)).toEqual([])
+  })
+
+  it('contains no reachable Node-only global — Buffer, __dirname, __filename, require(), or any process.<member> other than process.env', () => {
+    expect(walk.globals.map(describeGlobalHit)).toEqual([])
   })
 })
