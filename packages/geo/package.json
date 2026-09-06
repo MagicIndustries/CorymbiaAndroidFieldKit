@@ -9,7 +9,11 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit"
   },
+  "peerDependencies": {
+    "expo-location": "~57.0.16"
+  },
   "devDependencies": {
+    "expo-location": "~57.0.16",
     "jest-expo": "~57.0.0",
     "react": "19.2.3",
     "react-native": "0.86.3"
