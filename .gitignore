@@ -17,10 +17,13 @@
 
 # Logs
 *.log
-.superpowers/
 
+# Toolchain
 node_modules/
 dist/
 .turbo/
 .expo/
 *.tsbuildinfo
+
+# Agent scratch (brainstorming artefacts, subagent progress ledger and reports)
+.superpowers/
