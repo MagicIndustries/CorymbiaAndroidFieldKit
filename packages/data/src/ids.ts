@@ -15,11 +15,16 @@
  * The random suffix stays so ids minted on two different devices — which
  * necessarily don't share the counter's process-local state — cannot collide.
  *
+ * Structure: `prefix_TTTTTTTTTCCCCRRRRRRR` where T is 9 chars (timestamp in base 36),
+ * C is 4 chars (counter in base 36), and R is 8 chars (random in base 36).
+ *
  * Deliberately avoids `crypto.randomUUID` and any native module: this file
  * sits behind the package's public barrel (`src/index.ts`), which Metro
  * bundles for Android, so anything it imports must be plain JavaScript.
  */
 const TIME_WIDTH = 9
+const COUNTER_WIDTH = 4
+const RANDOM_WIDTH = 8
 
 let lastTime = 0
 let counter = 0
@@ -46,7 +51,7 @@ export function newId(prefix: string): string {
   const time = Date.now()
   const sequence = nextSequence(time)
   const timePart = time.toString(36).padStart(TIME_WIDTH, '0')
-  const counterPart = sequence.toString(36).padStart(4, '0')
-  const random = randomSuffix(6)
+  const counterPart = sequence.toString(36).padStart(COUNTER_WIDTH, '0')
+  const random = randomSuffix(RANDOM_WIDTH)
   return `${prefix}_${timePart}${counterPart}${random}`
 }

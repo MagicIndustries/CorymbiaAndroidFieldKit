@@ -14,6 +14,14 @@ describe('record kind attributes', () => {
     expect(() => validateAttributes('pin', null)).toThrow()
   })
 
+  it('rejects exotic objects like Date, RegExp, and class instances', () => {
+    expect(() => validateAttributes('pin', new Date())).toThrow(/plain object/)
+    expect(() => validateAttributes('pin', /regex/)).toThrow(/plain object/)
+
+    class CustomClass {}
+    expect(() => validateAttributes('pin', new CustomClass())).toThrow(/plain object/)
+  })
+
   it('serialises to JSON ready for the attributes column', () => {
     expect(serialiseAttributes('pin', {})).toBe('{}')
   })

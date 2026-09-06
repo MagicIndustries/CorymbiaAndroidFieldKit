@@ -19,6 +19,10 @@ export function validateAttributes(kind: RecordKind, value: unknown): Record<str
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(`Attributes for a ${kind} must be an object, received ${typeof value}`)
   }
+  // Reject non-plain objects (Date, RegExp, class instances, etc.)
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new Error(`Attributes for a ${kind} must be a plain object`)
+  }
   const allowed = ALLOWED_KEYS[kind]
   const unexpected = Object.keys(value).filter((key) => !allowed.includes(key))
   if (unexpected.length > 0) {
