@@ -13,8 +13,9 @@ const NOW = '2026-09-06T09:14:00+10:00'
  * that the rule it is about is the rule that fired.
  *
  * These assertions are only meaningful because `workerIdleMemoryLimit` in
- * jest.config.js keeps each test file in its own process; see
- * constraint-enforcement-canary.test.ts, which must be green in the same run.
+ * jest.config.js keeps each test file in its own process. jest.setup.js proves
+ * that per file, in a `beforeAll` that runs before the tests below, so this
+ * file cannot pass while silently enforcing nothing.
  */
 const CHECK = (name: string): RegExp => new RegExp(`CHECK constraint failed: ${name}`)
 const UNIQUE = /UNIQUE constraint failed/
