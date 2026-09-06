@@ -38,6 +38,15 @@ export type {
 export { appendEvent, listEvents } from './repositories/events'
 export type { EventAction, EventEntry } from './repositories/events'
 
+export { readSettings, writeSetting, DEFAULT_SETTINGS } from './repositories/settings'
+export type {
+  Settings,
+  Handedness,
+  CapturePrimary,
+  ThemePreference,
+  Density,
+} from './repositories/settings'
+
 export { newId } from './ids'
 export { nowIso } from './time'
 export { validateAttributes, serialiseAttributes } from './kinds'
