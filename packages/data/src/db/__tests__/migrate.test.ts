@@ -1,0 +1,73 @@
+import { openTestDatabase } from '../better-sqlite3'
+import { migrate } from '../migrate'
+import type { Database } from '../port'
+
+async function tableNames(db: Database): Promise<string[]> {
+  const rows = await db.all<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+  )
+  return rows.map((r) => r.name)
+}
+
+describe('migrate', () => {
+  let db: Database
+  beforeEach(async () => {
+    db = await openTestDatabase()
+  })
+  afterEach(async () => {
+    await db.close()
+  })
+
+  it('creates the project and activity tables', async () => {
+    await migrate(db)
+    const names = await tableNames(db)
+    expect(names).toEqual(
+      expect.arrayContaining(['activity', 'client', 'location', 'project', 'project_location']),
+    )
+  })
+
+  it('reports which migrations it applied', async () => {
+    expect(await migrate(db)).toContain('001-projects')
+  })
+
+  it('is idempotent — running twice applies nothing the second time', async () => {
+    await migrate(db)
+    expect(await migrate(db)).toEqual([])
+  })
+
+  it('seeds the default client and location that §7.3 requires', async () => {
+    await migrate(db)
+    const client = await db.first<{ name: string }>('SELECT name FROM client WHERE id = ?', [
+      'client-internal',
+    ])
+    const location = await db.first<{ name: string }>('SELECT name FROM location WHERE id = ?', [
+      'location-office',
+    ])
+    expect(client?.name).toBe('Corymbia (internal)')
+    expect(location?.name).toBe('Office / Lab')
+  })
+
+  it('refuses a project with no name', async () => {
+    await migrate(db)
+    await expect(
+      db.execute(
+        'INSERT INTO project (id, name, client_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ['p1', '', 'client-internal', '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z'],
+      ),
+    ).rejects.toThrow()
+  })
+
+  it('refuses an activity whose kind is not one of the five in the spec', async () => {
+    await migrate(db)
+    await db.execute(
+      'INSERT INTO project (id, name, client_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      ['p1', 'Yarra Flats', 'client-internal', '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z'],
+    )
+    await expect(
+      db.execute(
+        'INSERT INTO activity (id, project_id, kind, name, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ['a1', 'p1', 'picnic', 'Nope', '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z'],
+      ),
+    ).rejects.toThrow()
+  })
+})
