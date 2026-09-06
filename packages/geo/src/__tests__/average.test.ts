@@ -69,6 +69,17 @@ describe('averageReadings', () => {
     expect(averageReadings([reading({ altitudeM: null })]).altitudeM).toBeNull()
   })
 
+  it('averages only the readings that have an altitude, so missing ones do not drag it toward zero', () => {
+    // If the null-altitude reading were coerced to 0 and included, the mean would be
+    // (60 + 0 + 64) / 3 = 41.33..., not 62. The correct answer ignores it entirely.
+    const result = averageReadings([
+      reading({ altitudeM: 60 }),
+      reading({ altitudeM: null }),
+      reading({ altitudeM: 64 }),
+    ])
+    expect(result.altitudeM).toBe(62)
+  })
+
   it('throws on an empty list rather than inventing a position', () => {
     expect(() => averageReadings([])).toThrow('Cannot average an empty set of readings.')
   })

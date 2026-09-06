@@ -31,4 +31,39 @@ describe('holdVerdict', () => {
     expect(holdVerdict([at(9, 0)])).toBe('improving')
     expect(holdVerdict([])).toBe('improving')
   })
+
+  it('pins the window to exactly the last 4 readings, not 3 or 5', () => {
+    // Accuracies by index: [50, 10.3, 20, 10.2, 15, 10]. The window's first
+    // reading is a local peak (20) so that shrinking or growing the window
+    // picks a different, smaller "first" and flips the verdict:
+    //   WINDOW=4 (correct): first=recent[0]=20 (index 2), last=10 (index 5).
+    //     20 - 10 = 10 >= 0.5 -> 'improving'.
+    //   WINDOW=3 (too small): first=10.2 (index 3), last=10 (index 5).
+    //     10.2 - 10 = 0.2 < 0.5 -> 'plateaued'.
+    //   WINDOW=5 (too large): first=10.3 (index 1), last=10 (index 5).
+    //     10.3 - 10 = 0.3 < 0.5 -> 'plateaued'.
+    // Both a smaller and a larger window than 4 disagree with the correct verdict.
+    const readings = [at(50, 0), at(10.3, 1000), at(20, 2000), at(10.2, 3000), at(15, 4000), at(10, 5000)]
+    expect(holdVerdict(readings)).toBe('improving')
+  })
+
+  it('compares the first and last reading of the window, not some other pair', () => {
+    // Window (last 4 of 6): [20, 10, 10, 19.8].
+    //   first & last (correct): 20 - 19.8 = 0.2 < 0.5 -> 'plateaued'.
+    //   first & second (wrong pair): 20 - 10 = 10 >= 0.5 -> 'improving'.
+    // The sequence dips sharply and then climbs back almost to its starting
+    // point, so only the true first/last comparison sees the plateau.
+    const readings = [at(50, 0), at(45, 1000), at(20, 2000), at(10, 3000), at(10, 4000), at(19.8, 5000)]
+    expect(holdVerdict(readings)).toBe('plateaued')
+  })
+
+  it('treats improvement just above the meaningful threshold as improving', () => {
+    // Diff = 10 - 9.49 = 0.51, just above MEANINGFUL_IMPROVEMENT_M = 0.5.
+    expect(holdVerdict([at(10, 0), at(9.49, 1000)])).toBe('improving')
+  })
+
+  it('treats improvement just below the meaningful threshold as plateaued', () => {
+    // Diff = 10 - 9.51 = 0.49, just below MEANINGFUL_IMPROVEMENT_M = 0.5.
+    expect(holdVerdict([at(10, 0), at(9.51, 1000)])).toBe('plateaued')
+  })
 })

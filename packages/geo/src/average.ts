@@ -31,11 +31,13 @@ export function averageReadings(readings: Reading[]): {
   const latitude = readings.reduce((sum, r) => sum + r.latitude, 0) / sampleCount
   const longitude = readings.reduce((sum, r) => sum + r.longitude, 0) / sampleCount
 
-  const withAltitude = readings.filter((r) => r.altitudeM !== null)
+  const withAltitude = readings.filter(
+    (r): r is Reading & { altitudeM: number } => r.altitudeM !== null,
+  )
   const altitudeM =
     withAltitude.length === 0
       ? null
-      : withAltitude.reduce((sum, r) => sum + (r.altitudeM as number), 0) / withAltitude.length
+      : withAltitude.reduce((sum, r) => sum + r.altitudeM, 0) / withAltitude.length
 
   const centre = { latitude, longitude }
   const spreadM = readings.reduce((max, r) => Math.max(max, distanceMetres(centre, r)), 0)
