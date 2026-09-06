@@ -55,6 +55,57 @@ describe('the expo-location adapter', () => {
     })
   })
 
+  // The position itself, which nothing here read back until now. This adapter
+  // is the one file in the package no test can exercise against real hardware,
+  // and the whole suite survived both swapping latitude for longitude in the
+  // mapping and setting `timestampMs` to 0 — the latter being the field the
+  // ambient cache's entire behaviour (staleness, out-of-order rejection) is
+  // built on, and which is only ever tested against the fake source.
+  //
+  // The fixture's values are deliberately unlike each other: -37.82141 and
+  // 145.03318 differ in sign and in magnitude, so a transposition cannot pass
+  // either assertion, and the timestamp is a specific epoch millisecond rather
+  // than anything a default could coincide with.
+  describe('the position and the moment it was taken', () => {
+    it('carries latitude through, and not the longitude', async () => {
+      mockGetLastKnownPositionAsync.mockResolvedValue(basePosition)
+      const reading = await createExpoLocationSource().getLastKnown()
+      expect(reading?.latitude).toBe(-37.82141)
+    })
+
+    it('carries longitude through, and not the latitude', async () => {
+      mockGetLastKnownPositionAsync.mockResolvedValue(basePosition)
+      const reading = await createExpoLocationSource().getLastKnown()
+      expect(reading?.longitude).toBe(145.03318)
+    })
+
+    it("carries the platform's timestamp through, which is what the ambient cache orders by", async () => {
+      mockGetLastKnownPositionAsync.mockResolvedValue(basePosition)
+      const reading = await createExpoLocationSource().getLastKnown()
+      expect(reading?.timestampMs).toBe(1_700_000_000_000)
+    })
+
+    it('carries the position and its timestamp through the watch callback too', async () => {
+      // getLastKnown and watch share `toReading`, but they are separate call
+      // sites and the watch path is the one a capture actually uses.
+      let deliver: ((position: unknown) => void) | undefined
+      mockWatchPositionAsync.mockImplementation(
+        async (_options: unknown, callback: (p: unknown) => void) => {
+          deliver = callback
+          return { remove: mockRemove }
+        },
+      )
+      const seen: { latitude: number; longitude: number; timestampMs: number }[] = []
+      await createExpoLocationSource().watch((r) =>
+        seen.push({ latitude: r.latitude, longitude: r.longitude, timestampMs: r.timestampMs }),
+      )
+      deliver?.(basePosition)
+      expect(seen).toEqual([
+        { latitude: -37.82141, longitude: 145.03318, timestampMs: 1_700_000_000_000 },
+      ])
+    })
+  })
+
   describe('accuracyM', () => {
     it('carries the accuracy Android supplied', async () => {
       mockGetLastKnownPositionAsync.mockResolvedValue(basePosition)
