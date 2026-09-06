@@ -12,7 +12,8 @@
     "android": {
       "package": "eco.corymbia.fieldkit",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png"
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundImage": "./assets/adaptive-icon-background.png"
       },
       "predictiveBackGestureEnabled": false
     },
