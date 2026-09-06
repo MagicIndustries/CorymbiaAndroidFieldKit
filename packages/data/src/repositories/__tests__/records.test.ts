@@ -13,6 +13,7 @@ import {
   listUnfiledRecords,
   moveRecord,
   refileRecord,
+  refineRecordFix,
   sampleEvidence,
   softDeleteRecord,
 } from '../records'
@@ -1230,6 +1231,121 @@ describe('filing, reordering and refiling', () => {
       { id: b1, sequence: 1 },
       { id: b2, sequence: 2 },
     ])
+  })
+
+  // Spec §9.1: one tap saves the fix that exists at that instant, the screen
+  // counts down while she stands still, and the saved row is then refined in
+  // place. These prove the second half of that against real SQL — including
+  // migration 003's CHECK constraints, which is where a refinement that wrote
+  // the wrong combination of columns would actually be caught.
+  describe('refineRecordFix', () => {
+    it('sharpens a one-tap fix into the averaged one the countdown produced', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      expect(record.fix).toEqual(INSTANT)
+
+      const refined = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: DELIBERATE,
+        deviceId,
+      })
+
+      // Every fix column moves together, spread included: INSTANT is a
+      // one-reading capture whose spread must be NULL, DELIBERATE is a
+      // seven-reading one whose spread must not be —
+      // record_spread_matches_sample_count refuses anything in between.
+      expect(refined.fix).toEqual(DELIBERATE)
+      // On disk, not merely in the object handed back.
+      expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
+    })
+
+    it('leaves the number written on the tube, and the capture time, exactly where they were', async () => {
+      // Two records so a reassignment would actually be visible: refining the
+      // second must not hand it the first one's label, or renumber either.
+      const first = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      const second = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const refined = await refineRecordFix(db, {
+        recordId: second.id,
+        fix: DELIBERATE,
+        deviceId,
+      })
+
+      // capture_number is the label written in marker on a physical sample
+      // tube. A refinement that moved it would leave the tube naming a
+      // different record — and record_capture_number_is_immutable would abort
+      // the whole transaction, losing the refinement too.
+      expect(refined.captureNumber).toBe(second.captureNumber)
+      expect((await getRecord(db, first.id))?.captureNumber).toBe(first.captureNumber)
+      // The capture happened at the tap, not at the end of the countdown.
+      expect(refined.capturedAt).toBe(second.capturedAt)
+      expect(refined.sequence).toBe(second.sequence)
+    })
+
+    it('records both accuracies, so the history shows a fix that was improved', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      await refineRecordFix(db, { recordId: record.id, fix: DELIBERATE, deviceId })
+
+      const events = await listEvents(db, record.id)
+      expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+      const refinement = events[1]
+      // Without the previous figure written down here, the log would show a
+      // record that was always ±4.0 m, when what happened is that a ±6.0 m fix
+      // was stood over and sharpened. The event's own columns can only hold
+      // one position, and they hold the new one.
+      expect(refinement?.detail).toBe('fix refined from ±6.0 m to ±4.0 m')
+      expect(refinement?.accuracyM).toBe(4)
+      expect(refinement?.fixQuality).toBe('deliberate')
+      expect(refinement?.activityId).toBe(activityId)
+    })
+
+    it('says so when the tap happened before the receiver had a position at all', async () => {
+      // Doctrine rule 4: nothing blocks capture, so a tap with no fix yet still
+      // writes a row — and the countdown that follows is what gives it one.
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: { quality: 'none' },
+        deviceId,
+      })
+      await refineRecordFix(db, { recordId: record.id, fix: DELIBERATE, deviceId })
+
+      const refinement = (await listEvents(db, record.id)).find((e) => e.action === 'edited')
+      expect(refinement?.detail).toBe('fix refined from no position to ±4.0 m')
+      expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
+    })
+
+    it('refuses a record that does not exist', async () => {
+      await expect(
+        refineRecordFix(db, { recordId: 'rec_missing', fix: DELIBERATE, deviceId }),
+      ).rejects.toThrow(/does not exist, so there is no fix to refine/)
+    })
+
+    it('refuses a record that has been deleted', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      await softDeleteRecord(db, record.id, deviceId)
+
+      await expect(
+        refineRecordFix(db, { recordId: record.id, fix: DELIBERATE, deviceId }),
+      ).rejects.toThrow(/has been deleted, so its fix cannot be refined/)
+      // And the tombstone's own fix is untouched, which is the point: a
+      // deletion is history, not a row to keep editing.
+      const row = await db.first<{ accuracy_m: number }>(
+        'SELECT accuracy_m FROM record WHERE id = ?',
+        [record.id],
+      )
+      expect(row?.accuracy_m).toBe(6)
+    })
+
+    it('refuses to refine a position away', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+
+      await expect(
+        refineRecordFix(db, { recordId: record.id, fix: { quality: 'none' }, deviceId }),
+      ).rejects.toThrow(/cannot be refined to no position at all/)
+
+      expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
+      expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created'])
+    })
   })
 })
 
