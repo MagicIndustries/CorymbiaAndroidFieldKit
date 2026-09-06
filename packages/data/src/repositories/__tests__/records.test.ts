@@ -242,7 +242,29 @@ describe('records', () => {
       deviceId,
     })
     expect(record.activityId).toBeNull()
-    expect((await listUnfiledRecords(db)).map((r) => r.id)).toEqual([record.id])
+  })
+
+  it('lists the unfiled records and nothing else', async () => {
+    // With only one record in the database, and that one unfiled, an
+    // implementation ignoring activity_id entirely passes. There has to be
+    // something for the filter to exclude.
+    const unfiled = await createRecord(db, {
+      activityId: null,
+      kind: 'pin',
+      fix: AMBIENT,
+      deviceId,
+    })
+    await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+
+    const deleted = await createRecord(db, {
+      activityId: null,
+      kind: 'pin',
+      fix: INSTANT,
+      deviceId,
+    })
+    await softDeleteRecord(db, deleted.id, deviceId)
+
+    expect((await listUnfiledRecords(db)).map((r) => r.id)).toEqual([unfiled.id])
   })
 
   it('captures the activity that was running, separately from where it is filed', async () => {
@@ -258,6 +280,14 @@ describe('records', () => {
     })
     expect(record.activityId).toBeNull()
     expect(record.contextActivityId).toBe(activityId)
+
+    // The creation event stamps what was actually happening, not where the
+    // record ended up filed — the behaviour createRecord's comment explains at
+    // length, and the whole reason the Inbox keeps two links. Asserting only
+    // the two columns above would pass just as well if the event recorded the
+    // filed activity instead.
+    const [creation] = await listEvents(db, record.id)
+    expect(creation?.activityId).toBe(activityId)
   })
 
   it('writes a creation event, so provenance exists without anyone remembering to log it', async () => {
@@ -272,20 +302,61 @@ describe('records', () => {
     expect(events[0]?.deviceId).toBe(deviceId)
   })
 
-  it('lists an activity’s records most recent first', async () => {
-    const first = await createRecord(db, {
+  it('does not reuse a soft-deleted record’s sequence number', async () => {
+    // nextSequence deliberately queries the bare `record` table rather than the
+    // filtered SELECT constant. The unique index on (activity_id, sequence) has
+    // no partial predicate, so it still counts tombstones: handing a new record
+    // a deleted one's number is a UNIQUE collision, and a lost capture.
+    //
+    // An "obvious" tidy-up to reuse SELECT here leaves every other test green.
+    // This is the one that goes red.
+    const first = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    expect(first.sequence).toBe(1)
+
+    await softDeleteRecord(db, first.id, deviceId)
+
+    const second = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    expect(second.sequence).toBe(2)
+  })
+
+  it('lists an activity’s records most recent first, by capture time', async () => {
+    const older = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    const newer = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+
+    // nowIso() truncates to whole seconds, so both rows are written with the
+    // same captured_at no matter how long the test sleeps between them — and
+    // the id tiebreak alone would then decide the order, leaving `captured_at
+    // DESC` untested. Push them apart explicitly, and put the times in the
+    // OPPOSITE order to the ids, so dropping either term changes the answer.
+    await db.execute('UPDATE record SET captured_at = ? WHERE id = ?', [
+      '2026-02-11T08:00:00+11:00',
+      newer.id,
+    ])
+    await db.execute('UPDATE record SET captured_at = ? WHERE id = ?', [
+      '2026-02-11T09:00:00+11:00',
+      older.id,
+    ])
+
+    expect((await listRecords(db, activityId)).map((r) => r.id)).toEqual([older.id, newer.id])
+  })
+
+  it('breaks a same-second tie by id, so a burst of captures has a stable order', async () => {
+    // nowIso() truncates to whole seconds, so two captures in the same second
+    // — the normal case for a burst — genuinely share a captured_at and the
+    // tiebreak is all there is. Pinned here rather than left to chance: writing
+    // the timestamp explicitly keeps the test off the second boundary that
+    // would otherwise decide, at random, which term it was exercising.
+    //
+    // This test would keep passing if `captured_at DESC` were dropped. That is
+    // deliberate — it covers `id DESC` only, and the test above covers the
+    // other term. Ids are time-ordered, so the later capture still sorts first.
+    const first = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    const second = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    await db.execute('UPDATE record SET captured_at = ? WHERE activity_id = ?', [
+      '2026-02-11T09:14:03+11:00',
       activityId,
-      kind: 'pin',
-      fix: DELIBERATE,
-      deviceId,
-    })
-    await new Promise((r) => setTimeout(r, 5))
-    const second = await createRecord(db, {
-      activityId,
-      kind: 'pin',
-      fix: DELIBERATE,
-      deviceId,
-    })
+    ])
+
     expect((await listRecords(db, activityId)).map((r) => r.id)).toEqual([second.id, first.id])
   })
 
