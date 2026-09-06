@@ -1,5 +1,5 @@
 import { openTestDatabase } from '../better-sqlite3'
-import { migrate } from '../migrate'
+import { migrate, readAppliedMigrationIds } from '../migrate'
 import type { Database } from '../port'
 
 async function tableNames(db: Database): Promise<string[]> {
@@ -33,6 +33,11 @@ describe('migrate', () => {
   it('is idempotent — running twice applies nothing the second time', async () => {
     await migrate(db)
     expect(await migrate(db)).toEqual([])
+  })
+
+  it('readAppliedMigrationIds reports everything that has committed, independent of migrate\'s own return value', async () => {
+    const ran = await migrate(db)
+    expect(await readAppliedMigrationIds(db)).toEqual(ran)
   })
 
   it('seeds the default client and location that §7.3 requires', async () => {

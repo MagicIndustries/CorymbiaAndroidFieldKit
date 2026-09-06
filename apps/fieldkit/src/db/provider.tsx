@@ -3,6 +3,7 @@ import {
   DEFAULT_SETTINGS,
   migrate,
   openDatabase,
+  readAppliedMigrationIds,
   readSettings,
   registerDevice,
   writeSetting,
@@ -44,8 +45,14 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false
 
     void (async () => {
+      // Hoisted above the try so it is still reachable from `catch`: without
+      // this, a throw after `openDatabase()` succeeds leaves its handle
+      // reachable only by the discarded local, and expo-sqlite opens a fresh
+      // native connection per call with no caching — so every such failure
+      // leaked a real native handle for the life of the JS process.
+      let opened: Database | null = null
       try {
-        const opened = await openDatabase()
+        opened = await openDatabase()
         const applied = await migrate(opened)
         // Register before anything can write a record: every record and event
         // carries a device foreign key, so nothing may be captured until the
@@ -64,12 +71,28 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
         setSettings(stored)
         setStatus({ state: 'ready', error: null, applied })
       } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error))
+        let applied: string[] = []
+        if (opened) {
+          // The migrations that committed are durable in schema_migration even
+          // though `migrate`'s own return value was lost with the throw. Read
+          // it back before closing — the failure may already have left the
+          // connection unusable, so fall back to an empty list rather than let
+          // a secondary read failure replace the real cause below.
+          try {
+            applied = await readAppliedMigrationIds(opened)
+          } catch {
+            applied = []
+          }
+          try {
+            await opened.close()
+          } catch {
+            // A failure while closing must never mask `failure`, the error
+            // that actually caused this catch to run.
+          }
+        }
         if (cancelled) return
-        setStatus({
-          state: 'failed',
-          error: error instanceof Error ? error : new Error(String(error)),
-          applied: [],
-        })
+        setStatus({ state: 'failed', error: failure, applied })
       }
     })()
 

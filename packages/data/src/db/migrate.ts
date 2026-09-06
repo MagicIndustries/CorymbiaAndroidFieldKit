@@ -43,3 +43,32 @@ export async function migrate(db: Database): Promise<string[]> {
 
   return ran
 }
+
+/**
+ * Reads the ids of migrations already recorded as committed in
+ * `schema_migration`, in the order they were applied.
+ *
+ * `migrate` only returns the ids it itself ran to completion in this call: if
+ * it throws partway through, that return value is lost with the throw, even
+ * though every earlier migration committed in its own transaction and is
+ * durable on disk. This is how a caller recovers that truth afterwards —
+ * most importantly from a `catch` block, where `migrate`'s own return value
+ * is unavailable but the database handle is still open.
+ *
+ * Returns an empty list, rather than throwing, when `schema_migration` does
+ * not exist yet — i.e. nothing has ever been applied, including the case
+ * where the very first migration failed before `migrate`'s own
+ * `CREATE TABLE IF NOT EXISTS` had a chance to run against a corrupt
+ * connection. Any other read failure (for example a connection left
+ * unusable by whatever caused the caller's failure) still propagates: it is
+ * the caller's job to decide what an unreadable table means for it.
+ */
+export async function readAppliedMigrationIds(db: Database): Promise<string[]> {
+  const table = await db.first<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration'",
+  )
+  if (!table) return []
+
+  const rows = await db.all<{ id: string }>('SELECT id FROM schema_migration ORDER BY applied_at')
+  return rows.map((row) => row.id)
+}
