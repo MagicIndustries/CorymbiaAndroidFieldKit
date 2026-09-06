@@ -18,9 +18,11 @@ export type { Activity, ActivityKind } from './repositories/activities'
 
 export {
   createRecord,
+  getRecord,
   listRecords,
   listUnfiledRecords,
   softDeleteRecord,
+  sampleEvidence,
 } from './repositories/records'
 export type {
   Fix,

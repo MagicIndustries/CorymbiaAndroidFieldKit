@@ -5,7 +5,14 @@ import { createActivity } from '../activities'
 import { createProject } from '../projects'
 import { registerDevice } from '../devices'
 import { listEvents } from '../events'
-import { createRecord, listRecords, listUnfiledRecords, softDeleteRecord } from '../records'
+import {
+  createRecord,
+  getRecord,
+  listRecords,
+  listUnfiledRecords,
+  sampleEvidence,
+  softDeleteRecord,
+} from '../records'
 import type { Fix } from '../records'
 
 // Every position carries the full set of per-fix conditions (spec §7.5):
@@ -30,8 +37,7 @@ const DELIBERATE: Fix = {
   altitudeM: 62,
   altitudeReference: 'wgs84Ellipsoid',
   datum: 'WGS84',
-  sampleCount: 7,
-  spreadM: 1.2,
+  ...sampleEvidence(7, 1.2),
   holdMs: 4200,
   ...CONDITIONS,
 }
@@ -46,8 +52,7 @@ const INSTANT: Fix = {
   altitudeM: 60,
   altitudeReference: 'wgs84Ellipsoid',
   datum: 'WGS84',
-  sampleCount: 1,
-  spreadM: null,
+  ...sampleEvidence(1, null),
   holdMs: 0,
   ...CONDITIONS,
 }
@@ -388,6 +393,19 @@ describe('records', () => {
     )
   })
 
+  it('fetches one record by id', async () => {
+    const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    expect(await getRecord(db, record.id)).toEqual(record)
+  })
+
+  it('returns null for an unknown id, and for one that has been soft-deleted', async () => {
+    expect(await getRecord(db, 'rec_nothing')).toBeNull()
+
+    const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    await softDeleteRecord(db, record.id, deviceId)
+    expect(await getRecord(db, record.id)).toBeNull()
+  })
+
   it('rejects attributes that are not valid for the kind', async () => {
     await expect(
       createRecord(db, {
@@ -398,5 +416,34 @@ describe('records', () => {
         attributes: { species: 'Eucalyptus' },
       }),
     ).rejects.toThrow(/species/)
+  })
+})
+
+// Outside the `records` describe on purpose: this is a pure function and needs
+// no database, so it should not pay for one.
+describe('sampleEvidence', () => {
+  it('builds the two shapes the schema accepts', () => {
+    expect(sampleEvidence(1, null)).toEqual({ sampleCount: 1, spreadM: null })
+    expect(sampleEvidence(7, 1.2)).toEqual({ sampleCount: 7, spreadM: 1.2 })
+    // Zero spread is a real result from several readings that agreed exactly —
+    // quite different from a single reading forced to invent one.
+    expect(sampleEvidence(3, 0)).toEqual({ sampleCount: 3, spreadM: 0 })
+  })
+
+  it('refuses a one-reading fix that claims a spread — the case TypeScript cannot express', () => {
+    // `{ sampleCount: number; spreadM: number }` is satisfiable with 1, so
+    // without this the only thing catching it was migration 003's CHECK,
+    // arriving as a raw SQLITE_CONSTRAINT message mid-capture.
+    expect(() => sampleEvidence(1, 0)).toThrow(/one-reading fix has no spread/)
+  })
+
+  it('refuses an averaged fix with no spread to show for it', () => {
+    expect(() => sampleEvidence(7, null)).toThrow(/must report their spread/)
+  })
+
+  it('refuses counts and spreads that are not readings and distances', () => {
+    expect(() => sampleEvidence(0, null)).toThrow(/at least one/)
+    expect(() => sampleEvidence(2.5, 1)).toThrow(/whole number/)
+    expect(() => sampleEvidence(3, -1)).toThrow(/cannot be negative/)
   })
 })

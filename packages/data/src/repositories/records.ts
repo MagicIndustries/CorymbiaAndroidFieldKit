@@ -101,11 +101,56 @@ export type AltitudeEvidence =
  *
  * TypeScript cannot express "any integer except 1" without a branded type, so
  * `{ sampleCount: number; spreadM: number }` is technically still satisfiable
- * with `sampleCount: 1` — that residual gap is exactly what migration 003's
- * CHECK constraint closes at the database layer.
+ * with `sampleCount: 1`. Build these with `sampleEvidence()`, which names that
+ * residual case as an error rather than leaving migration 003's CHECK to raise
+ * it as a `SQLITE_CONSTRAINT` message mid-capture.
  */
 export type SampleEvidence =
   { sampleCount: 1; spreadM: null } | { sampleCount: number; spreadM: number }
+
+/**
+ * Builds the averaging evidence for a deliberate fix.
+ *
+ * The averaging engine produces a reading count and a spread that is null when
+ * there was nothing to compare, which is not yet either branch of the union.
+ * Narrowing that pair by hand means `count === 1 ? … : …` at every capture-screen
+ * call site plus a non-null assertion the type cannot discharge — so the check
+ * lives here instead, once, and the invalid combination arrives as a sentence
+ * rather than as `CHECK constraint failed: record_spread_matches_sample_count`
+ * halfway through a capture.
+ *
+ * The union is still the right type: it is what stops the mistake being written
+ * at all in the cases TypeScript can see. This closes the one case it cannot.
+ */
+export function sampleEvidence(sampleCount: number, spreadM: number | null): SampleEvidence {
+  if (!Number.isInteger(sampleCount) || sampleCount < 1) {
+    throw new Error(
+      `A fix is averaged from a whole number of readings, at least one; got ${String(sampleCount)}.`,
+    )
+  }
+  if (sampleCount === 1) {
+    if (spreadM !== null) {
+      throw new Error(
+        `A one-reading fix has no spread to report, but got ${String(spreadM)}. Spread is the ` +
+          'disagreement between readings; with a single reading it is undefined, not zero. ' +
+          'Pass null.',
+      )
+    }
+    return { sampleCount: 1, spreadM: null }
+  }
+  if (spreadM === null) {
+    throw new Error(
+      `A fix averaged from ${String(sampleCount)} readings must report their spread, or the ` +
+        'sample count is evidence with nothing behind it; got null.',
+    )
+  }
+  if (!(spreadM >= 0)) {
+    throw new Error(
+      `A spread is a distance between readings and cannot be negative; got ${String(spreadM)}.`,
+    )
+  }
+  return { sampleCount, spreadM }
+}
 
 /**
  * The three fix classes of spec §8.2, as a discriminated union so an
@@ -388,9 +433,27 @@ export async function createRecord(
     })
   })
 
+  const record = await getRecord(db, id)
+  if (!record) throw new Error(`Record ${id} vanished immediately after being created.`)
+  return record
+}
+
+/**
+ * One record by id, or null when there is no live record under it.
+ *
+ * The detail view and the post-save confirmation both need exactly this, and
+ * without it the only route back to a single record was `listRecords` plus a
+ * `.find()` — which reads a whole activity to answer a one-row question and
+ * cannot answer it at all for an Inbox record.
+ *
+ * A soft-deleted record reads as absent, the same as an unknown id: `SELECT`
+ * filters tombstones, and a caller asking for a record it can show should not
+ * have to know the difference. Callers that need the tombstone itself (an
+ * undo path, an audit view) should query with their own predicate.
+ */
+export async function getRecord(db: Database, id: string): Promise<FieldRecord | null> {
   const row = await db.first<RecordRow>(`${SELECT} AND id = ?`, [id])
-  if (!row) throw new Error(`Record ${id} vanished immediately after being created.`)
-  return toRecord(row)
+  return row ? toRecord(row) : null
 }
 
 export async function listRecords(db: Database, activityId: string): Promise<FieldRecord[]> {
