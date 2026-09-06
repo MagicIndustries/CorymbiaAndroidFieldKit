@@ -1,0 +1,5 @@
+export { distanceMetres } from './distance'
+export type { Coordinate } from './distance'
+export { nearestPlace } from './nearest'
+export type { NamedPlace } from './nearest'
+export { isProbableDuplicate, DUPLICATE_THRESHOLD_M } from './duplicate'
