@@ -205,6 +205,28 @@ describe('records', () => {
     expect(record.fix).toEqual({ quality: 'none' })
   })
 
+  it('keeps why a record has no position, which the row itself cannot say', async () => {
+    // record_none_has_no_position forces latitude, longitude, accuracy and GPS
+    // time all to NULL, so the row can only ever record THAT there was no
+    // position. Which absence it was — tapped before the lock, or a platform
+    // that never reports whether a position is mocked, so none could be
+    // asserted at all — is a different fact, and it goes in the append-only
+    // event log rather than in `description`, where an observer's own note
+    // lives and could be typed over.
+    const record = await createRecord(db, {
+      activityId,
+      kind: 'pin',
+      fix: { quality: 'none' },
+      deviceId,
+      detail: 'this platform never reported whether the position is mocked',
+    })
+
+    const created = (await listEvents(db, record.id)).find((e) => e.action === 'created')
+    expect(created?.detail).toBe('this platform never reported whether the position is mocked')
+    // And it is not smuggled onto the record itself.
+    expect(record.description).toBeNull()
+  })
+
   it('gives a record captured into an activity both numbers', async () => {
     // Spec §7.2: the tube label and the ordinal in the survey. Captured
     // directly into an activity, so nothing was filed after the fact.
@@ -1312,6 +1334,114 @@ describe('filing, reordering and refiling', () => {
       const refinement = (await listEvents(db, record.id)).find((e) => e.action === 'edited')
       expect(refinement?.detail).toBe('fix refined from no position to ±4.0 m')
       expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
+    })
+
+    // The two tests above refine upward — a sparse fix into a richer one — so
+    // every column they check is being SET. A column added to the insert and
+    // forgotten in the shared `FIX_COLUMNS` list would still be set correctly
+    // by them, because the insert wrote it and the update simply never cleared
+    // it. The clearing direction is the one that catches that: refine to a fix
+    // whose fields are absent, and a column the update does not name keeps the
+    // old value, leaving a row wearing half of its old position and half of its
+    // new one — exactly the silent half-and-half `FIX_COLUMNS` exists to
+    // prevent, and a row every CHECK constraint in migration 003 accepts.
+
+    it('clears the columns a sparser fix does not carry, not just the ones it sets', async () => {
+      // DELIBERATE carries the lot: seven readings, a spread, a hold, an
+      // altitude with its reference frame, a vertical accuracy, a provider and
+      // a satellite clock reading.
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+
+      // A one-reading capture on a receiver that reported none of it. Every
+      // optional part of the previous fix is absent here, and each absence has
+      // to reach the row: spread NULL because one reading has no disagreement
+      // (record_spread_matches_sample_count), altitude and its reference NULL
+      // together (record_altitude_has_reference), and the rest simply unknown.
+      const BARE: Fix = {
+        quality: 'deliberate',
+        latitude: -37.8215,
+        longitude: 145.0334,
+        accuracyM: 9,
+        altitudeM: null,
+        altitudeReference: null,
+        datum: 'WGS84',
+        ...sampleEvidence(1, null),
+        holdMs: 0,
+        verticalAccuracyM: null,
+        // Stays known: record_deliberate_is_survey_grade requires a real
+        // convention on a deliberate fix, because a survey-grade number whose
+        // confidence radius is unstated is not survey grade. The absences this
+        // test is about are the four beside it.
+        accuracyConvention: 'radius68',
+        isMocked: false,
+        provider: null,
+        gpsTime: null,
+      }
+
+      const refined = await refineRecordFix(db, { recordId: record.id, fix: BARE, deviceId })
+
+      expect(refined.fix).toEqual(BARE)
+      expect((await getRecord(db, record.id))?.fix).toEqual(BARE)
+
+      // Read straight out of SQL as well, because the mapper reconstructs a
+      // union from these columns and could in principle hide a stale one behind
+      // the discriminant. NULL here is the assertion; `toEqual` above would
+      // pass on a leftover 62 m altitude only if the mapper dropped it.
+      const row = await db.first<{
+        altitude_m: number | null
+        altitude_reference: string | null
+        vertical_accuracy_m: number | null
+        location_provider: string | null
+        gps_time: string | null
+        fix_spread_m: number | null
+        fix_sample_count: number | null
+        fix_hold_ms: number | null
+      }>(
+        `SELECT altitude_m, altitude_reference, vertical_accuracy_m, location_provider,
+                gps_time, fix_spread_m, fix_sample_count, fix_hold_ms
+         FROM record WHERE id = ?`,
+        [record.id],
+      )
+      expect(row?.altitude_m).toBeNull()
+      expect(row?.altitude_reference).toBeNull()
+      expect(row?.vertical_accuracy_m).toBeNull()
+      expect(row?.location_provider).toBeNull()
+      expect(row?.gps_time).toBeNull()
+      expect(row?.fix_spread_m).toBeNull()
+      expect(row?.fix_sample_count).toBe(1)
+      expect(row?.fix_hold_ms).toBe(0)
+    })
+
+    it('clears the averaging evidence when a deliberate fix is refined to an ambient one', async () => {
+      // The class discriminant swaps which set of columns is legal: a
+      // deliberate fix has sample count, spread and hold and no age; an ambient
+      // one has an age and none of the three. record_deliberate_is_survey_grade
+      // and record_ambient_carries_age each police their own half, so a stale
+      // sample count left behind by the update aborts the transaction rather
+      // than surviving — which is the same failure, caught one layer down.
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+
+      const refined = await refineRecordFix(db, { recordId: record.id, fix: AMBIENT, deviceId })
+
+      expect(refined.fix).toEqual(AMBIENT)
+      expect((await getRecord(db, record.id))?.fix).toEqual(AMBIENT)
+
+      const row = await db.first<{
+        fix_quality: string
+        fix_age_seconds: number | null
+        fix_sample_count: number | null
+        fix_spread_m: number | null
+        fix_hold_ms: number | null
+      }>(
+        `SELECT fix_quality, fix_age_seconds, fix_sample_count, fix_spread_m, fix_hold_ms
+         FROM record WHERE id = ?`,
+        [record.id],
+      )
+      expect(row?.fix_quality).toBe('ambient')
+      expect(row?.fix_age_seconds).toBe(240)
+      expect(row?.fix_sample_count).toBeNull()
+      expect(row?.fix_spread_m).toBeNull()
+      expect(row?.fix_hold_ms).toBeNull()
     })
 
     it('refuses a record that does not exist', async () => {

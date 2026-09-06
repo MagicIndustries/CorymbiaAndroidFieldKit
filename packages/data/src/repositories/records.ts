@@ -516,6 +516,27 @@ export async function createRecord(
     /** Which activity was running when the capture happened; captured automatically upstream. */
     contextActivityId?: string | null
     attributes?: unknown
+    /**
+     * Why this capture looks the way it does, written into the `'created'`
+     * event rather than onto the record.
+     *
+     * The case this exists for is a `'none'` fix. `record_none_has_no_position`
+     * forces latitude, longitude, accuracy and GPS time all to NULL, so the row
+     * itself can only ever say *that* there is no position, never *why* — and
+     * "she tapped before the receiver had a lock" and "this platform never
+     * reports whether a position is mocked, so no position could be asserted"
+     * are entirely different facts about the same NULLs. One is a moment in a
+     * survey; the other is a property of the hardware that applies to every
+     * capture on that device.
+     *
+     * It goes in the event log rather than in `description` because the event
+     * log is append-only chain of custody (spec §8.5): `description` is the
+     * observer's own free text about the observation, is editable, and leaves
+     * the app in exports, so an instrument's explanation of a NULL written
+     * there would be indistinguishable from something she typed and would
+     * survive only until she typed over it.
+     */
+    detail?: string
   },
 ): Promise<FieldRecord> {
   const attributes = serialiseAttributes(input.kind, input.attributes ?? {})
@@ -566,6 +587,7 @@ export async function createRecord(
       // necessarily where the record ends up filed — the Inbox's whole point is
       // that these two can differ.
       activityId: contextActivityId ?? input.activityId,
+      detail: input.detail,
     })
   })
 
@@ -1074,6 +1096,22 @@ function describeAccuracy(accuracyM: number | null): string {
  * refined to ±3 m — and which of those two happened is precisely the question
  * an audit of a biodiversity record asks. So the previous accuracy goes into
  * `detail`, where it is the only place it survives.
+ *
+ * ## The detail prefix is a contract, not prose
+ *
+ * The detail is written as `fix refined from <before> to <after>`, and the
+ * leading `fix refined from ` is the only thing that distinguishes a refinement
+ * from a manual edit in the event log: both are `'edited'` events on the same
+ * record, carrying the same columns, and `moveRecord` writes `'edited'` too.
+ * Any reader that has to tell "the countdown sharpened this" from "someone
+ * retyped the coordinates" — an export, a detail view, an audit — has that
+ * prefix and nothing else to go on.
+ *
+ * So the wording of that prefix is API. It may gain text after it; it must not
+ * be reworded, re-cased or have anything inserted before it without changing
+ * every reader that matches on it. `records.test.ts` asserts the exact string
+ * for that reason, so a rewrite here fails there rather than silently making
+ * every past refinement indistinguishable from a hand edit.
  *
  * ## What it does not touch
  *
