@@ -81,6 +81,16 @@ async function insertRecord(db: Database, over: Record<string, unknown> = {}): P
   )
 }
 
+/**
+ * SAVE NOW: one tap, one reading. The capture is real and deliberate — she chose
+ * this spot — but nothing was averaged, so there is no spread to state.
+ */
+const INSTANT: Record<string, unknown> = {
+  fix_sample_count: 1,
+  fix_spread_m: null,
+  fix_hold_ms: 0,
+}
+
 /** The ambient class: a cached position, carrying its age and no averaging evidence. */
 const AMBIENT: Record<string, unknown> = {
   fix_quality: 'ambient',
@@ -116,6 +126,10 @@ const ambient = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   ...over,
 })
 const none = (over: Record<string, unknown> = {}): Record<string, unknown> => ({ ...NONE, ...over })
+const instant = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  ...INSTANT,
+  ...over,
+})
 
 async function insertEvent(db: Database, over: Record<string, unknown> = {}): Promise<void> {
   const row = {
@@ -197,12 +211,6 @@ describe('the record schema', () => {
       )
     })
 
-    it('refuses a deliberate fix with no spread', async () => {
-      await expect(insertRecord(db, { fix_spread_m: null })).rejects.toThrow(
-        CHECK('record_deliberate_is_survey_grade'),
-      )
-    })
-
     it('refuses a deliberate fix with no hold duration', async () => {
       await expect(insertRecord(db, { fix_hold_ms: null })).rejects.toThrow(
         CHECK('record_deliberate_is_survey_grade'),
@@ -216,6 +224,46 @@ describe('the record schema', () => {
       await expect(insertRecord(db, { accuracy_convention: 'unknown' })).rejects.toThrow(
         CHECK('record_deliberate_is_survey_grade'),
       )
+    })
+  })
+
+  describe('SHARPEN and SAVE NOW — spread exists when there were readings to disagree', () => {
+    it('accepts a held fix: several samples, and the spread between them', async () => {
+      await insertRecord(db, { id: 'r1s', fix_sample_count: 7, fix_spread_m: 1.2 })
+      const row = await db.first<{ fix_sample_count: number; fix_spread_m: number }>(
+        'SELECT fix_sample_count, fix_spread_m FROM record WHERE id = ?',
+        ['r1s'],
+      )
+      expect(row?.fix_sample_count).toBe(7)
+      expect(row?.fix_spread_m).toBe(1.2)
+    })
+
+    it('accepts an instant fix: one sample, no spread, and a hold of zero', async () => {
+      // SAVE NOW is a single tap. Requiring a spread here would force a written 0,
+      // asserting perfect agreement between readings that were never compared.
+      // A hold of 0 is not a guess: she genuinely did not hold.
+      await insertRecord(db, instant({ id: 'r1i' }))
+      const row = await db.first<{
+        fix_sample_count: number
+        fix_spread_m: number | null
+        fix_hold_ms: number
+      }>('SELECT fix_sample_count, fix_spread_m, fix_hold_ms FROM record WHERE id = ?', ['r1i'])
+      expect(row?.fix_sample_count).toBe(1)
+      expect(row?.fix_spread_m).toBeNull()
+      expect(row?.fix_hold_ms).toBe(0)
+    })
+
+    it('refuses a one-sample fix that nonetheless claims a spread', async () => {
+      // Spread between one reading is not a small number; it is undefined.
+      await expect(insertRecord(db, instant({ id: 'r1j', fix_spread_m: 0 }))).rejects.toThrow(
+        CHECK('record_spread_matches_sample_count'),
+      )
+    })
+
+    it('refuses a multi-sample fix with no spread — evidence with nothing behind it', async () => {
+      await expect(
+        insertRecord(db, { id: 'r1k', fix_sample_count: 7, fix_spread_m: null }),
+      ).rejects.toThrow(CHECK('record_spread_matches_sample_count'))
     })
   })
 

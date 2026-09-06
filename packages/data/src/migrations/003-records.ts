@@ -102,14 +102,24 @@ export const migration003: Migration = {
 
        -- A deliberate fix was taken deliberately: it has an accuracy whose
        -- confidence level is stated, it has no age because it was taken just now,
-       -- and it carries the averaging evidence that makes it survey-grade. A
-       -- deliberate fix with no sample count is asserting survey grade on nothing.
+       -- and it says how many readings it came from. A deliberate fix with no
+       -- sample count is asserting survey grade on nothing.
+       --
+       -- The spread is NOT required here. The capture screen has two controls:
+       -- SHARPEN averages readings while held, SAVE NOW is a single tap. A
+       -- one-reading capture forced to supply a spread can only write 0, which
+       -- asserts perfect agreement between readings that were never compared —
+       -- exactly the plausible guess recorded as data this table exists to stop.
+       -- The spread's real rule is record_spread_matches_sample_count below.
+       --
+       -- fix_hold_ms stays required and may be 0: she genuinely did not hold, and
+       -- that is a true statement about a real capture rather than a guess.
        CONSTRAINT record_deliberate_is_survey_grade CHECK (
          fix_quality <> 'deliberate' OR
          (latitude IS NOT NULL AND longitude IS NOT NULL
           AND accuracy_m IS NOT NULL AND datum IS NOT NULL
           AND fix_age_seconds IS NULL
-          AND fix_sample_count IS NOT NULL AND fix_spread_m IS NOT NULL
+          AND fix_sample_count IS NOT NULL
           AND fix_hold_ms IS NOT NULL
           AND accuracy_convention IN ('radius68', 'radius95'))),
 
@@ -138,6 +148,19 @@ export const migration003: Migration = {
           AND altitude_reference IS NULL
           AND location_provider IS NULL AND gps_time IS NULL
           AND is_mocked IS NULL)),
+
+       -- Spread is the disagreement between readings, so it exists exactly when
+       -- there were readings to disagree. With one sample it is not a small
+       -- number, it is undefined, and NULL is how this schema says so. With more
+       -- than one it was computed and must be stored, or the averaging evidence
+       -- is a sample count with nothing behind it.
+       --
+       -- Defined after the three class clauses so an ambient or positionless row
+       -- wearing a sample count still reports the class rule it actually broke.
+       CONSTRAINT record_spread_matches_sample_count CHECK (
+         fix_sample_count IS NULL OR
+         (fix_sample_count = 1 AND fix_spread_m IS NULL) OR
+         (fix_sample_count > 1 AND fix_spread_m IS NOT NULL)),
 
        -- A stored accuracy without its convention is a number whose meaning was lost.
        CONSTRAINT record_accuracy_has_convention CHECK (
