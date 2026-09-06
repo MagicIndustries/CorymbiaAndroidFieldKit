@@ -48,13 +48,14 @@ describe('the event log', () => {
         longitude: 145.0,
         accuracyM: 38,
         altitudeM: null,
+        altitudeReference: null,
         datum: 'WGS84',
         ageSeconds: 240,
         verticalAccuracyM: 3,
         accuracyConvention: 'radius68',
-        altitudeReference: 'wgs84Ellipsoid',
         isMocked: false,
         provider: 'gps',
+        gpsTime: null,
       },
     })
     const [event] = await listEvents(db, null)
@@ -77,15 +78,16 @@ describe('the event log', () => {
         longitude: 145.03318,
         accuracyM: 4,
         altitudeM: 62,
+        altitudeReference: 'wgs84Ellipsoid',
         datum: 'WGS84',
         sampleCount: 7,
         spreadM: 1.2,
         holdMs: 4200,
         verticalAccuracyM: 3,
         accuracyConvention: 'radius68',
-        altitudeReference: 'wgs84Ellipsoid',
         isMocked: false,
         provider: 'gps',
+        gpsTime: '2026-02-11T09:14:03+11:00',
       },
     })
     const [event] = await listEvents(db, null)

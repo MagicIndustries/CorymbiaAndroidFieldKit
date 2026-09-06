@@ -11,12 +11,15 @@ import type { Fix } from '../records'
 // Every position carries the full set of per-fix conditions (spec §7.5):
 // migration 003 hardened the schema after the original plan was written, so a
 // deliberate or ambient fix that omits any of these is not constructible.
+// GPS time is provenance of the fix, so it travels inside the position-carrying
+// branches of the union rather than beside them: a positionless record has no
+// satellite clock reading, and record_none_has_no_position says so.
 const CONDITIONS = {
   verticalAccuracyM: 3,
   accuracyConvention: 'radius68',
-  altitudeReference: 'wgs84Ellipsoid',
   isMocked: false,
   provider: 'gps',
+  gpsTime: '2026-02-11T09:14:03+11:00',
 } as const
 
 const DELIBERATE: Fix = {
@@ -25,6 +28,7 @@ const DELIBERATE: Fix = {
   longitude: 145.03318,
   accuracyM: 4,
   altitudeM: 62,
+  altitudeReference: 'wgs84Ellipsoid',
   datum: 'WGS84',
   sampleCount: 7,
   spreadM: 1.2,
@@ -40,6 +44,7 @@ const INSTANT: Fix = {
   longitude: 145.0329,
   accuracyM: 6,
   altitudeM: 60,
+  altitudeReference: 'wgs84Ellipsoid',
   datum: 'WGS84',
   sampleCount: 1,
   spreadM: null,
@@ -52,10 +57,31 @@ const AMBIENT: Fix = {
   latitude: -37.82088,
   longitude: 145.03402,
   accuracyM: 38,
+  // No barometer reading on this fix, so no height — and therefore no reference
+  // frame either. The pair is all-or-nothing.
   altitudeM: null,
+  altitudeReference: null,
   datum: 'WGS84',
   ageSeconds: 240,
   ...CONDITIONS,
+}
+
+// The platform did not expose a provider, a satellite clock or a height on this
+// one. Every optional part of a position absent at once, still a real capture.
+const SPARSE_AMBIENT: Fix = {
+  quality: 'ambient',
+  latitude: -37.8199,
+  longitude: 145.0341,
+  accuracyM: 55,
+  altitudeM: null,
+  altitudeReference: null,
+  datum: 'WGS84',
+  ageSeconds: 12,
+  verticalAccuracyM: null,
+  accuracyConvention: 'unknown',
+  isMocked: false,
+  provider: null,
+  gpsTime: null,
 }
 
 describe('records', () => {
@@ -121,6 +147,43 @@ describe('records', () => {
       deviceId,
     })
     expect(record.fix).toEqual(AMBIENT)
+  })
+
+  it('stores an ambient fix whose provider, GPS time and altitude are all absent', async () => {
+    // The type closes pairs the schema couples; it must not close over a real
+    // field shape. Everything optional missing at once is still a capture.
+    const record = await createRecord(db, {
+      activityId,
+      kind: 'pin',
+      fix: SPARSE_AMBIENT,
+      deviceId,
+    })
+    expect(record.fix).toEqual(SPARSE_AMBIENT)
+  })
+
+  it('keeps the GPS time with the fix it belongs to', async () => {
+    // Spec §7.4: the satellite clock reading is provenance of a position, so a
+    // positionless record has none — record_none_has_no_position requires
+    // gps_time IS NULL, and the type now agrees rather than deferring to it.
+    const positioned = await createRecord(db, {
+      activityId,
+      kind: 'pin',
+      fix: DELIBERATE,
+      deviceId,
+    })
+    expect(positioned.fix).toMatchObject({ gpsTime: '2026-02-11T09:14:03+11:00' })
+
+    const positionless = await createRecord(db, {
+      activityId,
+      kind: 'pin',
+      fix: { quality: 'none' },
+      deviceId,
+    })
+    const raw = await db.first<{ gps_time: string | null }>(
+      'SELECT gps_time FROM record WHERE id = ?',
+      [positionless.id],
+    )
+    expect(raw?.gps_time).toBeNull()
   })
 
   it('stores a record with no position at all', async () => {

@@ -18,32 +18,64 @@ export type AltitudeReference = 'wgs84Ellipsoid' | 'meanSeaLevel'
 /**
  * Conditions that apply to any position, whatever its class (spec §7.5).
  *
- * `accuracyConvention` and `altitudeReference` are stored because neither can be
- * recovered from the number alone: Android's accuracy is the 68% confidence
- * radius rather than a maximum error, and its altitude is above the WGS84
- * ellipsoid, several metres from mean sea level in Victoria. A destination
- * wanting 95% confidence wants a different figure, and only the stored
- * convention makes that conversion possible.
+ * `accuracyConvention` is stored because it cannot be recovered from the number
+ * alone: Android's accuracy is the 68% confidence radius rather than a maximum
+ * error. A destination wanting 95% confidence wants a different figure, and only
+ * the stored convention makes that conversion possible. `altitudeReference` is
+ * the same rule one dimension up and lives in `AltitudeEvidence`, paired with the
+ * height it describes.
  *
  * `isMocked` is chain-of-custody: a record that cannot show it was not spoofed
  * is not evidence, and the platform tells us.
+ *
+ * Every field here is positional provenance, which is why `'none'` carries none
+ * of it: there is no position to have a provider, a satellite clock reading, or
+ * to have been spoofed, and `record_none_has_no_position` requires every one of
+ * these columns to be NULL.
  */
 export type PositionConditions = {
   verticalAccuracyM: number | null
   accuracyConvention: AccuracyConvention
-  altitudeReference: AltitudeReference | null
   isMocked: boolean
   /** Where the platform exposes it — 'gps', 'fused', 'network'. Null when it does not. */
   provider: string | null
+  /**
+   * The satellite clock reading *of this fix* (spec §7.4), kept alongside device
+   * time because field tablets drift.
+   *
+   * It sits inside the position-carrying part of the union, not beside `fix`,
+   * for the same reason `accuracyConvention` does: it is provenance belonging to
+   * a specific position. A `'none'` fix has no satellite clock reading to
+   * report, and `record_none_has_no_position` requires `gps_time IS NULL`.
+   */
+  gpsTime: string | null
 }
 
 type PositionCore = {
   latitude: number
   longitude: number
   accuracyM: number
-  altitudeM: number | null
   datum: Datum
 }
+
+/**
+ * A height and the frame it was measured against — migration 003's
+ * `record_altitude_has_reference`. The ellipsoid-to-geoid separation in Victoria
+ * is several metres, so an altitude with no stated reference is not a
+ * measurement (spec §7.5): the two travel together or neither is present.
+ *
+ * Its own union, the same technique as `SampleEvidence`, so
+ * `{ altitudeM: 62, altitudeReference: null }` cannot be constructed at all
+ * rather than being caught by a CHECK constraint mid-capture on a field device.
+ *
+ * The no-altitude branch pins the reference to null too. The schema would
+ * tolerate a reference frame for a height that was never measured, but that is
+ * metadata about nothing — no capture is lost by refusing it, and pinning it is
+ * what makes a fix that was written read back identical.
+ */
+export type AltitudeEvidence =
+  | { altitudeM: null; altitudeReference: null }
+  | { altitudeM: number; altitudeReference: AltitudeReference }
 
 /**
  * The averaging evidence a deliberate fix carries — migration 003's
@@ -72,12 +104,14 @@ export type SampleEvidence =
  * This is stricter than the plan that first specified it, hardened to match
  * migration 003:
  *  - every position carries the full `PositionConditions` set, including
- *    `provider`, `isMocked` and the accuracy/altitude conventions;
+ *    `provider`, `isMocked`, the accuracy convention and the GPS time;
  *  - a deliberate fix's `accuracyConvention` excludes `'unknown'` — a
  *    survey-grade coordinate with an accuracy of unstated confidence is exactly
  *    what `record_deliberate_is_survey_grade` refuses to store;
  *  - a deliberate fix always carries `holdMs` (0 is a true value: she did not
  *    hold) and a `sampleCount`/`spreadM` pair via `SampleEvidence`;
+ *  - every position carries an `altitudeM`/`altitudeReference` pair via
+ *    `AltitudeEvidence`, so a height can never arrive without its frame;
  *  - `'none'` carries no positional data at all, including no provider, no GPS
  *    time and no mocked flag — there is no position to have a provider or to
  *    have been spoofed.
@@ -89,12 +123,14 @@ export type Fix =
       accuracyConvention: Exclude<AccuracyConvention, 'unknown'>
     } & PositionCore &
       Omit<PositionConditions, 'accuracyConvention'> &
+      AltitudeEvidence &
       SampleEvidence)
   | ({
       quality: 'ambient'
       ageSeconds: number
     } & PositionCore &
-      PositionConditions)
+      PositionConditions &
+      AltitudeEvidence)
   | { quality: 'none' }
 
 export type FieldRecord = {
@@ -107,9 +143,12 @@ export type FieldRecord = {
   sequence: number
   title: string | null
   description: string | null
+  /**
+   * The position and its provenance. GPS time lives in here rather than beside
+   * it: it belongs to the fix, and a positionless record has none.
+   */
   fix: Fix
   capturedAt: string
-  gpsTime: string | null
   deviceId: string
   attributes: Record<string, unknown>
 }
@@ -143,6 +182,19 @@ type RecordRow = {
   attributes: string
 }
 
+/**
+ * `record_altitude_has_reference` guarantees the reference is present whenever
+ * the height is, which is what makes the cast below sound rather than hopeful.
+ */
+function toAltitude(row: RecordRow): AltitudeEvidence {
+  return row.altitude_m === null
+    ? { altitudeM: null, altitudeReference: null }
+    : {
+        altitudeM: row.altitude_m,
+        altitudeReference: row.altitude_reference as AltitudeReference,
+      }
+}
+
 function toFix(row: RecordRow): Fix {
   if (row.fix_quality === 'none') return { quality: 'none' }
 
@@ -150,12 +202,12 @@ function toFix(row: RecordRow): Fix {
     latitude: row.latitude as number,
     longitude: row.longitude as number,
     accuracyM: row.accuracy_m as number,
-    altitudeM: row.altitude_m,
     datum: row.datum as Datum,
     verticalAccuracyM: row.vertical_accuracy_m,
-    altitudeReference: row.altitude_reference,
     isMocked: row.is_mocked === 1,
     provider: row.location_provider,
+    gpsTime: row.gps_time,
+    ...toAltitude(row),
   }
 
   if (row.fix_quality === 'deliberate') {
@@ -200,7 +252,6 @@ function toRecord(row: RecordRow): FieldRecord {
     description: row.description,
     fix: toFix(row),
     capturedAt: row.captured_at,
-    gpsTime: row.gps_time,
     deviceId: row.device_id,
     attributes: JSON.parse(row.attributes) as Record<string, unknown>,
   }
@@ -236,7 +287,6 @@ export async function createRecord(
     deviceId: string
     title?: string
     description?: string
-    gpsTime?: string
     /** Which activity was running when the capture happened; captured automatically upstream. */
     contextActivityId?: string | null
     attributes?: unknown
@@ -287,7 +337,10 @@ export async function createRecord(
         positioned?.accuracyConvention ?? null,
         positioned?.altitudeReference ?? null,
         at,
-        input.gpsTime ?? null,
+        // GPS time is provenance of the fix, so it arrives with the fix. A
+        // positionless record has no satellite clock reading, which is what
+        // record_none_has_no_position insists on.
+        positioned?.gpsTime ?? null,
         input.deviceId,
         attributes,
         at,

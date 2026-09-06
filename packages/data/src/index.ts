@@ -28,6 +28,7 @@ export type {
   Datum,
   PositionConditions,
   SampleEvidence,
+  AltitudeEvidence,
   AccuracyConvention,
   AltitudeReference,
 } from './repositories/records'
