@@ -46,6 +46,10 @@ use for judging the app in the field.
 against. Read it before building any UI. Add to it whenever a cross-screen
 design decision is made.
 
+`docs/gps-accuracy.md` explains how the reported GPS accuracy is derived
+(inverse-variance weighting, the floor, spread, altitude) and why an optimistic
+figure is harmful — read it before touching `packages/geo/src/average.ts`.
+
 Three constraints are enforced by lint and must not be worked around:
 
 1. Components consume semantic tokens from `@corymbia/tokens` only — never raw
