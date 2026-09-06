@@ -1,12 +1,18 @@
 /**
- * The single clock the package writes through, so every timestamp column is
- * comparable and every repository test can freeze or advance it uniformly.
+ * ISO-8601 with the device's UTC offset, rather than a bare `Z`.
  *
- * Minimal placeholder introduced early by Task 3 (device registry), which
- * needed a timestamp source before Task 5 — where this belongs per the plan —
- * lands. Task 5 should treat this file as already present rather than
- * recreating it, extending it in place if it needs more than this.
+ * Spec §7.4 keeps GPS time alongside device time because field tablets drift.
+ * Keeping the offset means a record also remembers the local time it was taken
+ * at, which is what a field notebook would have recorded and what makes a
+ * dataset readable months later.
  */
-export function nowIso(): string {
-  return new Date().toISOString()
+export function nowIso(date: Date = new Date()): string {
+  const offsetMinutes = -date.getTimezoneOffset()
+  const sign = offsetMinutes >= 0 ? '+' : '-'
+  const pad = (n: number): string => String(Math.floor(Math.abs(n))).padStart(2, '0')
+  const offset =
+    offsetMinutes === 0 ? 'Z' : `${sign}${pad(offsetMinutes / 60)}:${pad(offsetMinutes % 60)}`
+
+  const local = new Date(date.getTime() + offsetMinutes * 60_000)
+  return `${local.toISOString().slice(0, 19)}${offset}`
 }

@@ -5,6 +5,11 @@ export type { Migration } from './db/migrate'
 export { registerDevice, getDevice, listDevices } from './repositories/devices'
 export type { Device, DeviceFacts, DeviceType } from './repositories/devices'
 
+export { newId } from './ids'
+export { nowIso } from './time'
+export { validateAttributes, serialiseAttributes } from './kinds'
+export type { RecordKind, PinAttributes } from './kinds'
+
 // Note: openTestDatabase is not re-exported here. It remains available for tests
 // that import directly from './db/better-sqlite3', but is kept out of the public
 // barrel to prevent Metro from pulling the native 'better-sqlite3' module into
