@@ -214,6 +214,15 @@ export const migration003: Migration = {
     // Spec §8.5 calls the event log append-only, and chain of custody is only real
     // if the database says so: a comment cannot refuse an UPDATE. Rows are written
     // once; a correction is a new event, which is what an audit trail is for.
+    //
+    // These triggers only close the hole when `recursive_triggers` is ON, which
+    // SQLite does NOT do by default. `INSERT OR REPLACE` deletes the conflicting
+    // row to make room, and with the pragma off SQLite skips the BEFORE DELETE
+    // trigger for that deletion — so `INSERT OR REPLACE INTO event` silently
+    // rewrote an existing event and returned success. Every adapter that opens
+    // this database MUST set `recursive_triggers = ON`; see
+    // src/db/better-sqlite3.ts. `DROP TABLE` does not fire the delete trigger
+    // either, which is what keeps a future table rebuild possible.
     `CREATE TRIGGER event_is_append_only_on_update
        BEFORE UPDATE ON event
        BEGIN

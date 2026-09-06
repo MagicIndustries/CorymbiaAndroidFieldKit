@@ -9,10 +9,20 @@ import type { Database, SqlValue } from './port'
  * Foreign keys are enabled explicitly because SQLite disables them by default —
  * without this, a test would happily insert an orphaned row and the schema's
  * relationships would be decorative.
+ *
+ * `recursive_triggers` is enabled for the same reason, and it is not optional.
+ * The event log's append-only guarantee is two BEFORE triggers (migration 003).
+ * `INSERT OR REPLACE` deletes the conflicting row before inserting, and with
+ * this pragma OFF — SQLite's default — that deletion does not fire the BEFORE
+ * DELETE trigger. `INSERT OR REPLACE INTO event` then rewrites an existing
+ * event's content and returns success, which defeats the one table whose entire
+ * purpose is being tamper-evident. Any adapter that opens this database must
+ * set it; see records-schema.test.ts, "refuses an INSERT OR REPLACE".
  */
 export async function openTestDatabase(): Promise<Database> {
   const db = new BetterSqlite3(':memory:')
   db.pragma('foreign_keys = ON')
+  db.pragma('recursive_triggers = ON')
 
   return {
     async execute(sql, params = []) {

@@ -623,5 +623,35 @@ describe('the record schema', () => {
       )
       expect(await db.all('SELECT id FROM event')).toHaveLength(1)
     })
+
+    it('refuses an INSERT OR REPLACE: the route around both triggers', async () => {
+      // REPLACE deletes the conflicting row to make room, and SQLite skips the
+      // BEFORE DELETE trigger for that deletion unless `recursive_triggers` is
+      // ON — which it is not by default. With the pragma off this statement
+      // succeeded and rewrote the event's content, which defeats the one table
+      // whose entire purpose is being tamper-evident. openTestDatabase() sets it;
+      // if this test goes red, that pragma is the first place to look.
+      await insertEvent(db, { detail: 'original' })
+      await expect(
+        db.execute(
+          `INSERT OR REPLACE INTO event
+             (id, record_id, action, device_id, occurred_at, latitude, longitude, accuracy_m,
+              accuracy_convention, datum, fix_quality, activity_id, detail)
+           VALUES (?, 'r1', 'deleted', 'dev-1', ?, -37.82141, 145.03318, 4,
+                   'radius68', 'WGS84', 'deliberate', 'a1', 'tampered')`,
+          ['e1', NOW],
+        ),
+      ).rejects.toThrow(/append-only/)
+
+      const rows = await db.all<{ action: string; detail: string }>(
+        'SELECT action, detail FROM event',
+      )
+      expect(rows).toEqual([{ action: 'created', detail: 'original' }])
+    })
+
+    it('leaves recursive_triggers on, which is what makes the REPLACE refusal work', async () => {
+      const pragma = await db.first<{ recursive_triggers: number }>('PRAGMA recursive_triggers')
+      expect(pragma?.recursive_triggers).toBe(1)
+    })
   })
 })
