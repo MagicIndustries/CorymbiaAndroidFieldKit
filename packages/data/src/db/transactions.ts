@@ -21,10 +21,18 @@
  * the capture button — each firing an un-awaited promise — is all it takes.
  *
  * For a filed record the UNIQUE index on (activity_id, sequence) turns that
- * race into a hard error: a lost capture wearing a raw SQLite message. For the
- * Inbox it does not, because SQLite treats NULLs as distinct in a unique index
- * — so two unfiled records could quietly take the same sequence number, on
- * precisely the path that has no activity to serialise on.
+ * race into a hard error: a lost capture wearing a raw SQLite message. The
+ * Inbox has no activity to serialise on, but it is not the silent case this
+ * used to describe: every unfiled row's `sequence` is NULL by construction
+ * (`record_sequence_tracks_activity`, migration 003), so there is no Inbox
+ * ordinal left to collide on. What two interleaved Inbox captures actually
+ * race on now is `nextCaptureNumber`'s read-then-write —
+ * `MAX(capture_number) + 1`, then INSERT — and `idx_record_capture_number` is
+ * database-wide with no NULLs in it, so that race is already a hard error too.
+ * The queue still earns its place: a lost capture is a bad outcome even
+ * wearing a raw SQLite message instead of a silent one, and turning a loud
+ * failure into no failure at all is worth doing whether or not the failure
+ * would have been silent.
  *
  * Serialising here means overlapping callers queue instead. The chain holds a
  * promise that never rejects (failures are swallowed into it, and rethrown only

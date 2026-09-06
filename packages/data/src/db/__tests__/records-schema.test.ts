@@ -57,8 +57,8 @@ async function seedActivity(db: Database): Promise<void> {
 }
 
 /** A well-formed deliberate fix: every override below is a departure from this. */
-async function insertRecord(db: Database, over: Record<string, unknown> = {}): Promise<void> {
-  const row = {
+function recordRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
     id: 'r1',
     activity_id: 'a1',
     context_activity_id: null,
@@ -93,9 +93,28 @@ async function insertRecord(db: Database, over: Record<string, unknown> = {}): P
     deleted_at: null,
     ...over,
   }
+}
+
+async function insertRecord(db: Database, over: Record<string, unknown> = {}): Promise<void> {
+  const row = recordRow(over)
   const columns = Object.keys(row)
   await db.execute(
     `INSERT INTO record (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
+    Object.values(row) as (string | number | null)[],
+  )
+}
+
+/**
+ * Same row-building as `insertRecord`, but via `INSERT OR REPLACE` — the route
+ * around a `BEFORE UPDATE` trigger that migration 003's capture-number and
+ * event-log guards both have to close separately. Used only by the
+ * `capture_number immutability` tests below.
+ */
+async function replaceRecord(db: Database, over: Record<string, unknown> = {}): Promise<void> {
+  const row = recordRow(over)
+  const columns = Object.keys(row)
+  await db.execute(
+    `INSERT OR REPLACE INTO record (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
     Object.values(row) as (string | number | null)[],
   )
 }
@@ -778,6 +797,106 @@ describe('the record schema', () => {
         ['rn11'],
       )
       expect(row?.filed_at).toBe(NOW)
+    })
+  })
+
+  describe('capture_number immutability', () => {
+    // Finding: nothing in the schema stopped `UPDATE record SET capture_number
+    // = ...`, and `INSERT OR REPLACE INTO record` against an existing id
+    // replaced the whole row — capture_number included — with no foreign-key
+    // complaint from the event rows that name it. record_capture_number_is_
+    // immutable and record_is_never_hard_deleted close both routes; these
+    // tests exercise each directly, the same way the event log's append-only
+    // triggers are tested above.
+
+    it('refuses a direct UPDATE that changes the capture number', async () => {
+      await insertRecord(db, { id: 'ci1' })
+      await expect(
+        db.execute('UPDATE record SET capture_number = ? WHERE id = ?', [999, 'ci1']),
+      ).rejects.toThrow(/capture_number is immutable/)
+      const row = await db.first<{ capture_number: number }>(
+        'SELECT capture_number FROM record WHERE id = ?',
+        ['ci1'],
+      )
+      expect(row?.capture_number).toBe(1)
+    })
+
+    it('allows an UPDATE that writes the identical capture number', async () => {
+      // fileRecord, moveRecord, refileRecord and softDeleteRecord all UPDATE
+      // the record row; several of them name capture_number in their SET list
+      // without changing it (the row is fetched and rewritten whole in some
+      // adapters' query builders), so refusing a no-op write would refuse
+      // ordinary filing along with it.
+      await insertRecord(db, { id: 'ci2' })
+      const before = await db.first<{ capture_number: number }>(
+        'SELECT capture_number FROM record WHERE id = ?',
+        ['ci2'],
+      )
+      await db.execute('UPDATE record SET capture_number = ?, title = ? WHERE id = ?', [
+        before?.capture_number ?? null,
+        'retitled',
+        'ci2',
+      ])
+      const after = await db.first<{ capture_number: number; title: string | null }>(
+        'SELECT capture_number, title FROM record WHERE id = ?',
+        ['ci2'],
+      )
+      expect(after?.capture_number).toBe(before?.capture_number)
+      expect(after?.title).toBe('retitled')
+    })
+
+    it('refuses an INSERT OR REPLACE that would rewrite an existing record’s capture number', async () => {
+      // REPLACE conflict resolution deletes the conflicting row and inserts
+      // the new one — not an UPDATE at all, so record_capture_number_is_
+      // immutable (a BEFORE UPDATE trigger) never runs on this path.
+      // record_is_never_hard_deleted (a BEFORE DELETE trigger) is what
+      // actually catches it, the same way event_is_append_only_on_delete
+      // catches the equivalent hole for the event table.
+      await insertRecord(db, { id: 'ci3', capture_number: 41 })
+      await expect(
+        replaceRecord(db, { id: 'ci3', capture_number: 999 }),
+      ).rejects.toThrow(/record rows are never hard-deleted/)
+      const row = await db.first<{ capture_number: number }>(
+        'SELECT capture_number FROM record WHERE id = ?',
+        ['ci3'],
+      )
+      expect(row?.capture_number).toBe(41)
+    })
+
+    it('leaves recursive_triggers on, which is what makes that REPLACE refusal work', async () => {
+      // Confirmed, not assumed: with the pragma OFF the same REPLACE succeeds
+      // and silently rewrites the capture number, which is exactly the
+      // failure this trigger exists to stop. This test flips the pragma
+      // itself to prove the causation rather than only reading its value.
+      await insertRecord(db, { id: 'ci4', capture_number: 42 })
+      await db.execute('PRAGMA recursive_triggers = OFF')
+      await replaceRecord(db, { id: 'ci4', capture_number: 999 })
+      const row = await db.first<{ capture_number: number }>(
+        'SELECT capture_number FROM record WHERE id = ?',
+        ['ci4'],
+      )
+      expect(row?.capture_number).toBe(999)
+    })
+
+    it('leaves the ordinary write paths alone: an UPDATE naming other columns still succeeds', async () => {
+      // fileRecord's UPDATE (activity_id, sequence, filed_at, updated_at),
+      // moveRecord's and shiftRange's (sequence, updated_at), and
+      // softDeleteRecord's (deleted_at, updated_at) never name capture_number
+      // at all, so they were never at risk from this trigger — asserted here
+      // directly against the schema rather than only through the repository
+      // tests, which is where a future change to those UPDATEs would surface
+      // as a schema-level regression first.
+      await insertRecord(db, { id: 'ci5' })
+      await db.execute(
+        'UPDATE record SET activity_id = NULL, sequence = NULL, updated_at = ? WHERE id = ?',
+        [NOW, 'ci5'],
+      )
+      const row = await db.first<{ activity_id: string | null; sequence: number | null }>(
+        'SELECT activity_id, sequence FROM record WHERE id = ?',
+        ['ci5'],
+      )
+      expect(row?.activity_id).toBeNull()
+      expect(row?.sequence).toBeNull()
     })
   })
 

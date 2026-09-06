@@ -29,8 +29,9 @@ import type { Migration } from '../db/migrate'
  *    "Pin 023" mean something in the survey she is running. A record that is
  *    not in an activity does not have one, and filing a record into the middle
  *    of an activity renumbers the records at and after that position — as does
- *    refiling one out of an activity, which closes the gap behind it — so this
- *    number is explicitly not stable.
+ *    moving it to a new position within that activity, or refiling it out of
+ *    the activity altogether, which closes the gap behind it — so this number
+ *    is explicitly not stable.
  */
 export const migration003: Migration = {
   id: '003-records',
@@ -55,6 +56,15 @@ export const migration003: Migration = {
        -- matching the thing it labels is worse than no label. NOT NULL because
        -- every record has one from the instant it exists: there is no state in
        -- which a capture has happened and this is still unknown.
+       --
+       -- "Never touched again" used to be true only by convention: nothing in
+       -- this file stopped an UPDATE naming capture_number, and INSERT OR
+       -- REPLACE INTO record against an existing id replaced the whole row,
+       -- capture_number included, with no foreign-key complaint from the event
+       -- rows that name it. record_capture_number_is_immutable and
+       -- record_is_never_hard_deleted, below the indexes, are what make the
+       -- comment true instead of aspirational — the same reasoning the event
+       -- table's two triggers already state: a comment cannot refuse an UPDATE.
        capture_number    INTEGER NOT NULL
                          CONSTRAINT record_capture_number_positive
                          CHECK (capture_number > 0),
@@ -309,6 +319,49 @@ export const migration003: Migration = {
     `CREATE INDEX idx_record_unfiled ON record(captured_at DESC)
        WHERE activity_id IS NULL AND deleted_at IS NULL`,
     `CREATE INDEX idx_record_context_activity ON record(context_activity_id, captured_at DESC)`,
+
+    // The tube label has the same standing as the event log below: a comment
+    // saying "never touched again" is not enforcement, and a reviewer confirmed
+    // against the real database that a bare `UPDATE record SET capture_number =
+    // ...` succeeds silently. These two triggers are what
+    // event_is_append_only_on_update / _on_delete are to the event table,
+    // adapted to one immutable column on a table that is otherwise mutable.
+    //
+    // record_capture_number_is_immutable only fires when the value actually
+    // changes (the WHEN clause). Without it, `fileRecord`, `moveRecord`,
+    // `refileRecord` and the soft delete would all be refused — every one of
+    // them UPDATEs the record row, and several name capture_number in their
+    // column list without changing it.
+    //
+    // That trigger alone does NOT close `INSERT OR REPLACE INTO record` against
+    // an existing id: REPLACE conflict resolution deletes the conflicting row
+    // and inserts the new one, which is not an UPDATE at all, so a trigger on
+    // UPDATE OF capture_number never runs on that path — confirmed by tracing
+    // it with better-sqlite3 directly rather than assumed, because this is
+    // exactly the kind of fix that reads as complete until someone tries the
+    // other route in. record_is_never_hard_deleted closes it instead, the same
+    // way event_is_append_only_on_delete closes the equivalent hole for the
+    // event table: it needs `recursive_triggers = ON` to fire on the row REPLACE
+    // deletes to make room, which is why every adapter that opens this database
+    // sets it (src/db/better-sqlite3.ts, src/db/expo.ts). No record is ever
+    // hard-deleted in this codebase — deletion is soft, via deleted_at — so this
+    // also turns that into a stated invariant rather than one that merely
+    // happens to hold because nothing has tried otherwise yet.
+    `CREATE TRIGGER record_capture_number_is_immutable
+       BEFORE UPDATE OF capture_number ON record
+       WHEN NEW.capture_number <> OLD.capture_number
+       BEGIN
+         SELECT RAISE(ABORT, 'capture_number is immutable: it is the label written on a ' ||
+                              'sample tube, assigned once at capture and never reassigned');
+       END`,
+    `CREATE TRIGGER record_is_never_hard_deleted
+       BEFORE DELETE ON record
+       BEGIN
+         SELECT RAISE(ABORT, 'record rows are never hard-deleted: deletion is soft, via ' ||
+                              'deleted_at, which is also what keeps INSERT OR REPLACE from ' ||
+                              'rewriting an existing record — including its capture_number — ' ||
+                              'by deleting the row out from under its id');
+       END`,
 
     `CREATE TABLE event (
        id            TEXT PRIMARY KEY,

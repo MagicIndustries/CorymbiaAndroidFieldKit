@@ -587,6 +587,45 @@ async function placementOf(db: Database, id: string, verb: string): Promise<Plac
 }
 
 /**
+ * Refuses a filing or refiling destination that cannot actually receive a
+ * record: one that does not exist, or one that has been soft-deleted.
+ *
+ * Without this, `fileRecord` and `refileRecord` passed `activityId` straight
+ * through to the `UPDATE`. A nonexistent id failed on the foreign key with a
+ * raw `FOREIGN KEY constraint failed` — the one refusal in this file that did
+ * not say what to do instead. A soft-deleted activity was worse: it satisfies
+ * the foreign key (the row still exists; only `deleted_at` is set), so the
+ * record was filed successfully and then vanished from every list that
+ * filters deleted activities. There is no route back — `refileRecord` refuses
+ * an Inbox record, `fileRecord` refuses one already filed, there is no
+ * un-file operation, and `record_filed_at_needs_activity` blocks clearing
+ * `activity_id` by hand — so a record filed into a dead activity was stuck
+ * there permanently.
+ *
+ * Called before either function reads `maxSequence` or writes anything, so a
+ * bad destination is refused before the record's own placement — or the
+ * destination's numbering — has been touched at all.
+ */
+async function requireLiveActivity(db: Database, activityId: string, verb: string): Promise<void> {
+  const row = await db.first<{ deleted_at: string | null }>(
+    'SELECT deleted_at FROM activity WHERE id = ?',
+    [activityId],
+  )
+  if (!row) {
+    throw new Error(
+      `Activity ${activityId} does not exist, so there is no activity to ${verb} a record into.`,
+    )
+  }
+  if (row.deleted_at !== null) {
+    throw new Error(
+      `Activity ${activityId} has been deleted, so a record cannot be ${verb}d into it. A ` +
+        'record filed there would drop out of every list that filters deleted activities, ' +
+        'with no way back: there is no un-file operation.',
+    )
+  }
+}
+
+/**
  * Checks a requested 1-based position, and says what the range is when it is wrong.
  *
  * Positions are 1-based because they are the numbers she reads on screen —
@@ -671,6 +710,13 @@ async function shiftRange(
  * a record id that has since been filed would then quietly refile it instead of
  * reporting that the world moved on.
  *
+ * Also refuses a destination activity that does not exist, or that has been
+ * soft-deleted — see `requireLiveActivity` — before any write. A nonexistent
+ * id used to fail on the foreign key with a raw, unexplained message; a
+ * soft-deleted one used to succeed silently, filing the record into an
+ * activity every list filters out, with no way back: there is no un-file
+ * operation.
+ *
  * `fix` stamps the filing event with where it happened, the way creation and
  * deletion are stamped (spec §8.5), and is optional for the same reason: bulk
  * filing from the Inbox list has no single position to report.
@@ -695,6 +741,7 @@ export async function fileRecord(
           'move it into a different one.',
       )
     }
+    await requireLiveActivity(db, input.activityId, 'file')
 
     const highest = await maxSequence(db, input.activityId)
     // Appending is position `highest + 1`, which is why the bound here is one
@@ -865,6 +912,12 @@ export async function moveRecord(
  * to invent a meaning for the appending default, silently reordering an
  * activity that nobody asked to reorder.
  *
+ * A destination that does not exist, or that has been soft-deleted, is also
+ * refused, before any write — see `requireLiveActivity`. A missing id used to
+ * fail on the foreign key with a raw, unexplained message; a soft-deleted one
+ * used to succeed silently and strand the record where no list would ever
+ * show it again.
+ *
  * Logged as `'filed'`: the record did reach an activity, and `filed_at` moves
  * with it. The event's `activity_id` is the destination, so `detail` carries
  * the source activity and the ordinal it held there — a log entry that cannot
@@ -900,6 +953,7 @@ export async function refileRecord(
           'reorder is and what refiling is not.',
       )
     }
+    await requireLiveActivity(db, input.activityId, 'refile')
 
     const sourceHighest = await maxSequence(db, sourceActivityId)
     const targetHighest = await maxSequence(db, input.activityId)

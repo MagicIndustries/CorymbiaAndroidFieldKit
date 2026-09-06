@@ -320,6 +320,30 @@ in **now**: refiling overwrites it, because a record does not arrive in its new 
 capture either, and a `filed` entry that names the activity it came from is what makes the
 move auditable. Reordering within one activity leaves it alone.
 
+**Renumbering writes no event per shifted record.** Filing, reordering and refiling all move
+other records' `sequence` values as a side effect of placing one record — the "shifted
+record" cost of every insertion described above. None of that shifting is logged. The record
+that was actually filed, moved or refiled gets its one event; the records that merely had
+their ordinal bumped to make room do not. This is deliberate, not an oversight: the capture
+number is what stays stable, and an event for every shifted row would flood the log with an
+entry per insertion into a busy survey, for a fact (the new ordinal) that is already visible
+by re-reading the record. §8.5 makes the event log the chain of custody for what happened to
+*this* record; a row's ordinal changing because a different record moved past it is not
+something that happened to it in that sense.
+
+**Activity ordinals are contiguous by construction, and that is a repository invariant, not
+a schema one.** Every operation that touches `sequence` — filing, moving, refiling — leaves
+an activity numbered 1, 2, 3 with no gap, but nothing in migration 003 requires this:
+`idx_record_sequence` and `record_sequence_positive` would equally accept an activity
+numbered 1, 2, 5. The schema enforces uniqueness and positivity; contiguity is upheld only by
+the three functions always shifting the records between a change and the end of the activity,
+never leaving a hole open. If a gap ever appeared — a bug, a restored backup, a sync conflict
+not yet designed — the current operations would only partly repair it: each of the three
+closes exactly the gap it might otherwise open at the position it touches (`fileRecord`'s
+insertion point, `moveRecord`'s departure and arrival, `refileRecord`'s departure from the
+source), but none of them scans an activity end to end looking for a gap sitting elsewhere in
+it. A repair pass is a follow-up, not yet built.
+
 **Trade-off accepted.** Two numbers is more to explain than one, and a screen showing both
 would be confusing. The alternative was worse: one number cannot be both immutable enough to
 write on a tube and re-orderable enough to mean "the 23rd pin in this survey", and the single

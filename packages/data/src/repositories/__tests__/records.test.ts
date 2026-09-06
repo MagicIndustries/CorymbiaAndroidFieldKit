@@ -626,6 +626,17 @@ describe('filing, reordering and refiling', () => {
   const inboxCapture = async (): Promise<string> =>
     (await createRecord(db, { activityId: null, kind: 'pin', fix: AMBIENT, deviceId })).id
 
+  // No repository function soft-deletes an activity yet, so the destination-
+  // guard tests below set the column directly, the same way
+  // records-schema.test.ts reaches for raw SQL wherever the repository API
+  // has no way to build the state a rule needs to be tested against.
+  const softDeleteActivity = async (id: string): Promise<void> => {
+    await db.execute('UPDATE activity SET deleted_at = ? WHERE id = ?', [
+      new Date().toISOString(),
+      id,
+    ])
+  }
+
   it('appends to the end of an activity when no position is asked for', async () => {
     const first = await capture()
     const second = await capture()
@@ -741,6 +752,28 @@ describe('filing, reordering and refiling', () => {
     await expect(fileRecord(db, { recordId: unfiled, activityId, deviceId })).rejects.toThrow(
       /has been deleted/,
     )
+  })
+
+  it('refuses to file into an activity that does not exist, or one that has been deleted', async () => {
+    // A missing id used to fail on the foreign key with a raw, unexplained
+    // message; a soft-deleted one used to succeed silently and strand the
+    // record where no list would ever show it again — there is no un-file
+    // operation to recover it with.
+    const unfiled = await inboxCapture()
+    await expect(
+      fileRecord(db, { recordId: unfiled, activityId: 'act_missing', deviceId }),
+    ).rejects.toThrow(/act_missing does not exist/)
+    expect((await getRecord(db, unfiled))?.activityId).toBeNull()
+
+    await softDeleteActivity(otherActivityId)
+    await expect(
+      fileRecord(db, { recordId: unfiled, activityId: otherActivityId, deviceId }),
+    ).rejects.toThrow(/has been deleted/)
+
+    // Refused before any write: the record is still unfiled and its log is
+    // still just the capture.
+    expect((await getRecord(db, unfiled))?.activityId).toBeNull()
+    expect((await listEvents(db, unfiled)).map((e) => e.action)).toEqual(['created'])
   })
 
   it('refuses a position past the end of the activity, and leaves nothing half-done', async () => {
@@ -1067,6 +1100,31 @@ describe('filing, reordering and refiling', () => {
     await expect(
       refileRecord(db, { recordId: deleted, activityId: otherActivityId, deviceId }),
     ).rejects.toThrow(/has been deleted/)
+  })
+
+  it('refuses to refile into an activity that does not exist, or one that has been deleted', async () => {
+    // Same failure as fileRecord's: a missing destination used to raise a raw
+    // FOREIGN KEY error, and a soft-deleted one used to succeed silently,
+    // stranding the record in an activity every list filters out.
+    const a1 = await capture()
+    const a2 = await capture()
+    await expect(
+      refileRecord(db, { recordId: a2, activityId: 'act_missing', deviceId }),
+    ).rejects.toThrow(/act_missing does not exist/)
+
+    await softDeleteActivity(otherActivityId)
+    await expect(
+      refileRecord(db, { recordId: a2, activityId: otherActivityId, deviceId }),
+    ).rejects.toThrow(/has been deleted/)
+
+    // Refused before any write: both the record and the source activity's
+    // numbering are exactly as they were.
+    expect(await placements(activityId)).toEqual([
+      { id: a1, sequence: 1 },
+      { id: a2, sequence: 2 },
+    ])
+    expect((await getRecord(db, a2))?.activityId).toBe(activityId)
+    expect((await listEvents(db, a2)).map((e) => e.action)).toEqual(['created'])
   })
 
   it('refuses a position past the end of the destination, leaving both activities untouched', async () => {
