@@ -64,11 +64,33 @@ const PACKAGE_ROOT = path.resolve(__dirname, '..', '..')
 const ENTRY_POINT = path.join(PACKAGE_ROOT, 'src', 'index.ts')
 const WORKSPACE_SCOPE = '@corymbia/'
 
+/**
+ * A module that is everything the walker is supposed to catch, walked directly
+ * rather than through the barrel. See the canary describe block at the bottom.
+ */
+const CANARY_FIXTURE = path.join(__dirname, 'fixtures', 'node-shaped.ts.fixture')
+const CANARY_IMPORTER = path.relative(PACKAGE_ROOT, CANARY_FIXTURE)
+
 /** Every Node built-in, in both spellings Metro would have to fail on. */
 const NODE_BUILTINS = new Set<string>([
   ...builtinModules,
   ...builtinModules.map((name) => `node:${name}`),
 ])
+
+/**
+ * Native modules that are legal in Node and fatal in a React Native bundle for
+ * the same reason a built-in is: Metro cannot resolve them on device.
+ *
+ * The same seam as `@corymbia/data`'s, which added it because its barrel
+ * deliberately withholds `openTestDatabase` to keep `better-sqlite3` out of
+ * the bundle. This package does not depend on that module today — but the
+ * walk crosses workspace packages, and a package that will grow export and
+ * media code has the same appetite for a native module as its sibling did.
+ * The two walkers are duplicated deliberately (see the header) and they are
+ * kept in step deliberately too: a gap in one of them is a gap the other has
+ * already learned about.
+ */
+const NODE_ONLY_PACKAGES = new Set<string>(['better-sqlite3'])
 
 /** Where a specifier was found, so a failure names the file to open. */
 interface Reference {
@@ -413,7 +435,67 @@ describe("the public entry point's import graph", () => {
     expect(offenders.map(describeReference)).toEqual([])
   })
 
+  it('contains no Node-only native package, for the same reason', () => {
+    const offenders = walk.external.filter(({ specifier }) => NODE_ONLY_PACKAGES.has(specifier))
+    expect(offenders.map(describeReference)).toEqual([])
+  })
+
   it('contains no reachable Node-only global — Buffer, __dirname, __filename, require(), or any process.<member> other than process.env', () => {
     expect(walk.globals.map(describeGlobalHit)).toEqual([])
+  })
+})
+
+/**
+ * The positive canary.
+ *
+ * Every assertion above is of the form "this list is empty", and a list is
+ * empty for two reasons: nothing offended, or the detector never produces a
+ * hit at all. Break `emittedSpecifiers` so it returns `[]`, or
+ * `nodeGlobalReferences` so it returns `[]`, and the entire guard above stays
+ * green while catching nothing — which is exactly the failure the guard exists
+ * to prevent in the code it watches.
+ *
+ * So the walker is pointed at a fixture that genuinely contains every banned
+ * thing, and each detector is required to report it. The fixture is a real
+ * file (`fixtures/node-shaped.ts.fixture`) rather than a mutation of real
+ * source, so nothing shipped has to be broken to prove the detector works, and
+ * the fixture's extension keeps it out of `tsc`, ESLint and `testMatch`.
+ */
+describe('the walker itself, against a module that is everything it forbids', () => {
+  const canary = walkFrom(CANARY_FIXTURE)
+
+  it('reports the Node built-ins the fixture imports, in both syntactic forms', () => {
+    // `import fs from 'node:fs'` and a bare `require('node:path')` call — a
+    // specifier walk that handled only import declarations would miss the
+    // second.
+    const offenders = canary.external.filter(({ specifier }) => NODE_BUILTINS.has(specifier))
+    expect(offenders.map(describeReference).sort()).toEqual([
+      `${CANARY_IMPORTER} imports 'node:fs'`,
+      `${CANARY_IMPORTER} imports 'node:path'`,
+    ])
+  })
+
+  it('reports the Node-only native package the fixture imports', () => {
+    const offenders = canary.external.filter(({ specifier }) => NODE_ONLY_PACKAGES.has(specifier))
+    expect(offenders.map(describeReference)).toEqual([
+      `${CANARY_IMPORTER} imports 'better-sqlite3'`,
+    ])
+  })
+
+  it('reports every Node-only global the fixture reaches with no import at all', () => {
+    expect(canary.globals.map(describeGlobalHit).sort()).toEqual(
+      [
+        `${CANARY_IMPORTER} references Buffer`,
+        `${CANARY_IMPORTER} references __dirname`,
+        `${CANARY_IMPORTER} references __filename`,
+        `${CANARY_IMPORTER} references process.cwd`,
+        `${CANARY_IMPORTER} references require(...)`,
+      ].sort(),
+    )
+  })
+
+  it('reaches the fixture itself, so the three assertions above are about a file it actually read', () => {
+    expect(canary.files).toEqual([CANARY_IMPORTER])
+    expect(canary.unresolved).toEqual([])
   })
 })

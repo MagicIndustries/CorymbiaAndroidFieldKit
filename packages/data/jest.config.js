@@ -31,7 +31,15 @@ module.exports = {
   //
   // Do not raise it toward a "reasonable-sounding" size like 512MB. That is not
   // a judgement call any more: with the setup hook above running in every file,
-  // raising it to 512MB fails 2 of 11 test files on every single run, naming
-  // this setting in the message. Verified by doing exactly that.
+  // raising it to 512MB fails test files on every single run, naming this
+  // setting in the message. Verified by doing exactly that, when this package
+  // had 11 test files and 2 of them went red; it has 16 now, and more files
+  // means more chances for the scheduler to double one up on a worker, not
+  // fewer.
+  //
+  // Both this line and `setupFilesAfterEnv` above are asserted by
+  // src/__tests__/jest-config.test.ts, because deleting either one leaves the
+  // entire suite green with constraint enforcement unproven — the defence has
+  // to defend itself.
   workerIdleMemoryLimit: '1MB',
 }

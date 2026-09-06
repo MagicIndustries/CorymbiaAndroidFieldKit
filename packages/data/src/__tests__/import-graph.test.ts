@@ -58,6 +58,13 @@ const PACKAGE_ROOT = path.resolve(__dirname, '..', '..')
 const ENTRY_POINT = path.join(PACKAGE_ROOT, 'src', 'index.ts')
 const WORKSPACE_SCOPE = '@corymbia/'
 
+/**
+ * A module that is everything the walker is supposed to catch, walked directly
+ * rather than through the barrel. See the canary describe block at the bottom.
+ */
+const CANARY_FIXTURE = path.join(__dirname, 'fixtures', 'node-shaped.ts.fixture')
+const CANARY_IMPORTER = path.relative(PACKAGE_ROOT, CANARY_FIXTURE)
+
 /** Every Node built-in, in both spellings Metro would have to fail on. */
 const NODE_BUILTINS = new Set<string>([
   ...builtinModules,
@@ -401,6 +408,14 @@ describe("the public entry point's import graph", () => {
       ]),
     )
     expect(walk.unresolved).toEqual([])
+    // `src/db/port.ts` declares only types, so every import of it — including
+    // the barrel's own `export type { Database, SqlValue } from './db/port'` —
+    // is type-only and erased before Metro would ever see it. It is correctly
+    // NOT in walk.files: that is the walker proving it tells value imports
+    // apart from type-only ones, not a gap in what it reaches. (The sibling
+    // geo walker has carried this canary since it was written; this package,
+    // equally positioned to need it, did not.)
+    expect(walk.files).not.toContain(path.join('src', 'db', 'port.ts'))
   })
 
   it('does not reach this test file, so its own node: imports are not what it is measuring', () => {
@@ -419,5 +434,60 @@ describe("the public entry point's import graph", () => {
 
   it('contains no reachable Node-only global — Buffer, __dirname, __filename, require(), or any process.<member> other than process.env', () => {
     expect(walk.globals.map(describeGlobalHit)).toEqual([])
+  })
+})
+
+/**
+ * The positive canary.
+ *
+ * Every assertion above is of the form "this list is empty", and a list is
+ * empty for two reasons: nothing offended, or the detector never produces a
+ * hit at all. Break `emittedSpecifiers` so it returns `[]`, or
+ * `nodeGlobalReferences` so it returns `[]`, and the entire guard above stays
+ * green while catching nothing — which is exactly the failure the guard exists
+ * to prevent in the code it watches.
+ *
+ * So the walker is pointed at a fixture that genuinely contains every banned
+ * thing, and each detector is required to report it. The fixture is a real
+ * file (`fixtures/node-shaped.ts.fixture`) rather than a mutation of real
+ * source, so nothing shipped has to be broken to prove the detector works, and
+ * the fixture's extension keeps it out of `tsc`, ESLint and `testMatch`.
+ */
+describe('the walker itself, against a module that is everything it forbids', () => {
+  const canary = walkFrom(CANARY_FIXTURE)
+
+  it('reports the Node built-ins the fixture imports, in both syntactic forms', () => {
+    // `import fs from 'node:fs'` and a bare `require('node:path')` call — a
+    // specifier walk that handled only import declarations would miss the
+    // second.
+    const offenders = canary.external.filter(({ specifier }) => NODE_BUILTINS.has(specifier))
+    expect(offenders.map(describeReference).sort()).toEqual([
+      `${CANARY_IMPORTER} imports 'node:fs'`,
+      `${CANARY_IMPORTER} imports 'node:path'`,
+    ])
+  })
+
+  it('reports the Node-only native package the fixture imports', () => {
+    const offenders = canary.external.filter(({ specifier }) => NODE_ONLY_PACKAGES.has(specifier))
+    expect(offenders.map(describeReference)).toEqual([
+      `${CANARY_IMPORTER} imports 'better-sqlite3'`,
+    ])
+  })
+
+  it('reports every Node-only global the fixture reaches with no import at all', () => {
+    expect(canary.globals.map(describeGlobalHit).sort()).toEqual(
+      [
+        `${CANARY_IMPORTER} references Buffer`,
+        `${CANARY_IMPORTER} references __dirname`,
+        `${CANARY_IMPORTER} references __filename`,
+        `${CANARY_IMPORTER} references process.cwd`,
+        `${CANARY_IMPORTER} references require(...)`,
+      ].sort(),
+    )
+  })
+
+  it('reaches the fixture itself, so the three assertions above are about a file it actually read', () => {
+    expect(canary.files).toEqual([CANARY_IMPORTER])
+    expect(canary.unresolved).toEqual([])
   })
 })
