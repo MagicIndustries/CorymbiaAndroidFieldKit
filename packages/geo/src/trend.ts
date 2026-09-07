@@ -40,10 +40,15 @@ export type HoldVerdict = 'improving' | 'plateaued'
  * ```
  *
  * The curve is flat from about ten seconds. Sixty seconds was no better than
- * twenty and worse than the best twenty, because `averageReadings` floors the
- * reported accuracy at a third of the best single reading: once enough samples
- * have accumulated the floor binds (at n=13 in the run above) and further
- * samples are inert — only a better individual reading moves the number.
+ * twenty — the 60 s run measured ±1.1 m, inside the ±1.0–1.4 m spread the
+ * 20 s runs themselves span — because `averageReadings` floors the reported
+ * accuracy at a third of the best single reading: once enough samples have
+ * accumulated the floor binds (at n=13 in the run above) and further samples
+ * are inert — only a better individual reading moves the number.
+ *
+ * All of this is one device, one site, one session under clear sky. Treat it
+ * as a starting point for this hardware, not as a claim about Android GPS
+ * receivers in general.
  */
 
 /**
@@ -73,10 +78,10 @@ const MIN_SAMPLES = 10
  * Pinned by the measured run. The averaged accuracy improves across a
  * trailing window of four by 0.775 m at n=10, 0.640 m at n=11, 0.549 m at
  * n=12, 0.444 m at n=13, and less thereafter. Against the threshold below that
- * puts the first plateau at n=12, ~11 s after the tap — which is where the
- * stored records say the wait stops paying. A window of three would put it at
- * n=10 and a window of five at n=14, so four is not interchangeable with its
- * neighbours; `trend.test.ts` asserts the n=12 crossing directly.
+ * puts the first plateau at n=13, ~12 s after the tap — inside the flat part
+ * of the stored-record curve. A window of three would put it at n=11 and a
+ * window of five at n=15, so four is not interchangeable with its neighbours;
+ * `trend.test.ts` asserts the n=13 crossing directly.
  */
 const WINDOW = 4
 
@@ -84,18 +89,22 @@ const WINDOW = 4
  * How much the averaged accuracy must improve across that window for holding
  * to still be buying something, in metres.
  *
- * **Bracketed by the measurement, not chosen for feel.** The window
- * improvements above fall through 0.640 m at n=11 and 0.549 m at n=12, and the
- * stored records put the flattening at n≈12 (±1.2 m there, and ±1.3 / ±1.0–1.4
- * / ±1.1 m at n=16, 21 and 61 — no better). Any threshold in the open bracket
- * (0.549, 0.640] therefore flips the verdict exactly where the hardware flattens.
- * 0.6 m is the middle of that bracket ((0.549 + 0.640) / 2 = 0.594), so it is
- * the value furthest from either neighbouring measurement.
+ * **Bracketed by the measurement, not chosen for feel — and not chosen to
+ * land on any particular sample count either.** The window improvements above
+ * fall through 0.549 m at n=12 and 0.444 m at n=13. Any threshold in the open
+ * bracket (0.444, 0.549] crosses at the same point on this run, n=13; its
+ * midpoint is (0.444 + 0.549) / 2 = 0.4965, which rounds to **0.5 m** — the
+ * value furthest from either neighbouring measurement, and so the most
+ * tolerant of noise in both directions. Nothing about the countdown length
+ * enters this: the bracket comes entirely from where the measured curve
+ * itself bends.
  *
- * Sanity check on the scale: 0.6 m across 4 s is 0.15 m/s, and the same run
- * improved by only 0.33 m over the nine seconds from n=12 to n=21 (0.037 m/s).
+ * Sanity check on the scale: 0.5 m across 4 s is 0.125 m/s, and the same run
+ * improved by only 0.267 m over the eight seconds from n=13 to n=21
+ * (0.033 m/s) — the tail is comfortably inside "plateaued", not sitting on
+ * the boundary.
  */
-const MEANINGFUL_IMPROVEMENT_M = 0.6
+const MEANINGFUL_IMPROVEMENT_M = 0.5
 
 /**
  * What `averageReadings` reported at each prefix of the hold — entry `i` is

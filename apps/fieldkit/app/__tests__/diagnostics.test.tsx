@@ -462,7 +462,7 @@ describe('the capture control', () => {
     await emitReadings([6, 6, 6, 6, 6, 6, 6, 6, 6])
     await settle()
 
-    // Finished by itself, inside the 12 s countdown, and exactly once.
+    // Finished by itself, inside the 15 s countdown, and exactly once.
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('capture-state')).toHaveTextContent('POINT #1 RECORDED')
     expect(screen.getByText(/The fix stopped improving, so the countdown finished itself\./)).toBeTruthy()

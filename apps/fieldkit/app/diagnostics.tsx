@@ -314,8 +314,19 @@ function formatDegrees(value: number): string {
 /**
  * The countdown lengths the screen offers, and the one it starts on.
  *
- * The default is no longer a placeholder. It comes from stored records taken
- * on a Samsung S25 outdoors, each row a real capture:
+ * **The default is a cap, not an expected duration.** Auto-finish (see
+ * `autoFinish` below) is the normal way a countdown ends: it fires once
+ * `holdVerdict` reports a plateau, which on the measured Samsung S25 run is
+ * about 12 s after the tap. The countdown length is the safety net for a run
+ * where the signal never settles — a poor sky, a receiver that never
+ * converges — not a duration the wait is expected to run for. Auto-finish and
+ * the countdown length are deliberately not tuned against each other: the
+ * threshold in `packages/geo/src/trend.ts` is chosen from where the measured
+ * data itself bends, and this cap is chosen generously so it is almost never
+ * the thing that ends a capture.
+ *
+ * Stored records taken on that same device, outdoors, each row a real
+ * capture:
  *
  * ```
  *  ~4 s  n=5   ±1.6 m
@@ -323,30 +334,38 @@ function formatDegrees(value: number): string {
  * ~11 s  n=12  ±1.2 m
  * ~15 s  n=16  ±1.3 m
  *  20 s  n=21  ±1.0 to ±1.4 m across several runs
- *  60 s  n=61  ±1.1 m, spread ±1.3 m
+ *  60 s  n=61  ±1.1 m
  * ```
  *
- * The curve is flat from about ten seconds: 60 s was no better than 20 s and
- * worse than the best 20 s, and 15 s was no better than 11 s. **Twelve seconds
- * is where the measured improvement stops**, so it is the default — and a
- * longer wait is not merely wasted, it is worse, because the spread grows with
- * the time spent standing still (±0.3 m at 20 s against ±1.3 m at 60 s) and
- * the spread is the honesty check on the whole fix.
+ * The curve is flat from about ten seconds: 60 s was no better than 20 s —
+ * ±1.1 m sits inside the ±1.0–1.4 m the 20 s runs themselves span — and 15 s
+ * was no better than 11 s. Run-to-run variance at a fixed duration is the
+ * dominant effect here: two 20 s captures in the same session gave ±1.0 m and
+ * ±2.8 m, a wider gap than any duration comparison above. Waiting longer
+ * cannot rescue a fix that conditions and satellite geometry have already
+ * settled, which is itself the case for a short cap rather than a long one.
  *
- * The other choices stay so the finding can be re-measured rather than taken
- * on trust —
+ * All of this is one device, one site, one session under clear sky — a
+ * starting point for this hardware, not an established property of Android
+ * GPS.
+ *
+ * The choices stay so the finding can be re-measured rather than taken on
+ * trust —
  *
  *  - **5 s** is the short wait the records say is measurably worse (n=5,
  *    ±1.6 m). It is the control.
- *  - **12 s** is the default, from the measurement above.
+ *  - **15 s** is the default: generous enough that auto-finish, not the
+ *    timer, ends almost every capture on this hardware, while still being a
+ *    wait she will tolerate if the signal never settles.
  *  - **20 s** is what the default used to be, kept so the comparison that
- *    settled it can be run again on other hardware and in other sky.
+ *    motivated this rework can be run again on other hardware and in other
+ *    sky.
  *  - **30 s** and **60 s** are longer than anyone would want. They establish
- *    what the receiver reaches at all, and 60 s is where the spread was
- *    measured growing.
+ *    what the receiver reaches at all, and give further data for the
+ *    run-to-run variance question.
  */
-const COUNTDOWN_CHOICES = [5, 12, 20, 30, 60] as const
-const DEFAULT_COUNTDOWN_S = 12
+const COUNTDOWN_CHOICES = [5, 15, 20, 30, 60] as const
+const DEFAULT_COUNTDOWN_S = 15
 
 /** How often the countdown readout re-renders. Four times a second reads as smooth without busying the thread. */
 const TICK_MS = 250
@@ -869,12 +888,15 @@ function DiagnosticsBody(props: BodyProps) {
    * and waiting reaches ±1.4 m. It now cannot claim a plateau before ten
    * samples, judges the averaged accuracy rather than each reading's own noisy
    * estimate, and never takes a verdict back. On that hardware the first
-   * plateau lands at n=12, about 11 s after the tap.
+   * plateau lands at n=13, about 12 s after the tap.
    *
    * That is the point of switching it on: a capture that ends itself when the
    * fix stops improving means she waits as long as the fix needs and no
    * longer, instead of standing in a paddock waiting out a timer for nothing.
-   * The override stays live for every moment of a countdown either way.
+   * Auto-finish is the normal way a countdown ends; the countdown length
+   * (`DEFAULT_COUNTDOWN_S` above) is a generous cap for the runs where it
+   * does not fire. The override stays live for every moment of a countdown
+   * either way.
    *
    * Deliberately screen state rather than a stored setting: it is a property of
    * a diagnostic session, not a preference, and persisting it would let a
@@ -2108,8 +2130,10 @@ function DiagnosticsBody(props: BodyProps) {
 
           Why it is on now: the signal judges the averaged accuracy, cannot
           claim a plateau before ten samples, and never takes a verdict back. On
-          that hardware it first fires at n=12, about 11 s after the tap, which
-          is where the stored records say the wait stops paying.
+          that hardware it first fires at n=13, about 12 s after the tap, which
+          is inside the flat part of the stored-record curve. This is the normal
+          way a capture ends; the countdown length is a cap for the runs where
+          the signal never settles, not a duration tuned to match it.
 
           The switch stays, so a fixed full-length wait can still be measured
           against a self-finishing one. Locked while a capture is running for
@@ -2120,8 +2144,10 @@ function DiagnosticsBody(props: BodyProps) {
           The refinement can end itself the moment the fix stops improving. On by default: the
           plateau signal is judged on the averaged accuracy — the number actually stored — and
           cannot fire before ten readings have accumulated, so it no longer cuts a countdown short
-          in the middle of real improvement. On a Samsung S25 outdoors it first fires about 11 s
-          after the tap. Switch it off to make every countdown run its full length.
+          in the middle of real improvement. On a Samsung S25 outdoors it first fires about 12 s
+          after the tap — this is the normal way a capture ends; the countdown length below is a
+          cap for a run where it never fires. Switch it off to make every countdown run its full
+          length.
         </Type>
         <View style={{ height: spacing.xs }} />
         <Button

@@ -102,20 +102,22 @@ describe('holdVerdict on the measured hardware run', () => {
     expect(sequence.slice(crossing).every((v) => v === 'plateaued')).toBe(true)
   })
 
-  it('crosses at n=12, which is where the stored records say the wait stops paying', () => {
-    // This pins WINDOW and MEANINGFUL_IMPROVEMENT_M together against the
-    // hardware. The averaged accuracy improves across a trailing window of
-    // four by 0.775 m at n=10, 0.640 m at n=11, 0.549 m at n=12 and 0.444 m at
-    // n=13, so the 0.6 m threshold flips the verdict at exactly n=12 — about
-    // 11 s after the tap, and the stored records from this session (±1.2 m at
-    // n=12, ±1.3 m at n=16, ±1.0–1.4 m at n=21, ±1.1 m at n=61) say nothing
-    // further is bought after that.
+  it('crosses at n=13, inside the flat part of the stored-record curve', () => {
+    // This pins WINDOW and MEANINGFUL_IMPROVEMENT_M against the hardware, with
+    // the threshold chosen from the window-improvement bracket alone — not
+    // fitted to any particular sample count or countdown length. The averaged
+    // accuracy improves across a trailing window of four by 0.775 m at n=10,
+    // 0.640 m at n=11, 0.549 m at n=12 and 0.444 m at n=13, so the 0.5 m
+    // threshold flips the verdict at exactly n=13 — about 12 s after the tap.
+    // The stored records from this session (±1.2 m at n=12, ±1.3 m at n=16,
+    // ±1.0–1.4 m at n=21, ±1.1 m at n=61) say nothing further is bought once
+    // it does.
     //
     // Neither neighbouring window agrees: with WINDOW=3 this run first
-    // plateaus at n=10, and with WINDOW=5 at n=14. Neither neighbouring
-    // threshold agrees either — anything at or below 0.549 m crosses later,
-    // anything above 0.640 m crosses earlier.
-    expect(firstPlateau(MEASURED_RUN)).toBe(12)
+    // plateaus at n=11, and with WINDOW=5 at n=15. Neither neighbouring
+    // threshold agrees either — anything at or below 0.444 m crosses later,
+    // anything above 0.549 m crosses earlier.
+    expect(firstPlateau(MEASURED_RUN)).toBe(13)
   })
 })
 
