@@ -1,5 +1,5 @@
 import { act, renderHook } from '@testing-library/react-native'
-import { createFakeLocationSource, holdVerdict, type Reading } from '@corymbia/geo'
+import { averageReadings, createFakeLocationSource, holdVerdict, type Reading } from '@corymbia/geo'
 import type { Database, Device, FieldRecord, Fix } from '@corymbia/data'
 
 /**
@@ -510,10 +510,152 @@ describe('useCapture', () => {
     )
     expect(result.current.message).not.toBeNull()
 
-    // And the countdown still gives it one.
+    // And the countdown still gives it one — the claim this test's name
+    // makes, not just that some refinement happened.
     await emitFlat(3, 5)
     await advanceCaps(1)
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledWith(
+      testDb,
+      expect.objectContaining({ fix: expect.objectContaining({ quality: 'deliberate' }) }),
+    )
     expect(result.current.phase).toBe('recorded')
+  })
+
+  it('refuses to store a position when the platform never reported whether it is mocked', async () => {
+    // A fix that cannot show it was not spoofed is not evidence (spec §7.5).
+    // `isMocked: undefined` is the platform declining to say — distinct from
+    // `false`, which every other reading in this file sets explicitly — and
+    // `buildDeliberateFix` refuses to store a position for it rather than
+    // defaulting the unreported flag to "clean". The tap still writes a real
+    // row, per doctrine rule 4: `'none'`, with the reason in its detail.
+    const { result } = await mountCapture()
+
+    await act(async () => {
+      jest.advanceTimersByTime(1000)
+      source.emit({
+        latitude: -37.8136,
+        longitude: 144.9631,
+        accuracyM: 6,
+        altitudeM: 31,
+        verticalAccuracyM: 4,
+        isMocked: undefined,
+        timestampMs: Date.now(),
+      })
+    })
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    expect(mockRepo.createRecord).toHaveBeenCalledWith(
+      testDb,
+      expect.objectContaining({ fix: { quality: 'none' } }),
+    )
+    expect(mockRepo.createRecord).toHaveBeenCalledWith(
+      testDb,
+      expect.objectContaining({ detail: expect.stringContaining('never reported whether') }),
+    )
+    expect(result.current.phase).toBe('acquiring')
+  })
+
+  it('reports a message and stays capturable when the fix builder throws synchronously', async () => {
+    // `buildDeliberateFix` is not a pure numeric transform: `nowIso` runs
+    // `Date#toISOString` on the last sample's timestamp, which raises a
+    // synchronous `RangeError` when the platform hands back a timestamp
+    // outside the range `Date` can represent — a misbehaving provider, not a
+    // hypothetical. Un-guarded, this is exactly the throw that used to leave
+    // `writeInFlight` claimed forever: the first assertion below is the
+    // symptom (no message, capture silently does nothing); the second is the
+    // one that actually matters, and the one that failed before this fix.
+    const { result } = await mountCapture()
+    await act(async () => {
+      jest.advanceTimersByTime(1000)
+      source.emit(reading(6, 8.65e15))
+    })
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).not.toHaveBeenCalled()
+    expect(result.current.message).toContain('Invalid time value')
+    expect(result.current.phase).toBe('ready')
+
+    // The claim must have been released: a second, ordinary tap has to work,
+    // not be silently refused for the rest of the session.
+    await emit(6)
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    expect(result.current.phase).toBe('acquiring')
+  })
+
+  it('reports a positive improvedByM once the countdown sharpens the fix', async () => {
+    const { result } = await mountCapture()
+    // A mediocre tap reading, then three much better ones, all at the same
+    // position — so `averageReadings`' answer depends only on the accuracies,
+    // the thing this test is about.
+    await emit(12)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    await emitFlat(3, 2)
+    await settle()
+
+    // `averageReadings` is not mocked in this file — it is the logic under
+    // observation — so the expectation is computed the same way the hook
+    // computes its preview, against the real function and the exact samples
+    // the hook itself accumulated, rather than a value picked by hand.
+    const expectedAccuracyM = averageReadings([
+      reading(12, START_MS + 1000),
+      reading(2, START_MS + 2000),
+      reading(2, START_MS + 3000),
+      reading(2, START_MS + 4000),
+    ]).accuracyM
+    expect(result.current.preview).not.toBeNull()
+    expect(result.current.preview?.sampleCount).toBe(4)
+    expect(result.current.preview?.improvedByM).toBeCloseTo(12 - expectedAccuracyM, 6)
+    expect(result.current.preview?.improvedByM).toBeGreaterThan(0)
+  })
+
+  it('does not report improvedByM as negative, however much worse the countdown\'s readings are', async () => {
+    // The doc comment on `CapturePreview.improvedByM` calls out a countdown
+    // that makes the fix *worse* as one of the more useful things this
+    // interaction can report. It cannot happen here, and this test is the
+    // verification of that, not an assumption: the tap's own reading is
+    // always sample one of the buffer `averageReadings` is called on, and
+    // inverse-variance weighting is monotonic in the sample count — every
+    // reading added can only raise the combined weight and can only lower
+    // `best`, never the reverse — so the combined accuracy this preview
+    // reports cannot exceed what the tap alone produced. A very good tap
+    // followed by readings two orders of magnitude worse is the case most
+    // likely to break that if it were going to.
+    const { result } = await mountCapture()
+    await emit(2)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    await emitFlat(5, 200)
+    await settle()
+
+    expect(result.current.preview).not.toBeNull()
+    expect(result.current.preview?.improvedByM).toBeGreaterThanOrEqual(0)
+    // Not just non-negative but barely moved: five readings two orders of
+    // magnitude worse than the tap's own can only nudge the combined
+    // accuracy, never meaningfully improve or worsen it.
+    expect(result.current.preview?.improvedByM).toBeLessThan(0.05)
   })
 })

@@ -69,6 +69,18 @@ export type CapturePreview = {
    * grew would hide it. Zero when the tap found no position at all: there is no
    * baseline to have improved on, and inventing one would be a claim about a
    * measurement that was never taken.
+   *
+   * **In practice this never goes negative against the current
+   * `averageReadings`.** The tap's own reading is always sample one of the
+   * countdown's buffer, and inverse-variance weighting is monotonic in the
+   * number of samples — adding a reading can only raise the combined weight
+   * (never lower it) and can only lower `best` (never raise it), so the
+   * combined accuracy this preview reports cannot exceed what the tap alone
+   * produced, however poor the readings that follow are (verified directly
+   * against `averageReadings`, not assumed). The field is still signed rather
+   * than clamped: it is the honest shape for a number defined as a
+   * difference, and clamping it would assert a floor that is a property of
+   * today's averaging strategy rather than of what this field means.
    */
   improvedByM: number
 }
@@ -76,6 +88,16 @@ export type CapturePreview = {
 export type CaptureDeps = {
   db: Database
   device: Device
+  /**
+   * **Must be referentially stable across renders** — a `useRef(...).current`
+   * or module-level singleton, never an object literal constructed inline in
+   * the caller's render. It is listed as an effect dependency (see the
+   * permission/subscription effect below), so a new identity on every render
+   * re-requests permission and resubscribes on every render: four times a
+   * second during a countdown, since a reading arrives roughly that often and
+   * every one re-renders the caller. `diagnostics.tsx`, the instrument this
+   * hook was lifted from, carries the same requirement on its own `source`.
+   */
   source: LocationSource
   /**
    * The countdown length, in seconds. **A cap, not an expected duration** — the
@@ -335,6 +357,15 @@ export function useCapture(deps: CaptureDeps): Capture {
    */
   const generation = useRef(0)
 
+  /**
+   * The verdict as it stood at the instant the last countdown ended, so the
+   * `recorded` phase can report it honestly instead of the render-time
+   * default (see `verdict` below). Set once, in `finishCountdown`, from
+   * whatever `collected` held right before it was cleared; irrelevant outside
+   * the `recorded` phase, where `verdict` never reads it.
+   */
+  const finishedVerdict = useRef<HoldVerdict>('improving')
+
   useEffect(() => {
     mounted.current = true
     return () => {
@@ -371,10 +402,24 @@ export function useCapture(deps: CaptureDeps): Capture {
         return
       }
 
-      const unsubscribe = await source.watch((reading) => {
-        if (collecting.current) collected.current.push(reading)
-        setLatest(reading)
-      })
+      // A rejecting `watch` is as real as a rejecting `requestPermission` —
+      // both are calls onto the platform location API — and un-guarded it is
+      // an unhandled rejection plus a screen where `latest` stays null
+      // forever with nothing on screen to say why. Capture still writes a
+      // `'none'` row on a tap (doctrine rule 4), so nothing is lost; she is
+      // just owed the reason no position ever shows up.
+      let unsubscribe: () => void
+      try {
+        unsubscribe = await source.watch((reading) => {
+          if (collecting.current) collected.current.push(reading)
+          setLatest(reading)
+        })
+      } catch (error) {
+        if (!cancelled && mounted.current) {
+          setMessage(describeFailure('Could not start watching the position', error))
+        }
+        return
+      }
 
       // The hook could have been unmounted while `requestPermission`/`watch`
       // was still in flight — `stop` would not exist yet for the cleanup below
@@ -444,12 +489,21 @@ export function useCapture(deps: CaptureDeps): Capture {
     // rather than the empty case being short-circuited: it is the one place
     // that knows the sentence for each way a fix can fail to exist, so EVERY
     // `'none'` row leaves here with a reason attached.
-    const attempt = buildDeliberateFix(tapReading ? [tapReading] : [])
-    const fix: Fix = attempt.ok ? attempt.fix : { quality: 'none' }
-    const unstorable = attempt.ok ? null : attempt.message
-
+    //
+    // Called inside this try, not before it: `buildDeliberateFix` can itself
+    // throw synchronously (`sampleEvidence`'s preconditions, `nowIso` on an
+    // out-of-range timestamp from a misbehaving provider), and `writeInFlight`
+    // is claimed above with no other release path on this line. Outside the
+    // try that throw left the claim set for the rest of the session — every
+    // later tap refused, silently, with `countdownRef` still null so there was
+    // no way out short of leaving the screen.
     let created: FieldRecord
+    let unstorable: string | null
     try {
+      const attempt = buildDeliberateFix(tapReading ? [tapReading] : [])
+      const fix: Fix = attempt.ok ? attempt.fix : { quality: 'none' }
+      unstorable = attempt.ok ? null : attempt.message
+
       created = await createRecord(db, {
         // The Inbox. This hook is handed a database, a device and a source and
         // nothing else, so it has no activity to file to and does not invent
@@ -479,9 +533,12 @@ export function useCapture(deps: CaptureDeps): Capture {
     }
 
     // The record is on disk from here, so the countdown starts from here.
+    // Read the fix back off `created` rather than off the local `fix` above:
+    // that variable is scoped to the try block that built and saved it, so it
+    // cannot leak a stale value into this read the way a hoisted `let` could.
     beginCountdown({
       recordId: created.id,
-      startAccuracyM: fix.quality === 'none' ? null : fix.accuracyM,
+      startAccuracyM: created.fix.quality === 'none' ? null : created.fix.accuracyM,
       endsAtMs,
     })
     setRecord(created)
@@ -518,6 +575,13 @@ export function useCapture(deps: CaptureDeps): Capture {
   async function finishCountdown(reason: FinishReason): Promise<void> {
     const active = countdownRef.current
     if (active === null) return
+    // The verdict as it stood the instant the wait ended — read before
+    // `collected` is cleared below, and reported for the rest of the
+    // `recorded` phase instead of the render-time default (see `verdict`
+    // near the bottom of this hook). Without it a plateau finish reported
+    // `'improving'` the moment `countdown` went null, contradicting the very
+    // sentence `message` was about to carry.
+    finishedVerdict.current = holdVerdict(collected.current)
     // Claimed synchronously, so the timer, the override and the plateau cannot
     // refine the same record more than once between them.
     countdownRef.current = null
@@ -641,8 +705,22 @@ export function useCapture(deps: CaptureDeps): Capture {
    * a fix four times worse than waiting reaches — on the measured hardware it
    * fired at n=2, at ±5.2 m, where the wait reaches ±1.4 m. Its constants are
    * measured against that hardware; this hook has no opinion about them.
+   *
+   * In the `recorded` phase this reports `finishedVerdict.current` — the
+   * verdict as it stood the instant the countdown ended — rather than
+   * defaulting to `'improving'` purely because `countdown` is null once idle.
+   * Without that, a capture that ended on a genuine plateau reported a verdict
+   * that flatly contradicted `message`'s "the fix stopped improving" the
+   * moment the countdown finished. Outside `recorded` (`ready`, or the brief
+   * window between a tap and `beginCountdown`), `'improving'` is still the
+   * honest answer: nothing has been judged yet.
    */
-  const verdict: HoldVerdict = countdown === null ? 'improving' : holdVerdict(collected.current)
+  const verdict: HoldVerdict =
+    countdown !== null
+      ? holdVerdict(collected.current)
+      : phase === 'recorded'
+        ? finishedVerdict.current
+        : 'improving'
 
   /**
    * The countdown ends itself when the fix stops improving, which is the normal
