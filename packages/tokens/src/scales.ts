@@ -123,7 +123,7 @@ export const field = {
    * stops growing on a large one — never branching on a raw width, which
    * the layout doctrine forbids.
    */
-  dialMax: 260,
+  dialMax: 300,
   /**
    * The accuracy circle's outline weight before a fix locks (spec §9.2.1:
    * unlocked, the circle is "a soft region of uncertainty"). Promoted here
