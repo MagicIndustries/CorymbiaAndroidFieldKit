@@ -658,4 +658,45 @@ describe('useCapture', () => {
     // accuracy, never meaningfully improve or worsen it.
     expect(result.current.preview?.improvedByM).toBeLessThan(0.05)
   })
+
+  it('reports the spread beside the improvement, and none at all for a single reading', async () => {
+    // Spec §9.3: `improvedByM` is structurally incapable of going negative, so
+    // a capture that went badly and one that went well produce the same shape
+    // of number. The spread is what reports the difference — it genuinely
+    // worsens when the readings disagree about where she is standing — so the
+    // screen shows the pair, and the preview has to carry both.
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    // One sample has no disagreement to report, which is not the same thing as
+    // a disagreement of zero. `averageReadings` returns 0 here; the preview
+    // reports absence, the same rule migration 003's
+    // `record_spread_matches_sample_count` enforces on the stored record.
+    expect(result.current.preview?.sampleCount).toBe(1)
+    expect(result.current.preview?.spreadM).toBeNull()
+
+    // A second reading from about 11 m up the paddock: the accuracy the
+    // countdown reports improves regardless (see the two tests above), and only
+    // the spread can say the two readings disagree about the position.
+    await act(async () => {
+      jest.advanceTimersByTime(1000)
+      source.emit({ ...reading(6, Date.now()), latitude: -37.8137 })
+    })
+    await settle()
+
+    // Computed against the real `averageReadings` and the exact samples the
+    // hook accumulated, rather than a number picked by hand.
+    const expectedSpreadM = averageReadings([
+      reading(6, START_MS + 1000),
+      { ...reading(6, START_MS + 2000), latitude: -37.8137 },
+    ]).spreadM
+    expect(expectedSpreadM).toBeGreaterThan(1)
+    expect(result.current.preview?.sampleCount).toBe(2)
+    expect(result.current.preview?.spreadM).toBeCloseTo(expectedSpreadM, 6)
+  })
 })

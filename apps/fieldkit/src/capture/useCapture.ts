@@ -83,6 +83,25 @@ export type CapturePreview = {
    * today's averaging strategy rather than of what this field means.
    */
   improvedByM: number
+  /**
+   * How far apart the readings are — the greatest distance from any collected
+   * reading to the averaged position, in metres. Null for a single reading,
+   * which has no disagreement to report.
+   *
+   * **This is the honesty check on `improvedByM`, and the screen shows the two
+   * together (spec §9.3).** The improvement can only ever improve, so a
+   * capture that went badly and one that went well produce the same shape of
+   * number. The spread does not: it genuinely worsens when she moved, the sky
+   * closed in, or the receiver wandered between readings. A tight spread with
+   * a good accuracy is a fix to trust; a good accuracy with a wide spread is
+   * the case the accuracy alone would quietly hide.
+   *
+   * Null rather than zero at one sample, for the same reason
+   * `buildDeliberateFix` nulls it on the stored record (migration 003's
+   * `record_spread_matches_sample_count`): a single reading has nothing to
+   * disagree with, which is not the same claim as perfect agreement.
+   */
+  spreadM: number | null
 }
 
 export type CaptureDeps = {
@@ -691,6 +710,7 @@ export function useCapture(deps: CaptureDeps): Capture {
         sampleCount: averaged.sampleCount,
         improvedByM:
           countdown.startAccuracyM === null ? 0 : countdown.startAccuracyM - averaged.accuracyM,
+        spreadM: averaged.sampleCount === 1 ? null : averaged.spreadM,
       }
     } catch {
       preview = null
