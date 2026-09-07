@@ -55,8 +55,8 @@ export function GallerySections() {
         The capture screen's only entry point until Plan 5 builds the launcher.
         Without it nothing in the app navigates to `/capture`, so none of spec
         §9.1–§9.6 can be judged on a device — which is where the parts that
-        cannot be tested from a desk (the pulse, the perimeter, glare
-        legibility, thumb reach) actually have to be judged.
+        cannot be tested from a desk (the ring emptying, the lock's snap and
+        ripple, glare legibility, thumb reach) actually have to be judged.
       */}
       <Section title="Capture">
         <Button

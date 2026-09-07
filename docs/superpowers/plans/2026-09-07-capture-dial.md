@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Components consume semantic tokens from `@corymbia/tokens` only — never a raw hex value, never the raw ramp, including in test files. This repo's lint has no test exemption.
+- Components consume semantic tokens from `@corymbia/tokens` only — never a raw hex value, never the raw ramp, including in test files. The lint grants exactly one test exemption, `packages/tokens/src/__tests__/**` (see the RULE 1 block in `eslint.config.mjs`), because that is where the ramp's own values are pinned and asserting ramp against ramp would prove nothing. Nothing in this plan touches that package, so for everything here the rule is absolute.
 - Only `packages/ui/src/layout/useLayout.ts` reads window dimensions. A view measuring its own box with `onLayout` is not a window dimension and is permitted.
 - `@corymbia/ui` must not import from `@corymbia/geo` — the dial is told its grade, it computes nothing about GPS.
 - TypeScript strict with `noUncheckedIndexedAccess`; no casts or non-null assertions.

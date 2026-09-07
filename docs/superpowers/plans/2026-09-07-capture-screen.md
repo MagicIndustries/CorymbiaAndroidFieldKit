@@ -864,9 +864,11 @@ git commit -m "feat(app): record a point, name it, and say what comes next"
 
 The controller builds and installs. These cannot be tested from a desk and must be checked on the S25, and again on the 10-inch tablet when it arrives:
 
-- The frame visibly breathes at about one cycle per five seconds, reads as ongoing rather than urgent, and the grade stays unambiguous at every point in the cycle — in sunlight.
-- Turning on the system's reduced-motion setting mid-capture stops the motion immediately and leaves the frame steady.
-- The perimeter empties smoothly and completes when the countdown does.
+**Superseded, and left here as the record of what this plan asked for.** The traffic-light frame, its pulse and its rectangular perimeter were all deleted by the capture-dial plan (spec §9.2), so the first three items below have nothing to check any more. The dial's own hardware list — the ring emptying, the lock's snap and ripple, the reduced-motion branch — is in `2026-09-07-capture-dial.md`, and it is the one a tester should work from.
+
+- ~~The frame visibly breathes at about one cycle per five seconds, reads as ongoing rather than urgent, and the grade stays unambiguous at every point in the cycle — in sunlight.~~ The frame and its pulse are deleted.
+- ~~Turning on the system's reduced-motion setting mid-capture stops the motion immediately and leaves the frame steady.~~ Replaced by the dial's own reduced-motion item (§9.2.2).
+- ~~The perimeter empties smoothly and completes when the countdown does.~~ Replaced by the dial's countdown ring.
 - Accuracy and seconds are legible at arm's length without leaning in.
 - The override stays reachable in landscape and at maximum system font scale.
 - On the tablet: `resolveReach` returns `bottomCorners` only in landscape, and the frame lands under the thumb on the primary side. Switching handedness mirrors it.
@@ -881,4 +883,4 @@ The controller builds and installs. These cannot be tested from a desk and must 
 
 **`capturePrimary` is not decided here.** §5.4 says Plan 3 decides whether it acquires a new meaning or is retired. With one control there is no side to trade, and nothing in this plan reads it. Leave the column and the setting exactly where they are, and record the decision in §5.4 when Plan 5 has shown whether the launcher wants it.
 
-**A known limit.** The pulse and the perimeter cannot be verified by test — the native driver does not advance an animated value under Jest, and a perimeter's geometry depends on a measured layout. Both are covered for their branches and their teardown, and both are on the hardware list above. Any report claiming the animation itself is tested is overstating its evidence.
+**A known limit.** The pulse and the perimeter cannot be verified by test — the native driver does not advance an animated value under Jest, and a perimeter's geometry depends on a measured layout. Both are covered for their branches and their teardown, and both are on the hardware list above. Any report claiming the animation itself is tested is overstating its evidence. (Both were subsequently deleted with the frame they belonged to; the limit itself carried over unchanged to the dial's own motion.)
