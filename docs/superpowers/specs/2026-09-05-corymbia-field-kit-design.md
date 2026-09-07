@@ -677,7 +677,44 @@ already say. A future reader who finds the dial holding still between those two 
 not read that as a missing feature and add a breath back in; the dial was never static to begin
 with, which is exactly the condition the pulse existed to answer.
 
-### 9.2.1 The lock
+**The dial is bounded, and the bound is the dial's own** (`field.dialMax`,
+`packages/tokens/src/scales.ts`). Its SVG is drawn `width="100%" height="100%"` against a
+fixed square viewBox, so it has no intrinsic size: dropped into a centred, flex-grown column
+it takes the whole viewport. That shipped to a Samsung S25 and the screen was unusable — the
+accuracy, the verdict, the seconds and **the only control** were all off the bottom of the
+screen, so no capture could be started, nothing counted down, and nothing ever locked. Every
+symptom reported from the field ("it went very slowly and never locked", "it's never auto
+completing, just sitting there measuring") was that one defect. The bound belongs to the
+component rather than to each screen that places one: a component whose height is whatever
+its container allows is a trap for every future caller, and the gallery and the capture
+screen would otherwise each have to re-derive the same square. It stays the largest single
+element in the acquiring state — §9.4's accuracy is the largest *text*, which is a different
+claim — and it takes the full width of anything narrower than the cap.
+
+**The grade the screen shows has hysteresis; the classifier does not.** `gradeAccuracy`'s
+good/fair boundary is exactly 5 m, and at the site this app was measured on the raw live
+reading hovers either side of it: a run from 7.5 m down to about 4.2 m, jittering roughly
+±0.5 m around its trend the whole way. The owner watched the ready state there on the S25 and
+saw the dial flip amber → green → amber → green with no change whatever in the quality of the
+fix. A colour that flickers between two states says nothing and reads as a fault.
+
+The fix is not a different threshold. `gradeAccuracy` and `GRADE_THRESHOLDS` are shared, they
+are this section's, and the diagnostics instrument depends on reading them raw — so the
+hysteresis lives where the *screen* decides what to display
+(`apps/fieldkit/src/capture/steadyGrade.ts`), and nothing stored or instrument-reported
+changes. **Entering a grade still requires crossing its threshold; only leaving one is
+delayed**, by a margin of 1 m — twice the measured jitter, and small against bands 5 m and
+10 m wide, so a fix that has genuinely degraded still reports it. An absent fix is not
+jitter and takes the worst grade at once. The word and the colour come from that one value,
+so they cannot disagree at any instant (doctrine rule 9).
+
+**The ready state does not converge, and must not be made to look as though it does.** The
+convergence this dial is built around happens through `averageReadings` during a countdown.
+Before the tap the dial is showing a single live reading, which at the measured site sits
+around 4–7 m and wobbles there indefinitely. A large circle that never narrows is the honest
+picture of that.
+
+### 9.2.1 The lock, and the two ways a capture completes
 
 When the circle closes onto the crosshair, the fix has converged as far as this receiver
 takes it. The target stops being something aimed at and becomes something hit:
@@ -714,6 +751,52 @@ should tune down toward the vaguer language above:
   read as an outward ripple rather than a flash; unlike the snap and the ripple's reach, it was
   not itself a figure the mockup review settled, and a later pass is free to retune it without
   reopening that review.
+
+**There are two completion levels, not one.** The lock above requires the circle to reach the
+crosshair — and the crosshair is pinned to 1.4 m, the best figure this hardware produced
+outdoors, while `gradeAccuracy` calls anything under 5 m good. So a green circle resting well
+outside the crosshair is what a *normal* capture looks like, and a design with only one
+completion left the normal case with no completion at all. A capture that has genuinely
+stopped improving deserves a moment that does not lie about how good it got:
+
+- **Settled** — `holdVerdict` says it stopped improving, above the hardware's floor. **The
+  circle stays exactly where its accuracy puts it** and firms up (the same fill and outline
+  the lock uses — "this is a finished measurement" is one treatment, not two), and a
+  companion ring is drawn *at that radius* (`field.dialSettledGap` outside its own outline,
+  because two strokes on one path are one thickened stroke) marking where the capture
+  actually got to, with the crosshair still visible inside it showing what was possible. The
+  gap between the ring and the crosshair is itself the signal: how far this spot fell short
+  of what the device can do. The words say how good it actually got — `As good as it gets
+  here — ±4.2 m`. No snap, no ripple, and the crosshair stays unlit: settled is deliberately
+  not a ceremony.
+- **Locked on** — it stopped improving *and* reached the floor. The full ceremony above.
+
+**Snapping a settled circle onto the crosshair was considered and rejected.** It would make
+the completion look better and it would make the picture lie: "the radius always means
+metres" (§9.2) is the invariant the whole dial rests on, and a circle drawn at a radius its
+accuracy has not earned defeats every other claim on it. This is the rejected alternative a
+later reader should not re-propose.
+
+"Stopped improving" is `holdVerdict`'s plateau throughout — the signal that already ends the
+countdown (§9.1.5), measured and calibrated against this hardware. There is no second
+convergence test anywhere in this design.
+
+**Where the completion is shown is forced, not chosen.** A plateau ends the countdown in the
+same render that first reports it, so a completion drawn during the wait would exist for
+about one frame on a device — the same reason §9.3's plateau sentence is not shown live. The
+*recorded* state is where a finished capture is actually looked at, so the dial is drawn
+there, from the fix that was stored, with whichever completion it earned. A capture ended by
+the cap or by `ACCEPT NOW` earned neither: it was cut short rather than finished.
+
+**A settled capture is offered another go**, and the offer keeps the record
+(`useCapture`'s `refineAgain`). It runs the same in-place refinement the countdown already
+performs, over the same row: no second record and no second capture number, because that
+number may already be written on a sample tube and a real measurement is not discarded for an
+attempt that might be no better. Both runs append their own `'edited'` event, so the chain of
+custody (§8.5) carries the whole story. The second run's improvement is measured against what
+the first left on the record rather than against the tap, and the screen says so — that is
+also the one case where the improvement figure can come back at or below zero, since the
+baseline is no longer a member of the run's own samples (§9.3).
 
 ### 9.2.2 Motion, and when to refuse it
 
