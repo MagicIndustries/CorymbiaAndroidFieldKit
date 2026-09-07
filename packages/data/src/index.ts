@@ -26,6 +26,7 @@ export {
   moveRecord,
   refileRecord,
   refineRecordFix,
+  renameRecord,
   softDeleteRecord,
   sampleEvidence,
 } from './repositories/records'

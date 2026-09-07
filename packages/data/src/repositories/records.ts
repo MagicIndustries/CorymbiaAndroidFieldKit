@@ -1202,6 +1202,137 @@ export async function refineRecordFix(
 }
 
 /**
+ * Says, for the event log, what a rename did to the title.
+ *
+ * A plain sentence rather than the fixed contract `refineRecordFix`'s prefix
+ * is: no reader distinguishes a rename from any other `'edited'` event by
+ * matching this string, so it only has to be true and contain the word
+ * "title" for a reader asking "was this record renamed?" to find it.
+ */
+function describeTitleChange(title: string | null): string {
+  return title === null ? 'title cleared' : `title set to "${title}"`
+}
+
+/**
+ * Gives a saved record a title, or changes the one it already has (spec §9.6).
+ *
+ * A pin is captured before it has a name — the countdown in `refineRecordFix`
+ * is about the position, not the label — and this is the only place a title
+ * reaches a saved row afterward. `FieldRecord.title` and `.description` are
+ * columns `createRecord` can seed but nothing else writes; this is that
+ * setter.
+ *
+ * ## `title` versus `description`
+ *
+ * `title` is required because naming *is* the operation: a call that supplied
+ * neither would not be a rename at all. `description` is optional, and the
+ * two absences it can take on mean different things:
+ *
+ *  - omitted entirely (`description` not a key of `input`) — she is only
+ *    naming the pin right now, and whatever description it already carries,
+ *    including none, is left exactly as it was;
+ *  - `description: null` — she is clearing a description she had written,
+ *    which is as real an edit as clearing the title, and must be stored as
+ *    one.
+ *
+ * `title: null` gets no such distinction, because there is nothing to
+ * distinguish it from: `title` is not optional, so "not supplied" is not a
+ * state a caller can be in. `null` always means "she cleared the name."
+ *
+ * The two are told apart with `'description' in input` rather than
+ * `input.description !== undefined`, because the latter cannot tell
+ * "omitted" from "supplied as `undefined`" — and TypeScript's structural
+ * typing does not stop a caller from passing `description: undefined`
+ * explicitly, which would then read as omission under either test, but only
+ * the `in` check is honest about what it is actually asking.
+ *
+ * ## Why the event is `'edited'`
+ *
+ * The same reasoning as `moveRecord` and `refineRecordFix`: `'edited'` is the
+ * existing action for a change to a record that already exists, and a new
+ * `'named'` action would mean widening `event_action_known` in migration 003
+ * for a distinction the detail line already draws plainly enough — "title set
+ * to …" versus "title cleared" is not lost by sharing the action column with
+ * every other kind of edit.
+ *
+ * The record is provenance that reaches a government biodiversity dataset
+ * (spec §8.5): a title is part of the observation, not incidental metadata,
+ * so it is written through the same append-only chain of custody as
+ * everything else that changes about a record, not silently to a column.
+ *
+ * ## What it does not touch
+ *
+ * `capture_number` and `captured_at` are never named in the UPDATE.
+ * `record_capture_number_is_immutable` would abort the transaction if the
+ * value actually changed, but a rename never even offers it the chance: the
+ * tube label was written at capture and naming a pin later does not relabel
+ * the tube. Likewise `captured_at` — the capture happened at the tap, and a
+ * name given to it afterward does not move when that was.
+ *
+ * ## What it refuses
+ *
+ * A record that does not exist, and a soft-deleted one — a tombstone is
+ * history, not a row still open for editing, the same refusal
+ * `refineRecordFix` makes for the same reason.
+ *
+ * The update and the event append are one transaction: a named record with no
+ * event saying who named it, and from where, is a broken chain of custody.
+ */
+export async function renameRecord(
+  db: Database,
+  input: {
+    recordId: string
+    title: string | null
+    description?: string | null
+    deviceId: string
+  },
+): Promise<FieldRecord> {
+  const suppliedDescription = 'description' in input
+
+  await db.transaction(async () => {
+    const existing = await db.first<{ deleted_at: string | null; activity_id: string | null }>(
+      'SELECT deleted_at, activity_id FROM record WHERE id = ?',
+      [input.recordId],
+    )
+    if (!existing) {
+      throw new Error(`Record ${input.recordId} does not exist, so there is no title to set.`)
+    }
+    if (existing.deleted_at !== null) {
+      throw new Error(
+        `Record ${input.recordId} has been deleted, so it cannot be renamed. A tombstone is ` +
+          'not editable; naming a deleted record would rewrite history rather than record it.',
+      )
+    }
+
+    const at = nowIso()
+    if (suppliedDescription) {
+      await db.execute(
+        'UPDATE record SET title = ?, description = ?, updated_at = ? WHERE id = ?',
+        [input.title, input.description ?? null, at, input.recordId],
+      )
+    } else {
+      await db.execute('UPDATE record SET title = ?, updated_at = ? WHERE id = ?', [
+        input.title,
+        at,
+        input.recordId,
+      ])
+    }
+
+    await appendEvent(db, {
+      recordId: input.recordId,
+      action: 'edited',
+      deviceId: input.deviceId,
+      activityId: existing.activity_id,
+      detail: describeTitleChange(input.title),
+    })
+  })
+
+  const record = await getRecord(db, input.recordId)
+  if (!record) throw new Error(`Record ${input.recordId} vanished immediately after being renamed.`)
+  return record
+}
+
+/**
  * Soft, per spec §12.1 — the row is flagged and the history keeps the deletion.
  *
  * `fix` is optional and stamps the deletion event with where it happened, the

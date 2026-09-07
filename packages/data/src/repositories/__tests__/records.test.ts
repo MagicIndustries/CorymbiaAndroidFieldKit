@@ -14,6 +14,7 @@ import {
   moveRecord,
   refileRecord,
   refineRecordFix,
+  renameRecord,
   sampleEvidence,
   softDeleteRecord,
 } from '../records'
@@ -1501,6 +1502,114 @@ describe('filing, reordering and refiling', () => {
 
       expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
       expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created'])
+    })
+  })
+
+  describe('renameRecord', () => {
+    it('gives a saved record a title', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const renamed = await renameRecord(db, {
+        recordId: record.id,
+        title: 'Frog pool, north end',
+        deviceId,
+      })
+
+      expect(renamed.title).toBe('Frog pool, north end')
+      expect((await getRecord(db, record.id))?.title).toBe('Frog pool, north end')
+    })
+
+    it('records the change in the event log, because a title is part of the observation', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      await renameRecord(db, { recordId: record.id, title: 'Frog pool', deviceId })
+
+      const events = await listEvents(db, record.id)
+      expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+      const renaming = events[1]
+      expect(renaming?.detail).toBe('title set to "Frog pool"')
+      expect(renaming?.activityId).toBe(activityId)
+    })
+
+    it('accepts a null title, because clearing a name is a real edit', async () => {
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: INSTANT,
+        deviceId,
+        title: 'Wrong',
+      })
+
+      const renamed = await renameRecord(db, { recordId: record.id, title: null, deviceId })
+
+      expect(renamed.title).toBeNull()
+      const renaming = (await listEvents(db, record.id)).find((e) => e.action === 'edited')
+      expect(renaming?.detail).toBe('title cleared')
+    })
+
+    it('leaves description untouched when the caller does not supply one', async () => {
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: INSTANT,
+        deviceId,
+        description: 'Original notes',
+      })
+
+      const renamed = await renameRecord(db, { recordId: record.id, title: 'Named', deviceId })
+
+      expect(renamed.description).toBe('Original notes')
+    })
+
+    it('overwrites description, including clearing it with an explicit null', async () => {
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: INSTANT,
+        deviceId,
+        description: 'Original notes',
+      })
+
+      const renamed = await renameRecord(db, {
+        recordId: record.id,
+        title: 'Named',
+        description: null,
+        deviceId,
+      })
+
+      expect(renamed.description).toBeNull()
+      expect((await getRecord(db, record.id))?.description).toBeNull()
+    })
+
+    it('does not touch the capture number, which may be written on a sample tube', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const renamed = await renameRecord(db, { recordId: record.id, title: 'Named', deviceId })
+
+      expect(renamed.captureNumber).toBe(record.captureNumber)
+    })
+
+    it('does not touch capturedAt, because naming happens later but the capture did not', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const renamed = await renameRecord(db, { recordId: record.id, title: 'Named', deviceId })
+
+      expect(renamed.capturedAt).toBe(record.capturedAt)
+    })
+
+    it('refuses a record that does not exist, with a sentence', async () => {
+      await expect(
+        renameRecord(db, { recordId: 'rec_missing', title: 'x', deviceId }),
+      ).rejects.toThrow(/does not exist/)
+    })
+
+    it('refuses a deleted record, because a tombstone is not editable', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      await softDeleteRecord(db, record.id, deviceId)
+
+      await expect(
+        renameRecord(db, { recordId: record.id, title: 'x', deviceId }),
+      ).rejects.toThrow(/has been deleted/)
     })
   })
 })
