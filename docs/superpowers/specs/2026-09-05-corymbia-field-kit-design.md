@@ -595,6 +595,18 @@ Two things changed with §9.1 and are stated here rather than left to be inferre
 Always backed by the word in the chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`), the numeric
 readout, and a dashed border when poor. Colour never carries the meaning alone.
 
+**The frame itself pulses slowly while the fix is still being refined**, and stops when the
+point is recorded — motion is what says "still working, stand still" from peripheral vision,
+where a word cannot be read. It must respect the system's reduced-motion setting, rendering
+steady and running no animation when that is on.
+
+The whole frame breathes, not a secondary ring inside it. The prototype pulsed an inset ring
+because that was the easy way to keep the grade colour at full strength — a naive pulse of
+the frame's own colour would make a good fix look worse at the bottom of every cycle, which
+is the one thing this frame must never do. Both properties are required: the frame is what
+moves, *and* the fix quality stays honestly readable at every point in the cycle. Solving
+that is Plan 3's, and it is a real constraint, not a preference.
+
 **There is no separate `SHARPENING…` state.** That chip existed because a hold produced a
 provisional number that was not yet the saved one. Under §9.1 the record is already on disk
 and the countdown is refining it, so at every instant the frame grades the fix that would
@@ -629,6 +641,18 @@ the observed trend and is answered in the sentence above.
 Satellites, datum, altitude, and live coordinates in monospace. These are context about the
 receiver, are not about the convergence of the capture in hand, and may sit anywhere on the
 screen.
+
+**The accuracy and the seconds remaining are not among them, and are not sized like them.**
+They are the two numbers she is standing still for, and in the acquiring state they are the
+largest things on the screen — legible at arm's length, in glare, without leaning in. The
+diagnostics prototype rendered them at the same weight as the rest of its instrument
+readouts, which is correct for an instrument and wrong for the field. Plan 3 sizes them as
+the primary content of that state, and everything else on the acquiring screen is
+subordinate to them.
+
+This is a specific instance of the doctrine's single-focus rule: a screen she looks at while
+holding a phone still over a point should answer *how good is it* and *how much longer*
+before it answers anything else.
 
 **Readings averaged and the improvement delta are not supporting readouts.** They live
 inside the traffic-light frame with the control (§9.1.2). Separating them from the button is
