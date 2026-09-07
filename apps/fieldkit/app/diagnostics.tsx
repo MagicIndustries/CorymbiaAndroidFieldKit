@@ -742,31 +742,53 @@ export default function Diagnostics() {
     let stop: (() => void) | undefined
 
     void (async () => {
-      const state = await source.requestPermission()
+      // Both of these are calls onto the platform location API and both can
+      // reject. Un-guarded, either one is an unhandled rejection plus an
+      // instrument with no permission state, no readings and nothing on
+      // screen saying why — the exact failure this screen is carried outdoors
+      // to catch. `useCapture` was given these guards when it was lifted out
+      // of here; this is the copy that did not get them.
+      let state: PermissionState
+      try {
+        state = await source.requestPermission()
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(describeFailure('Could not ask for the location permission', error))
+        }
+        return
+      }
       if (cancelled) return
       setPermission(state)
       if (state !== 'granted') return
 
-      const unsubscribe = await source.watch((reading) => {
-        if (sessionStartMs.current === null) sessionStartMs.current = reading.timestampMs
-        ambient.record(reading)
-        // expo-location reports whether a position came from a mock provider
-        // only on some platforms; `reading.isMocked` stays `undefined` rather
-        // than being defaulted here (spec §7.5 — see `describeMocked` above).
-        setMocked(reading.isMocked)
-        setReadings((previous) => [...previous.slice(-19), reading])
-        if (collectingRef.current) {
-          collected.current.push(reading)
-          // The transcript row is built here, from the samples as they stand
-          // with this reading included, so it records what the control was
-          // showing at this instant rather than what a later render would
-          // recompute over a longer buffer.
-          const startedAtMs = captureStartMs.current
-          if (startedAtMs !== null) {
-            transcript.current.push(buildTranscriptRow(reading, collected.current, startedAtMs))
+      let unsubscribe: () => void
+      try {
+        unsubscribe = await source.watch((reading) => {
+          if (sessionStartMs.current === null) sessionStartMs.current = reading.timestampMs
+          ambient.record(reading)
+          // expo-location reports whether a position came from a mock provider
+          // only on some platforms; `reading.isMocked` stays `undefined` rather
+          // than being defaulted here (spec §7.5 — see `describeMocked` above).
+          setMocked(reading.isMocked)
+          setReadings((previous) => [...previous.slice(-19), reading])
+          if (collectingRef.current) {
+            collected.current.push(reading)
+            // The transcript row is built here, from the samples as they stand
+            // with this reading included, so it records what the control was
+            // showing at this instant rather than what a later render would
+            // recompute over a longer buffer.
+            const startedAtMs = captureStartMs.current
+            if (startedAtMs !== null) {
+              transcript.current.push(buildTranscriptRow(reading, collected.current, startedAtMs))
+            }
           }
+        })
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(describeFailure('Could not start watching the position', error))
         }
-      })
+        return
+      }
 
       // The screen could have unmounted while `requestPermission`/`watch` was
       // still in flight — `stop` would not exist yet for the cleanup below to
@@ -1410,7 +1432,21 @@ function DiagnosticsBody(props: BodyProps) {
         `${String(samples.length)} reading${samples.length === 1 ? '' : 's'} averaged`,
     )
 
-    const attempt = buildDeliberateFix(samples)
+    // Guarded for the same reason the tap path guards its own call, and
+    // against the same throw: `buildDeliberateFix` is not a pure numeric
+    // transform — `sampleEvidence`'s preconditions and `nowIso` on an
+    // out-of-range timestamp from a misbehaving provider both raise
+    // synchronously. Bare, that rejection escaped this async function
+    // unhandled and the recorded state carried no sentence at all over a
+    // record that was never refined, which is the one outcome on this path
+    // that has to say something.
+    let attempt: FixAttempt
+    try {
+      attempt = buildDeliberateFix(samples)
+    } catch (error) {
+      attempt = { ok: false, message: describeFailure('Could not build the refined fix', error) }
+    }
+
     if (!attempt.ok) {
       if (!mountedRef.current) return
       props.setMessage(`${attempt.message} The record is saved with the fix it already had.`)

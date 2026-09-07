@@ -663,6 +663,48 @@ describe('useCapture', () => {
     expect(result.current.phase).toBe('acquiring')
   })
 
+  it('says how the wait ended even when the fix builder throws on the refinement itself', async () => {
+    // The same synchronous throw the tap path guards against — `nowIso`
+    // running `Date#toISOString` on an out-of-range timestamp from a
+    // misbehaving provider — reached on the *refinement* path, where
+    // `buildDeliberateFix` was called bare.
+    //
+    // This is not the in-flight leak: `finishCountdown`'s `finally` releases
+    // the claim, so the control stays live. The failure is that the promise
+    // rejected unhandled and the recorded state rendered with NO "how the
+    // wait ended" sentence at all, over a record that was never refined. She
+    // stands still for fifteen seconds, the screen says the capture is done,
+    // and it silently keeps the tap's coarser fix. Every other exit from this
+    // path has a sentence attached; this was the only one that said nothing.
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    // A reading the receiver stamped outside the range `Date` can represent.
+    // It is the last sample in the buffer, which is the one whose timestamp
+    // becomes the fix's `gpsTime`.
+    await act(async () => {
+      jest.advanceTimersByTime(1000)
+      source.emit(reading(5, 8.65e15))
+    })
+
+    await act(async () => {
+      result.current.acceptNow()
+    })
+    await settle()
+
+    // The record keeps the fix the tap saved — nothing was refined — and the
+    // wait is over either way.
+    expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
+    expect(result.current.phase).toBe('recorded')
+    expect(result.current.message).toContain('Invalid time value')
+    expect(result.current.message).toContain('the fix it already had')
+  })
+
   it('reports a positive improvedByM once the countdown sharpens the fix', async () => {
     const { result } = await mountCapture()
     // A mediocre tap reading, then three much better ones, all at the same

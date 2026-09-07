@@ -661,7 +661,23 @@ export function useCapture(deps: CaptureDeps): Capture {
     const samples = [...collected.current]
     collected.current = []
 
-    const attempt = buildDeliberateFix(samples)
+    // Guarded for the same reason the tap path guards its own call, and
+    // against the same throw: `buildDeliberateFix` is not a pure numeric
+    // transform — `sampleEvidence`'s preconditions and `nowIso` on an
+    // out-of-range timestamp from a misbehaving provider both raise
+    // synchronously. Bare, that rejection escaped this async function
+    // unhandled, and the recorded state rendered with NO "how the wait ended"
+    // sentence over a record that was never refined: she stands still for
+    // fifteen seconds, the screen says the capture is done, and it silently
+    // keeps the tap's coarser fix. Every other exit below says what happened;
+    // this was the only one that said nothing.
+    let attempt: FixAttempt
+    try {
+      attempt = buildDeliberateFix(samples)
+    } catch (error) {
+      attempt = { ok: false, message: describeFailure('Could not build the refined fix', error) }
+    }
+
     if (!attempt.ok) {
       if (!mounted.current || generationAtFinish !== generation.current) return
       setMessage(`${attempt.message} The record is saved with the fix it already had.`)
