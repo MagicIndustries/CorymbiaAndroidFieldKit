@@ -93,9 +93,10 @@ export type AltitudeEvidence =
 /**
  * The averaging evidence a deliberate fix carries — migration 003's
  * `record_spread_matches_sample_count`. Spread is the disagreement between
- * readings, so it exists exactly when there was more than one reading: SAVE NOW
- * takes a single reading and has no spread to report; SHARPEN takes several and
- * must report theirs. Modelled as its own union so a one-reading capture cannot
+ * readings, so it exists exactly when there was more than one reading: the
+ * initial tap saves a single reading and has no spread to report; a countdown
+ * that runs afterward accumulates several and must report theirs. Modelled as
+ * its own union so a one-reading capture cannot
  * be forced to fabricate a spread of 0 (asserting agreement between readings
  * that were never compared), and a many-reading capture cannot omit one.
  *

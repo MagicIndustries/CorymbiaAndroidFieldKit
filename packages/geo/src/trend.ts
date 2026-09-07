@@ -61,7 +61,10 @@ export type HoldVerdict = 'improving' | 'plateaued'
  * n=21, ±1.1 m at n=61, all inside the run-to-run spread of a single wait —
  * while below it they are genuinely and measurably worse (±1.6 m at n=5,
  * ±1.5 m at n=7). So before ten samples a plateau claim is false by
- * construction: the fix demonstrably still has somewhere to go.
+ * construction on the run measured — though run-to-run variance at a fixed
+ * duration is large enough (see `docs/gps-accuracy.md` §5) that this is a
+ * dependable floor for when a plateau claim may be made, not a claim that any
+ * one capture below it is demonstrably still improving.
  *
  * This is the guard that makes the defect this rule was rewritten for
  * impossible. The old rule declared `plateaued` at n=2, 0.6 s after the tap,
@@ -137,9 +140,9 @@ function averagedAccuracySeries(readings: Reading[]): (number | null)[] {
  * Whether continuing to hold is still worth it (spec §9.3).
  *
  * The verdict comes from the **observed trend**, never from an estimate of what
- * the hardware might achieve. The screen says "Still improving — keep holding"
- * or "About as sharp as it gets here", and both must be true when said: telling
- * her to keep waiting for an improvement that is not coming wastes the one thing
+ * the hardware might achieve. The screen says "Still improving — keep standing
+ * still" or "About as sharp as it gets here", and both must be true when said:
+ * telling her to keep waiting for an improvement that is not coming wastes the one thing
  * she has least of in the field, and ending a capture that was still converging
  * writes a worse fix onto the record permanently.
  *
@@ -163,6 +166,18 @@ function averagedAccuracySeries(readings: Reading[]): (number | null)[] {
  *    fast. Latching is also what the verdict *means* once auto-finish is on:
  *    the plateau ends the capture, so a verdict that could be withdrawn would
  *    be a statement about a capture that no longer exists.
+ *
+ *    The latch is not unconditionally safe, though: it can outlive the
+ *    evidence that earned it. A run that plateaus on a mediocre floor and then
+ *    receives a markedly sharper reading — a sudden clearer view of the sky —
+ *    keeps reading `'plateaued'` even though the averaged fix has genuinely
+ *    started improving again. With auto-finish on this is unreachable, because
+ *    the capture already ended the moment the plateau first latched; it can
+ *    only be observed by continuing to collect readings after a plateau with
+ *    auto-finish off. The latch is still the right call — a verdict that could
+ *    be withdrawn mid-capture would be worse — but this function should not be
+ *    read as claiming the trend can never reverse in fact, only that it is
+ *    never reported as having done so.
  */
 export function holdVerdict(readings: Reading[]): HoldVerdict {
   if (readings.length < MIN_SAMPLES) return 'improving'

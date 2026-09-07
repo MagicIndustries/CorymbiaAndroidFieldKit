@@ -1,8 +1,9 @@
 # How the field kit works out its GPS accuracy
 
 This document explains the number the app puts next to a sample position — the
-"± 4 m" figure — where it comes from, how holding the SHARPEN control changes
-it, and why it is calculated the cautious way rather than the flattering way.
+"± 4 m" figure — where it comes from, how the countdown that follows a capture
+changes it, and why it is calculated the cautious way rather than the
+flattering way.
 
 It is written for the person using the app in the field, not for a
 statistician. The formulas are here because they have to be somewhere, but each
@@ -52,11 +53,12 @@ That second point is the reason for the floor described in section 5.
 
 ---
 
-## 2. What a hold collects
+## 2. What the countdown collects
 
-When you press and hold SHARPEN on the capture screen, the app does not throw
-away the readings it already had and take a fresh one. It **keeps every reading
-the receiver produces while you hold**, each one a complete little record:
+One tap on the capture control saves a real record immediately, and the
+countdown that follows does not throw away the readings already taken and
+start over. It **keeps every reading the receiver produces while the countdown
+runs**, each one a complete little record:
 
 - latitude and longitude,
 - the receiver's accuracy estimate for that reading, in metres,
@@ -64,7 +66,7 @@ the receiver produces while you hold**, each one a complete little record:
 - a timestamp,
 - a flag saying whether the reading came from a mock location provider.
 
-A typical hold looks like a receiver settling down as it acquires more
+A typical countdown looks like a receiver settling down as it acquires more
 satellites and refines its solution. Something like:
 
 | # | accuracy |
@@ -112,7 +114,7 @@ longitude = Σ(w × longitude) / Σw
 In words: **add up every reading's coordinate after multiplying it by that
 reading's weight, then divide by the total weight.** The fix lands near the
 readings the receiver was confident about, and the poor early readings barely
-move it. That is the entire point of holding the control — before this change,
+move it. That is the entire point of the countdown — before this change,
 the app took a plain average, so a 40 m reading taken in the first second
 dragged the final position exactly as hard as the 4 m reading taken in the
 last.

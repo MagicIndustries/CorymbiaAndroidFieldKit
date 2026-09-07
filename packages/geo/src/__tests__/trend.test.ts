@@ -56,10 +56,12 @@ const MEASURED_RUN = [
 
 /**
  * The late-session stretch from the same device, where the receiver genuinely
- * had stopped improving: raw accuracy pinned at 3.6–3.7 m for eight
- * consecutive seconds. The old rule called this `plateaued` and was right to;
- * the new one must still say so, or the fix has been bought at the cost of the
- * signal ever firing.
+ * had stopped improving: raw accuracy pinned at 3.6–3.7 m. The measured run
+ * itself was eight seconds of this; it is repeated here to twelve entries so
+ * the fixture alone clears `MIN_SAMPLES`, not because a longer run was
+ * recorded. The old rule called the measured eight seconds `plateaued` and was
+ * right to; the new one must still say so over this extended run, or the fix
+ * has been bought at the cost of the signal ever firing.
  */
 const MEASURED_FLAT = [3.6, 3.7, 3.6, 3.7, 3.6, 3.7, 3.6, 3.7, 3.6, 3.7, 3.6, 3.7]
 

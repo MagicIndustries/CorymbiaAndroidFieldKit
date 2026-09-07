@@ -612,7 +612,8 @@ claim the data does not support.
 
 So fifteen seconds is not a compromise between what she will tolerate and what the receiver
 needs, and it is not fitted to the plateau threshold either. It is a generous cap on top of a
-self-ending wait that, on this hardware, finishes itself three seconds sooner on average.
+self-ending wait that, on this hardware, finished itself three seconds sooner on the one run
+measured.
 The diagnostics screen keeps the chooser — 5, 15, 20, 30 and 60 seconds — so the comparison
 can be run again on other hardware, in other sky, before the number is fixed for the field
 app.
