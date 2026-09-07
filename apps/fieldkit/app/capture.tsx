@@ -28,6 +28,7 @@ import {
 } from '@corymbia/ui'
 import { renameRecord, type Database, type FieldRecord, type StoredFix } from '@corymbia/data'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
+import { useSteadyGrade } from '../src/capture/steadyGrade'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
 
 /**
@@ -97,6 +98,57 @@ export const VERDICT_SENTENCE: Record<HoldVerdict, string> = {
 }
 
 /**
+ * The two ways a capture can *complete* (spec §9.2.1).
+ *
+ * Both mean the same measured thing — `holdVerdict` says the fix has stopped
+ * improving, which is the plateau the countdown ends itself on — and they
+ * differ in one further question: did it stop improving *on* the crosshair, or
+ * short of it?
+ *
+ *  - `locked` — stopped improving, and reached this hardware's measured floor.
+ *    The full ceremony of §9.2.1.
+ *  - `settled` — stopped improving, above the floor. **The common case**, and
+ *    the reason this level exists: the crosshair is pinned to 1.4 m, the best
+ *    figure this receiver produced outdoors, while `gradeAccuracy` calls
+ *    anything under 5 m good — so a green circle resting well outside the
+ *    crosshair is what a normal capture looks like, and a design with only one
+ *    completion left the normal case with none at all.
+ *
+ * A capture that ended any other way — the cap ran out, or she pressed
+ * `ACCEPT NOW` — has not completed in this sense. It was cut short rather than
+ * finished, and gets neither treatment.
+ */
+type Completion = 'locked' | 'settled'
+
+/**
+ * Which completion a finished capture earned, or null for one that was cut
+ * short or has no position to have converged.
+ *
+ * `verdict` is `holdVerdict`'s, reported by the hook for the whole of the
+ * `recorded` phase as it stood the instant the wait ended — this invents no
+ * second convergence test of its own. The floor question is `isLocked` on the
+ * same geometry the dial draws with, exactly as the acquiring state's lock is.
+ */
+function completionOf(capture: Capture): Completion | null {
+  if (capture.verdict !== 'plateaued') return null
+  const fix = capture.record?.fix
+  if (fix === undefined || fix.quality === 'none') return null
+  return isLocked(radiusForMetres(fix.accuracyM)) ? 'locked' : 'settled'
+}
+
+/**
+ * What a settled completion says, in words (doctrine rule 9: the colour and
+ * the companion ring never carry it alone).
+ *
+ * It names the accuracy the capture actually reached rather than claiming a
+ * convergence it did not make — the sentence and the picture say the same
+ * thing, which is the whole point of not moving the circle onto the crosshair.
+ */
+function settledSentence(accuracyM: number): string {
+  return `As good as it gets here — ${formatAccuracy(accuracyM)}`
+}
+
+/**
  * Below this, an improvement is not worth claiming: it is a tenth of the
  * precision the readout prints, so anything smaller would render as
  * "0.0 m sharper", which is a claim of improvement dressed as none.
@@ -107,10 +159,13 @@ const IMPROVEMENT_FLOOR_M = 0.05
  * How much sharper the accumulated fix is than the one the tap wrote.
  *
  * **Not presented as signed, because it cannot be** (spec §9.3, corrected).
- * The delta is structurally incapable of going negative — inverse-variance
- * weighting is monotonic in the sample set and the tap's own reading is always
- * a member of it — so a signed presentation would advertise a worsening this
- * number can never show. The honest reading of it is "how much sharper", and
+ * On the run the tap starts, the delta is structurally incapable of going
+ * negative — inverse-variance weighting is monotonic in the sample set and the
+ * tap's own reading is always a member of it — so a signed presentation would
+ * advertise a worsening this number can never show. On a repeat run it can go
+ * negative, and is still not shown signed: it falls into the same "no sharper
+ * … yet" branch as an improvement too small to print, which is the honest
+ * reading of a second attempt that did not beat the first. The honest reading of it is "how much sharper", and
  * the spread beside it is what reports a capture that went badly.
  *
  * `tapHadPosition` is false when the tap found no fix at all, where the
@@ -118,11 +173,19 @@ const IMPROVEMENT_FLOOR_M = 0.05
  * Saying "no sharper than the tap" there would describe a comparison against a
  * measurement that was never taken.
  */
-function describeImprovement(preview: CapturePreview | null): string {
+function describeImprovement(preview: CapturePreview | null, refining: boolean): string {
   if (preview === null) return 'nothing usable to average yet'
   if (!preview.tapHadPosition) return 'from no position at all'
-  if (preview.improvedByM < IMPROVEMENT_FLOOR_M) return 'no sharper than the tap yet'
-  return `${preview.improvedByM.toFixed(1)} m sharper than the tap`
+  // What the improvement is measured against, which is not always the tap: a
+  // repeat run (`refineAgain`, offered when a capture settles short of the
+  // crosshair) is measured against the accuracy the previous run left on the
+  // record. Naming the tap there would name a baseline this run is not being
+  // compared to — and it is also the one case the number can come back at or
+  // below zero, because that baseline is not a member of this run's own
+  // samples (see `CapturePreview.improvedByM`).
+  const baseline = refining ? 'the last run' : 'the tap'
+  if (preview.improvedByM < IMPROVEMENT_FLOOR_M) return `no sharper than ${baseline} yet`
+  return `${preview.improvedByM.toFixed(1)} m sharper than ${baseline}`
 }
 
 /**
@@ -345,8 +408,22 @@ function CaptureBody() {
    * a dashed border and a `POOR FIX` word already make honest, and the readout
    * beside it prints `—` rather than a number. Nothing here blocks a capture
    * either way (doctrine rule 4).
+   *
+   * **Steadied, not raw** (spec §9.2, hysteresis; `steadyGrade.ts` for the
+   * measurements). `gradeAccuracy`'s good/fair boundary is 5 m, and at the
+   * site this app was measured on the raw live reading hovers either side of
+   * it — the owner watched the ready state flip amber → green → amber → green
+   * on jitter alone. `useSteadyGrade` delays a fall back across a boundary
+   * until the accuracy is clearly past it, and never invents a grade the
+   * accuracy has not crossed into. `gradeAccuracy` itself is untouched: it is
+   * shared, it is spec'd, and the diagnostics instrument reads it raw on
+   * purpose.
+   *
+   * ONE value, used for the word and for the colour alike (doctrine rule 9):
+   * `CaptureDial` derives both from the `grade` prop, so they cannot disagree
+   * at any instant.
    */
-  const grade: FixGradeName = shownAccuracyM === null ? 'poor' : gradeAccuracy(shownAccuracyM)
+  const grade: FixGradeName = useSteadyGrade(shownAccuracyM)
 
   /**
    * The accuracy `CaptureDial` draws its circle from. Unlike the readout
@@ -526,7 +603,7 @@ function CaptureBody() {
               }}
             >
               <Type variant="small" dim testID="capture-improvement">
-                {describeImprovement(capture.preview)}
+                {describeImprovement(capture.preview, capture.refining)}
               </Type>
               <Type variant="small" dim testID="capture-spread">
                 {describeSpread(capture.preview)}
@@ -841,9 +918,28 @@ function RecordedState({
 }) {
   const { theme } = useTheme()
   const record = capture.record
+  /**
+   * How this capture finished, if it finished rather than being cut short.
+   *
+   * **The completion is shown here and not in the acquiring state, and that
+   * is forced rather than chosen.** A plateau ends the countdown in the same
+   * render that first reports it (spec §9.1.5, and `useCapture`'s plateau
+   * effect), so a completion drawn during the wait would exist for about one
+   * frame on a device — the same reason §9.3's plateau sentence is not shown
+   * live. This state is where a finished capture is actually looked at, so it
+   * is where the moment belongs.
+   */
+  const completion = completionOf(capture)
+  /**
+   * The fix the record actually holds, when it holds one. A `'none'` record is
+   * a real capture with no position (doctrine rule 4), and there is no radius
+   * to draw for it — so it gets the summary and no dial at all rather than a
+   * dial drawn from an accuracy nobody measured.
+   */
+  const finalFix = record !== null && record.fix.quality !== 'none' ? record.fix : null
 
   return (
-    <Screen spokenDescription="A survey point has been recorded and its position is final. Its capture number, final accuracy and how the wait ended, a name you can give it, and two ways onward: take another reading, or leave.">
+    <Screen spokenDescription="A survey point has been recorded and its position is final. Where the capture got to, its capture number, final accuracy and how the wait ended, a name you can give it, and the ways onward: take another reading, or leave.">
       {/*
         This state scrolls for the same reason the acquiring one does: rotation
         is unlocked, a phone in landscape has roughly 360dp of height, and this
@@ -856,6 +952,43 @@ function RecordedState({
         contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
       >
         <View style={{ gap: spacing.md }}>
+          {/*
+            WHERE THE CAPTURE GOT TO (spec §9.2.1).
+
+            The same dial, drawn from the fix that was actually stored, so the
+            picture she watched converging is the picture of the result. On a
+            settled completion the circle stays exactly where its accuracy puts
+            it and a companion ring marks that radius, with the crosshair still
+            visible inside it: the gap between the two is how far this spot fell
+            short of what the device can do. On a locked one the crosshair is
+            lit and the circle is on it.
+
+            The circle is never moved onto the crosshair to make a completion
+            look better. "The radius always means metres" (spec §9.2) is the
+            invariant the whole dial rests on — that alternative was considered
+            for the settled level and rejected, because a circle snapped to a
+            radius its accuracy has not earned makes the picture lie.
+          */}
+          {finalFix === null ? null : (
+            <CaptureDial
+              grade={gradeAccuracy(finalFix.accuracyM)}
+              accuracyM={finalFix.accuracyM}
+              settled={completion === 'settled'}
+              locked={completion === 'locked'}
+            >
+              {completion === 'locked' ? (
+                <Type variant="label" testID="capture-lock-label">
+                  {'· LOCKED ON'}
+                </Type>
+              ) : null}
+              {completion === 'settled' ? (
+                <Type variant="body" testID="capture-settled-label">
+                  {settledSentence(finalFix.accuracyM)}
+                </Type>
+              ) : null}
+            </CaptureDial>
+          )}
+
           {record === null ? (
             <Type variant="title" testID="capture-recorded">
               POINT RECORDED
@@ -919,6 +1052,37 @@ function RecordedState({
           {record === null ? null : (
             <RecordedAffordances record={record} db={db} deviceId={deviceId} />
           )}
+
+          {/*
+            ANOTHER GO, WHEN THE CAPTURE SETTLED SHORT (spec §9.2.1).
+
+            Offered only for a settled completion: a locked one has reached
+            what this receiver can do, and a capture she cut short with ACCEPT
+            NOW ended on her own decision rather than on a measurement that ran
+            out of improvement.
+
+            It keeps the record. The capture number may already be written on a
+            sample tube, and a real measurement is not discarded for a second
+            attempt that might be no better — `refineAgain` runs the same
+            in-place refinement over the same row, and both runs appear in its
+            event log.
+          */}
+          {completion === 'settled' ? (
+            <View style={{ gap: spacing.xs }}>
+              <Button
+                testID="capture-try-again"
+                label="TRY AGAIN"
+                spokenLabel="Stand still and measure this same point again"
+                kind="accurate"
+                size="field"
+                onPress={capture.refineAgain}
+              />
+              <Type variant="small" dim testID="capture-try-again-note">
+                Another go measures this same point again and writes what it finds onto this same
+                capture — the number does not change, and both runs stay in its history.
+              </Type>
+            </View>
+          ) : null}
 
           <Button
             testID="capture-button"

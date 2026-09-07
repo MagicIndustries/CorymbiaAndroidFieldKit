@@ -1,7 +1,7 @@
 import React from 'react'
 import { processColor } from 'react-native'
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native'
-import { INPUT_AFFORDANCE_ORDER, ThemeProvider } from '@corymbia/ui'
+import { INPUT_AFFORDANCE_ORDER, ThemeProvider, isLocked, radiusForMetres } from '@corymbia/ui'
 import { darkTheme, type as typeScale } from '@corymbia/tokens'
 import {
   averageReadings,
@@ -388,12 +388,34 @@ const MIN_SAMPLES = 10
  * the override is never touched, so a countdown that ends here ended on the
  * plateau or not at all.
  */
-async function standStillUntilItSettles() {
+async function standStillUntilItSettles(accuracyM = FLAT_M) {
   for (let i = 0; i < MIN_SAMPLES - 1; i += 1) {
-    await emit(FLAT_M)
+    await emit(accuracyM)
   }
   await settle()
 }
+
+/**
+ * The accuracy a flat hold of `MIN_SAMPLES` readings at `accuracyM` actually
+ * reports, through the real `averageReadings` — the number the completion is
+ * judged against, rather than one typed in here.
+ */
+function averagedOverAFlatHold(accuracyM: number): number {
+  return averageReadings(
+    Array.from({ length: MIN_SAMPLES }, (_, i) => reading(accuracyM, START_MS + i * 1000)),
+  ).accuracyM
+}
+
+/**
+ * A flat hold whose plateau lands ABOVE the crosshair — the settled
+ * completion, and the ordinary case in the field.
+ *
+ * 6 m is not arbitrary: with uniform readings `averageReadings` reports
+ * `max(σ/√n, σ/3)`, so a flat hold at 6 m settles at 2.0 m — a good fix by
+ * `gradeAccuracy` (under 5 m) sitting well outside a crosshair pinned to
+ * 1.4 m, which is exactly the mismatch the settled level exists for.
+ */
+const SETTLES_SHORT_M = 6
 
 /**
  * The dial's own subtree.
@@ -1362,5 +1384,286 @@ describe('the ready guard (status.state !== "ready")', () => {
     // render, not merely fail to show the right words.
     expect(screen.getByText(/Database opening/)).toBeTruthy()
     expect(screen.queryByTestId('capture-button')).toBeNull()
+  })
+})
+
+/**
+ * THE DEFECT THAT SHIPPED (§9.2, `field.dialMax`).
+ *
+ * On a Samsung S25 the dial filled the entire viewport: no accuracy, no
+ * verdict, no seconds, and no capture button. Every reported symptom — "it
+ * went very slowly and never locked", "it's never auto completing, just
+ * sitting there measuring" — followed from the one cause, that the only
+ * control was off-screen so no capture was ever started.
+ *
+ * `CaptureDial.test.tsx` asserts the bound on the component; this asserts it
+ * survives on the screen that places one, alongside the control it took away.
+ */
+describe('the dial cannot take the screen (the S25 field defect)', () => {
+  it('draws the dial inside a bounded square rather than growing to fill the viewport', async () => {
+    await arriveWithAFix()
+    await tap()
+
+    const style: unknown = screen.getByTestId('dial-canvas').props.style
+    if (typeof style !== 'object' || style === null || Array.isArray(style)) {
+      throw new Error(`Expected dial-canvas to carry one style object, got ${typeof style}.`)
+    }
+    const { maxWidth, aspectRatio } = style as { maxWidth?: unknown; aspectRatio?: unknown }
+
+    expect(typeof maxWidth).toBe('number')
+    // Inside the 360dp width of the phone this failed on, so the readouts and
+    // the 72dp control still have a screen left to sit on.
+    expect(maxWidth as number).toBeGreaterThan(0)
+    expect(maxWidth as number).toBeLessThanOrEqual(320)
+    expect(aspectRatio).toBe(1)
+  })
+
+  it('still has the accuracy, the verdict and the control on screen with it', async () => {
+    // The screenshot from the device showed none of these. Asserted together
+    // rather than separately, because it is their simultaneous absence that
+    // was the bug: §9.4 wants the accuracy the largest *text*, §9.1.2 wants
+    // the control visible with the readouts, and a dial that fills the
+    // viewport has implemented neither.
+    await arriveWithAFix()
+    await tap()
+
+    const dial = insideTheDial()
+    expect(dial.getByTestId('capture-accuracy')).toBeTruthy()
+    expect(dial.getByTestId('capture-verdict')).toBeTruthy()
+    expect(dial.getByTestId('capture-seconds')).toBeTruthy()
+    expect(dial.getByTestId('capture-button')).toHaveTextContent('ACCEPT NOW')
+  })
+})
+
+/**
+ * THE TWO COMPLETIONS (spec §9.2.1).
+ *
+ * Both mean "`holdVerdict` says this stopped improving". They differ on
+ * whether it stopped improving on the crosshair or short of it, and the
+ * difference has to be visible: a settled capture must never be dressed up as
+ * a locked one, because the circle's radius is the app's claim about metres.
+ */
+describe('the two completions (spec §9.2.1)', () => {
+  /** The radius the accuracy circle is actually drawn at. */
+  function circleRadius(): number {
+    const r: unknown = screen.getByTestId('dial-accuracy').props.r
+    if (typeof r !== 'number') {
+      throw new Error(`Expected dial-accuracy's r to be a number, got ${typeof r}.`)
+    }
+    return r
+  }
+
+  it('says how good it actually got when a capture settles short of the crosshair', async () => {
+    await arriveWithAFix(SETTLES_SHORT_M)
+    await tap()
+    await standStillUntilItSettles(SETTLES_SHORT_M)
+
+    // It really did end on the plateau rather than the cap — nine seconds of
+    // readings against a fifteen-second cap, and the override untouched.
+    expect(screen.getByTestId('capture-message')).toHaveTextContent(
+      'The fix stopped improving, so the countdown finished itself.',
+    )
+
+    // The words name the accuracy reached, not a convergence it did not make.
+    const settledAt = averagedOverAFlatHold(SETTLES_SHORT_M)
+    expect(readoutText('capture-settled-label')).toBe(
+      `As good as it gets here — ±${settledAt.toFixed(1)} m`,
+    )
+    // And the lock's own word is nowhere near it.
+    expect(screen.queryByTestId('capture-lock-label')).toBeNull()
+  })
+
+  /**
+   * THE CIRCLE MUST NOT BE MOVED TO A RADIUS ITS ACCURACY HAS NOT EARNED.
+   *
+   * Snapping a settled capture's circle onto the crosshair was considered and
+   * rejected by the owner: "the radius always means metres" (spec §9.2) is
+   * what the whole dial rests on, and a circle drawn on the target after a
+   * capture that never reached it makes the picture lie. This is the test
+   * that fails if someone reaches for that shortcut.
+   */
+  it('leaves the settled circle exactly where its accuracy puts it, outside the crosshair', async () => {
+    await arriveWithAFix(SETTLES_SHORT_M)
+    await tap()
+    await standStillUntilItSettles(SETTLES_SHORT_M)
+
+    const settledAt = averagedOverAFlatHold(SETTLES_SHORT_M)
+    expect(circleRadius()).toBeCloseTo(radiusForMetres(settledAt), 5)
+    expect(isLocked(circleRadius())).toBe(false)
+
+    // The companion ring marks that radius — where the capture actually got
+    // to — with the crosshair still visible inside it. The gap between them
+    // is the signal.
+    const ring: unknown = screen.getByTestId('dial-settled-ring').props.r
+    expect(typeof ring).toBe('number')
+    expect(ring as number).toBeGreaterThan(circleRadius())
+  })
+
+  it('gives the full lock only when the capture also reached the floor', async () => {
+    // The same plateau, from a hold flat at 0.8 m, which averages to about
+    // 0.27 m — inside the 1.4 m crosshair.
+    await arriveWithAFix(FLAT_M)
+    await tap()
+    await standStillUntilItSettles()
+
+    expect(readoutText('capture-lock-label')).toBe('· LOCKED ON')
+    expect(screen.queryByTestId('capture-settled-label')).toBeNull()
+    expect(screen.queryByTestId('dial-settled-ring')).toBeNull()
+    expect(isLocked(circleRadius())).toBe(true)
+    // The dial's own plain fact agrees, which is the channel that survives
+    // for a screen reader (doctrine rule 9).
+    expect(screen.getByTestId('capture-dial').props.accessibilityValue).toEqual({
+      text: 'Locked on',
+    })
+  })
+
+  it('treats a capture she cut short as neither', async () => {
+    // ACCEPT NOW ends the wait on her decision, not on a measurement that ran
+    // out of improvement — so there is nothing to celebrate and nothing to
+    // offer another go at.
+    await arriveWithAFix(SETTLES_SHORT_M)
+    await tap()
+    await emit(SETTLES_SHORT_M)
+    await acceptNow()
+
+    expect(screen.getByTestId('capture-message')).toHaveTextContent('You accepted it early.')
+    expect(screen.queryByTestId('capture-settled-label')).toBeNull()
+    expect(screen.queryByTestId('capture-lock-label')).toBeNull()
+    expect(screen.queryByTestId('capture-try-again')).toBeNull()
+  })
+})
+
+/**
+ * ANOTHER GO AT A CAPTURE THAT SETTLED SHORT.
+ *
+ * The record is what is being protected: its capture number may already be
+ * written on a sample tube, so a second attempt refines the row that exists
+ * rather than starting a second capture beside it.
+ */
+describe('another go at a settled capture', () => {
+  async function captureThatSettles() {
+    await arriveWithAFix(SETTLES_SHORT_M)
+    await tap()
+    await standStillUntilItSettles(SETTLES_SHORT_M)
+  }
+
+  it('is offered when a capture settles, and not when it locks on', async () => {
+    await captureThatSettles()
+    expect(screen.getByTestId('capture-try-again')).toBeTruthy()
+
+    await takeAnotherReading()
+    await arriveWithAFix(FLAT_M)
+    await tap()
+    await standStillUntilItSettles()
+
+    // A capture that reached the floor has had what this hardware can give it.
+    expect(screen.queryByTestId('capture-try-again')).toBeNull()
+  })
+
+  it('keeps the record and runs another countdown over it', async () => {
+    await captureThatSettles()
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+
+    await fireEvent.press(screen.getByTestId('capture-try-again'))
+    await settle()
+
+    // Back in the acquiring state, with the one control accepting again.
+    expect(captureButton()).toHaveTextContent('ACCEPT NOW')
+    expect(screen.getByTestId('dial-ring-progress')).toBeTruthy()
+    // No second record: the number on the tube is still this capture's.
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+
+    await emit(3)
+    await acceptNow()
+
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(2)
+    for (const call of mockRepo.refineRecordFix.mock.calls) {
+      expect(call[1]).toMatchObject({ recordId: 'record-1' })
+    }
+    expect(readoutText('capture-recorded')).toBe('CAPTURE 1')
+  })
+
+  it('says what the second run is measured against, which is not the tap', async () => {
+    await captureThatSettles()
+    await fireEvent.press(screen.getByTestId('capture-try-again'))
+    await settle()
+    await emit(3)
+
+    // The baseline is what the first run left on the record, and the words
+    // say so — naming the tap here would name a comparison this run is not
+    // making.
+    expect(readoutText('capture-improvement')).toMatch(/than the last run/)
+    expect(readoutText('capture-improvement')).not.toMatch(/than the tap/)
+  })
+})
+
+/**
+ * THE GRADE THE SCREEN SHOWS (spec §9.2, hysteresis).
+ *
+ * `gradeAccuracy`'s good/fair boundary is exactly 5 m, and at the site this
+ * app was measured on the raw live reading hovers either side of it. The owner
+ * watched the ready state flip amber → green → amber → green with no change in
+ * the quality of the fix.
+ */
+describe('the grade the screen shows', () => {
+  /**
+   * The receiver's own jitter at that site once the trend has flattened:
+   * about ±0.5 m around 4.7 m, straddling the boundary. Same fixture as
+   * `steadyGrade.test.ts`, driven through the whole screen here.
+   */
+  const JITTER_ACROSS_THE_BOUNDARY = [4.8, 5.1, 4.7, 5.3, 4.9, 5.2, 4.4, 5.0, 4.2]
+
+  function gradeWordOnScreen(): string {
+    for (const word of ['GOOD FIX', 'FAIR FIX', 'POOR FIX']) {
+      if (screen.queryByText(word) !== null) return word
+    }
+    throw new Error('The dial rendered no grade word at all.')
+  }
+
+  it('does not flicker while the live reading crosses the boundary on jitter', async () => {
+    // The raw classifier really does oscillate on this series — asserted
+    // first, so this cannot pass because the fixture stopped crossing.
+    const raw = JITTER_ACROSS_THE_BOUNDARY.map(gradeAccuracy)
+    expect(raw.filter((grade, i) => i > 0 && grade !== raw[i - 1]).length).toBeGreaterThan(2)
+
+    // Opens above the boundary, as the measured run does.
+    await arriveWithAFix(5.2)
+    const shown = [gradeWordOnScreen()]
+    for (const accuracyM of JITTER_ACROSS_THE_BOUNDARY) {
+      await emit(accuracyM)
+      shown.push(gradeWordOnScreen())
+    }
+
+    // One change, from the reading that genuinely crossed into good.
+    expect(shown.filter((word, i) => i > 0 && word !== shown[i - 1])).toEqual(['GOOD FIX'])
+    expect(shown[0]).toBe('FAIR FIX')
+    expect(shown[shown.length - 1]).toBe('GOOD FIX')
+  })
+
+  it('keeps the colour and the word saying the same thing at every instant', async () => {
+    // Doctrine rule 9: they come from one value, not two. Sampled at a
+    // reading whose RAW grade disagrees with what is displayed — 5.2 m is
+    // fair to `gradeAccuracy` — which is where a second, separately-computed
+    // colour would show up.
+    await arriveWithAFix(4.8)
+    await emit(5.2)
+
+    expect(gradeAccuracy(5.2)).toBe('fair')
+    expect(gradeWordOnScreen()).toBe('GOOD FIX')
+    expect(screen.getByTestId('dial-accuracy').props.stroke).toEqual({
+      type: 0,
+      payload: processColor(darkTheme.colors.statusGood),
+    })
+  })
+
+  it('reports a fix that has genuinely degraded, rather than holding a grade it lost', async () => {
+    // Hysteresis delays a change; it is not a licence to keep claiming a
+    // grade. A metre past the boundary is a different fix, not jitter.
+    await arriveWithAFix(4.8)
+    expect(gradeWordOnScreen()).toBe('GOOD FIX')
+
+    await emit(6.5)
+    expect(gradeWordOnScreen()).toBe('FAIR FIX')
   })
 })
