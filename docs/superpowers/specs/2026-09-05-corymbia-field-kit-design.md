@@ -636,50 +636,74 @@ Placement follows the reach zone setting: a bottom band by default, and the bott
 under the dominant thumb on a tablet in landscape. Handedness still drives that. Which
 control takes the dominant side no longer means anything, because there is one (§5.4).
 
-### 9.2 The traffic-light frame
+### 9.2 The dial
 
-A coloured frame, live at all times, doing two jobs:
+**This supersedes the rectangular traffic-light frame.** That design put a coloured border
+around the capture block and drew the countdown as a stroke on its perimeter. It was built,
+and it failed on hardware for a reason no desk review found: the border and the countdown
+stroke were the same colour at the same width on the same path, so the stroke did not draw a
+countdown *onto* the frame — it covered it, and retreating, uncovered an identical ring
+beneath. On a good or fair fix nothing appeared to move for the entire wait. The correction
+is not a better stroke; it is a different object.
 
-- **Fix quality**, continuously — green, amber, red. Readable from peripheral vision in
-  glare, with gloves, while moving.
-- **Countdown progress**, emptying around the perimeter as the wait runs down. ("Charging" is
-  what an earlier draft said, and it is a leftover from the superseded accumulated-readings
-  model, where the only measure of progress was how many readings a hold had gathered. It
-  contradicted the paragraph below, and the implementation empties.)
+**The control is one large circular dial, centred.** Coordinates sit above it in monospace,
+small — context about the receiver, not the thing she is watching. The dial does three jobs
+at once, and each answers a different question, so none of them competes:
 
-Two things changed with §9.1 and are stated here rather than left to be inferred:
+- **The ring is the clock.** It empties as the seconds run down. "How much longer."
+- **The filled circle is the accuracy, drawn as a real radius**, shrinking as the fix
+  converges. "How good, and is it still getting better." A number states the metres; the
+  circle is what makes convergence visible without reading anything.
+- **The crosshair at the centre is the target**, sized to the sharpest this hardware actually
+  reaches. "How close to as good as it gets."
 
-- **The frame is around the capture block, not around the whole screen.** It encloses the
-  readout and the control together, because §9.1.2 requires them to be one object within
-  sight of the thumb. A frame around the entire screen would put its own perimeter as far
-  from the button as the old readout panel was, which is the defect being fixed.
-- **The perimeter shows the countdown, not accumulated readings.** Under the superseded
-  press-and-hold model the only measure of progress was how many readings a hold had
-  gathered. There is now a fixed wait with a known end, so the perimeter is the honest
-  progress of *that* — it empties as the seconds run down and completes when the countdown
-  does. Sample count is still shown, as a number, inside the frame.
+**The radius always means metres.** The crosshair is sized to the measured floor — 1.4 m on
+the S25 outdoors, §9.1's table — and every other radius is scaled against that same mapping.
+This is what makes the next paragraph true rather than decorative.
 
-Always backed by the word in the chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`), the numeric
-readout, and a dashed border when poor. Colour never carries the meaning alone.
+**A good fix lands exactly on the crosshair. A poor one visibly stops short and never
+reaches it.** That falls out of the honest mapping rather than being drawn on top of it, and
+it is intended behaviour, not a gap: a capture that never settled looks different from one
+that did, at a glance, with nothing to read. **Do not "fix" this into always locking.**
 
-**The frame itself pulses slowly while the fix is still being refined**, and stops when the
-point is recorded — motion is what says "still working, stand still" from peripheral vision,
-where a word cannot be read. It must respect the system's reduced-motion setting, rendering
-steady and running no animation when that is on.
+### 9.2.1 The lock
 
-The whole frame breathes, not a secondary ring inside it. The prototype pulsed an inset ring
-because that was the easy way to keep the grade colour at full strength — a naive pulse of
-the frame's own colour would make a good fix look worse at the bottom of every cycle, which
-is the one thing this frame must never do. Both properties are required: the frame is what
-moves, *and* the fix quality stays honestly readable at every point in the cycle. Solving
-that is Plan 3's, and it is a real constraint, not a preference.
+When the circle closes onto the crosshair, the fix has converged as far as this receiver
+takes it. The target stops being something aimed at and becomes something hit:
+
+- **The circle answers for itself** — a brief snap inside the crosshair, as if catching, then
+  easing back to rest on it; its interior fills and its outline firms. Arriving at the right
+  size and doing nothing is not enough; the moment has to be visible from peripheral vision,
+  not inferred from a radius.
+- **The crosshair lights** in the grade colour and thickens.
+- **A ripple goes outward once** — two rings, the second trailing the first by about a fifth
+  of a second, because a single ring reads as a flicker while a pair reads as a ripple. Once,
+  then nothing. A confirmation, not an alarm on a screen she watches all day.
+- **And the words say so.** `GOOD FIX · LOCKED ON`, and the sentence changes. Colour and
+  motion never carry the lock alone (doctrine rule 9): in glare, or for a colour-blind
+  reader, the word is what survives.
+
+### 9.2.2 Motion, and when to refuse it
+
+The dial's motion must respect the system's reduced-motion setting — but **the setting means
+"do not animate at me unbidden", not "refuse an animation I asked for"**. Motion that runs on
+its own — the pulse, an idle state — stops when reduced motion is on. Motion that is the
+direct result of something she did — tapping capture, and the wait that follows — is a
+response to a request, and a control that silently refuses to respond looks broken rather
+than considerate. Where a page or screen exists *to be judged in motion*, it opens still,
+says why, and offers to play.
+
+This distinction was learnt the hard way: a mockup built to settle this very design rendered
+one static frame and appeared broken, because it treated both cases as the same case.
+
+**Always backed by words**: the grade chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`), the numeric
+accuracy, a dashed treatment when poor, and the lock's own label. Colour never carries meaning
+alone.
 
 **There is no separate `SHARPENING…` state.** That chip existed because a hold produced a
 provisional number that was not yet the saved one. Under §9.1 the record is already on disk
-and the countdown is refining it, so at every instant the frame grades the fix that would
-actually be stored if the wait ended now — which is a real graded fix, not a pending one.
-The countdown is shown by the seconds remaining and the perimeter, not by replacing the
-grade with a status word.
+and the countdown is refining it, so at every instant the dial grades the fix that would
+actually be stored if the wait ended now — a real graded fix, not a pending one.
 
 ### 9.3 What the countdown says in words
 
@@ -763,13 +787,18 @@ Satellites, datum, altitude, and live coordinates in monospace. These are contex
 receiver, are not about the convergence of the capture in hand, and may sit anywhere on the
 screen.
 
-**The accuracy and the seconds remaining are not among them, and are not sized like them.**
-They are the two numbers she is standing still for, and in the acquiring state they are the
-largest things on the screen — legible at arm's length, in glare, without leaning in. The
-diagnostics prototype rendered them at the same weight as the rest of its instrument
-readouts, which is correct for an instrument and wrong for the field. Plan 3 sizes them as
-the primary content of that state, and everything else on the acquiring screen is
-subordinate to them.
+**The accuracy is not among them, and is not sized like them.** It is the number she is
+standing still for, and in the acquiring state it is the largest thing on the screen —
+legible at arm's length, in glare, without leaning in. The diagnostics prototype rendered it
+at the same weight as the rest of its instrument readouts, which is correct for an instrument
+and wrong for the field.
+
+**The seconds remaining are answered by the dial, so the number stops competing.** An earlier
+version of this section made accuracy and seconds equally the largest things on the screen,
+which was right when the only countdown feedback was a number. §9.2's ring now answers "how
+much longer" without being read, so the numeric seconds sits with the sample count and the
+improvement — present, precise, and subordinate. Two numbers at the same size compete; one
+number and a moving ring do not.
 
 This is a specific instance of the doctrine's single-focus rule: a screen she looks at while
 holding a phone still over a point should answer *how good is it* and *how much longer*
