@@ -16,9 +16,9 @@ six workspaces in all.
 
 Commands, from the repository root:
 
-- `pnpm turbo run test` — all tests (`packages/tokens`, `packages/brand`,
-  `packages/ui`, `packages/data` and `packages/geo`; `apps/fieldkit` has no
-  tests of its own yet)
+- `pnpm turbo run test` — all tests, across all six workspaces (`packages/tokens`,
+  `packages/brand`, `packages/ui`, `packages/data`, `packages/geo` and
+  `apps/fieldkit`)
 - `pnpm turbo run lint` — ESLint across all six workspaces, including the three
   architectural rules described in `docs/ui-doctrine.md`
 - `pnpm turbo run typecheck` — TypeScript across all six workspaces
@@ -46,6 +46,28 @@ already cost time once each:
 A release build (`npx expo run:android --variant release`) embeds the JavaScript
 bundle, so the APK runs with no development machine attached. That is the build to
 use for judging the app in the field.
+
+## Testing the app
+
+`apps/fieldkit` now has its own Jest harness (`jest-expo` +
+`@testing-library/react-native`), currently covering the diagnostics capture
+screen. Four things about it are not obvious:
+
+- **There is no `apps/fieldkit/babel.config.js`, deliberately.** `jest-expo`
+  falls back to `expo/internal/babel-preset` when a project has none, which is
+  the preset the real build uses anyway. Adding one purely for Jest would put a
+  file the native build also reads into the tree for an unrelated reason.
+- **`@testing-library/react-native` v14 is async throughout.** `render`,
+  `fireEvent.*` and `unmount` all return promises. An unawaited one lands its
+  work in the middle of the next assertion.
+- **Fake timers must leave `setImmediate` alone**
+  (`jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] })`).
+  React's async `act` drains its work queue through `setImmediate`; faking it
+  makes every `await act(...)` wait on a callback the test itself is holding,
+  and every test fails on the 5 s timeout rather than on its assertion.
+- **Reduced motion defaults to on** (`apps/fieldkit/jest.setup.js`). The capture
+  frame runs an `Animated.loop` while a countdown is active, and a loop under
+  fake timers is an inexhaustible source of pending timers.
 
 ## Design and UI rules
 

@@ -1,0 +1,617 @@
+import React from 'react'
+import { act, fireEvent, render, screen } from '@testing-library/react-native'
+import { AccessibilityInfo } from 'react-native'
+import { ThemeProvider } from '@corymbia/ui'
+import { createFakeLocationSource, type Reading } from '@corymbia/geo'
+import type { Fix, FieldRecord } from '@corymbia/data'
+
+/**
+ * Tests for the diagnostics capture control.
+ *
+ * WHAT IS AND IS NOT MOCKED, and why.
+ *
+ * Not mocked: `averageReadings`, `holdVerdict`, `gradeAccuracy`, `nowIso`,
+ * `sampleEvidence`. They are the logic under observation. A test that stubbed
+ * `holdVerdict` could not tell whether the screen ends a countdown on a plateau,
+ * which is the single most important rule below.
+ *
+ * Mocked: the database. Not because SQLite is inconvenient but because it is
+ * already proved — 338 tests in packages/data cover the schema, the CHECK
+ * constraints and every repository function this screen calls. What is NOT
+ * proved anywhere is this screen's state machine: how many records one tap
+ * produces, how many refinements one countdown produces, and what happens to
+ * the timers when the screen goes away. Standing up a real database would test
+ * packages/data a second time and this screen no harder.
+ *
+ * Mocked: `createExpoLocationSource`, replaced by `createFakeLocationSource`
+ * from @corymbia/geo — the scripted source that exists for exactly this, and
+ * whose `emit` lets a test deliver readings on demand, including the sequences
+ * that are tedious or impossible to produce outdoors (an accuracy that goes
+ * flat, an accuracy that gets worse).
+ */
+
+// ---------------------------------------------------------------------------
+// Module mocks. Every factory below reaches its fixtures through a lazy arrow
+// (`(...args) => mockRepo.createRecord(...args)`) rather than by spreading them
+// in directly: `jest.mock` calls are hoisted above the `const` declarations, so
+// a factory that touched a fixture at definition time would run before it
+// exists.
+// ---------------------------------------------------------------------------
+
+let mockSource: ReturnType<typeof createFakeLocationSource>
+
+jest.mock('@corymbia/geo', () => {
+  const actual = jest.requireActual('@corymbia/geo')
+  return {
+    ...actual,
+    // The one thing in this package that talks to a device. Everything else —
+    // the averaging, the grading, the hold verdict, the ambient cache — is the
+    // real implementation.
+    createExpoLocationSource: () => mockSource,
+  }
+})
+
+const mockRepo = {
+  listProjects: jest.fn(),
+  listActivities: jest.fn(),
+  createProject: jest.fn(),
+  createActivity: jest.fn(),
+  createRecord: jest.fn(),
+  refineRecordFix: jest.fn(),
+  listRecords: jest.fn(),
+}
+
+jest.mock('@corymbia/data', () => {
+  const actual = jest.requireActual('@corymbia/data')
+  return {
+    ...actual,
+    listProjects: (...args: unknown[]) => mockRepo.listProjects(...args),
+    listActivities: (...args: unknown[]) => mockRepo.listActivities(...args),
+    createProject: (...args: unknown[]) => mockRepo.createProject(...args),
+    createActivity: (...args: unknown[]) => mockRepo.createActivity(...args),
+    createRecord: (...args: unknown[]) => mockRepo.createRecord(...args),
+    refineRecordFix: (...args: unknown[]) => mockRepo.refineRecordFix(...args),
+    listRecords: (...args: unknown[]) => mockRepo.listRecords(...args),
+  }
+})
+
+const mockDevice = {
+  id: 'device-under-test',
+  installId: 'install-1',
+  label: 'test-handset',
+  manufacturer: 'Test',
+  brand: 'Test',
+  modelName: 'Model',
+  modelId: 'model-1',
+  deviceType: 'phone' as const,
+  osName: 'Android',
+  osVersion: '15',
+  isPhysical: true,
+  appVersion: '1.0.0',
+  appBuild: '1',
+  firstSeenAt: '2026-09-05T00:00:00.000Z',
+  lastSeenAt: '2026-09-05T00:00:00.000Z',
+}
+
+const mockSettings = {
+  theme: 'dark' as const,
+  handedness: 'right' as const,
+  capturePrimary: 'saveNow' as const,
+  density: 'comfortable' as const,
+}
+
+const mockUseSettings = {
+  settings: mockSettings,
+  updateSetting: () => Promise.resolve(),
+}
+
+// Every value below is a module-level constant returned by identity, which is
+// what the real provider does — it hands out the one `db` handle, the one
+// registered device and the one settings object it holds in context.
+//
+// It has to be identity-stable, not merely equal. `DiagnosticsBody`'s
+// on-arrival load is `useEffect(..., [db, setRecords])`; a mock that returned a
+// fresh object per call changes `db` on every render, so the effect re-runs,
+// calls `setRecords` with a fresh array, re-renders, and the screen never stops
+// rendering. That is a property of the mock rather than of the screen — but it
+// is worth knowing that this effect is one `db` identity away from a loop.
+const mockDb = { handle: 'not a real database' }
+const mockStatus = { state: 'ready' as const, error: null, applied: ['001_initial'] }
+
+jest.mock('../../src/db/provider', () => ({
+  // A handle, not a database. Nothing in this file calls a method on it: every
+  // repository function that would has been replaced above, and the screen only
+  // ever passes it through.
+  useDatabase: () => mockDb,
+  useDatabaseStatus: () => mockStatus,
+  useDevice: () => mockDevice,
+  useSettings: () => mockUseSettings,
+}))
+
+// Imported after the mocks so it picks them up.
+import Diagnostics from '../diagnostics'
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+/**
+ * A promise a test resolves by hand, so a capture can be held open between two
+ * of its awaits — which is the window the double-tap defect lived in.
+ *
+ * Written without a definite-assignment assertion: the initial no-op is
+ * replaced synchronously by the executor, which runs before `Promise` returns.
+ */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let settle: (value: T) => void = () => undefined
+  const promise = new Promise<T>((resolveWith) => {
+    settle = resolveWith
+  })
+  return {
+    promise,
+    resolve: (value) => {
+      settle(value)
+    },
+  }
+}
+
+/**
+ * A reading with everything the save path insists on: a usable accuracy, and an
+ * explicit `isMocked: false`. `undefined` there is the platform declining to
+ * say, which `buildDeliberateFix` refuses to store — correct behaviour, and not
+ * what any test below is about.
+ */
+function reading(accuracyM: number, timestampMs: number): Reading {
+  return {
+    latitude: -37.8136,
+    longitude: 144.9631,
+    accuracyM,
+    altitudeM: 31,
+    verticalAccuracyM: 4,
+    isMocked: false,
+    timestampMs,
+  }
+}
+
+let mockCaptureNumber = 0
+
+function recordFrom(fix: Fix): FieldRecord {
+  mockCaptureNumber += 1
+  return {
+    id: `record-${String(mockCaptureNumber)}`,
+    activityId: 'activity-1',
+    contextActivityId: 'activity-1',
+    kind: 'pin',
+    captureNumber: mockCaptureNumber,
+    sequence: mockCaptureNumber,
+    filedAt: null,
+    title: null,
+    description: null,
+    fix,
+    capturedAt: new Date(Date.now()).toISOString(),
+    deviceId: mockDevice.id,
+    attributes: {},
+  }
+}
+
+let mockStored: FieldRecord[] = []
+
+const START_MS = Date.UTC(2026, 8, 5, 1, 0, 0)
+
+/** The steady opacity the pulse ring holds when reduced motion is on. */
+const PULSE_STEADY_OPACITY = 0.6
+
+/** Where the animated ring's opacity starts, and returns to when the loop stops. */
+const PULSE_MIN_OPACITY = 0.15
+
+/** Queries that must see the decorative, accessibility-hidden pulse ring. */
+const HIDDEN = { includeHiddenElements: true }
+
+beforeEach(() => {
+  // `setImmediate` and `nextTick` are deliberately left real. React's async
+  // `act` flushes its work queue through `setImmediate` (see
+  // `recursivelyFlushAsyncActWork` in react.development.js), so faking it — which
+  // Jest's modern fake timers do by default — means every `await act(...)` in
+  // this file waits for a callback the test itself is holding, and every test
+  // fails on the 5 s timeout instead of on its assertion. Everything the screen
+  // schedules (`setTimeout` for the countdown, `setInterval` for the ticker,
+  // `Date.now` for the remaining seconds) is still faked, which is the part that
+  // matters: a 60 s countdown must not take 60 s to test.
+  jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] })
+  jest.setSystemTime(START_MS)
+
+  mockCaptureNumber = 0
+  mockStored = []
+  mockSource = createFakeLocationSource({ permission: 'granted', readings: [] })
+
+  mockRepo.listProjects.mockReset()
+  mockRepo.listActivities.mockReset()
+  mockRepo.createProject.mockReset()
+  mockRepo.createActivity.mockReset()
+  mockRepo.createRecord.mockReset()
+  mockRepo.refineRecordFix.mockReset()
+  mockRepo.listRecords.mockReset()
+
+  mockRepo.listProjects.mockResolvedValue([{ id: 'project-1', name: 'Diagnostics' }])
+  mockRepo.listActivities.mockResolvedValue([{ id: 'activity-1', name: 'Diagnostics run' }])
+  mockRepo.listRecords.mockImplementation(() => Promise.resolve([...mockStored]))
+  mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) => {
+    const created = recordFrom(input.fix)
+    mockStored = [created, ...mockStored]
+    return Promise.resolve(created)
+  })
+  mockRepo.refineRecordFix.mockImplementation((_db: unknown, input: { recordId: string; fix: Fix }) => {
+    const existing = mockStored.find((r) => r.id === input.recordId)
+    const refined: FieldRecord = { ...(existing ?? recordFrom(input.fix)), fix: input.fix }
+    mockStored = mockStored.map((r) => (r.id === refined.id ? refined : r))
+    return Promise.resolve(refined)
+  })
+})
+
+afterEach(() => {
+  jest.clearAllTimers()
+  jest.useRealTimers()
+  // Deliberately NOT `jest.restoreAllMocks()`: the reduced-motion spies in
+  // jest.setup.js are installed once for the whole file, and restoring them
+  // after the first test would hand every later test the real
+  // `AccessibilityInfo`, which in a headless environment never answers.
+})
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async function renderScreen() {
+  // @testing-library/react-native v14 is async throughout: `render`,
+  // `fireEvent.*` and `unmount` all return promises and must be awaited, or the
+  // work they queue lands in the middle of the next assertion.
+  return await render(
+    <ThemeProvider>
+      <Diagnostics />
+    </ThemeProvider>,
+  )
+}
+
+/** Lets every pending promise continuation run, and React apply what they set. */
+async function settle() {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
+
+/**
+ * Renders the screen, lets the permission request and the subscription resolve,
+ * and delivers one reading so there is a fix on screen to record.
+ */
+async function arriveWithAFix(accuracyM = 8) {
+  const view = await renderScreen()
+  await settle()
+  await act(async () => {
+    mockSource.emit(reading(accuracyM, Date.now()))
+  })
+  return view
+}
+
+function captureButton() {
+  return screen.getByTestId('capture-button')
+}
+
+/** Emits `count` readings a second apart, each with the given accuracy. */
+async function emitReadings(accuracies: number[]) {
+  for (const accuracyM of accuracies) {
+    await act(async () => {
+      jest.advanceTimersByTime(1000)
+      mockSource.emit(reading(accuracyM, Date.now()))
+    })
+  }
+}
+
+/** Runs the clock past the longest countdown this screen offers. */
+async function runOutTheCountdown() {
+  await act(async () => {
+    jest.advanceTimersByTime(61_000)
+  })
+  await settle()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('the capture control', () => {
+  it('does not write a second record when it is tapped twice before the countdown starts', async () => {
+    // The window this test is about: `captureNow` runs three awaits before
+    // `beginCountdown` sets `countdownRef`, and `Button` is a bare `Pressable`
+    // with no debounce, so the second tap of a double-tap arrives while the
+    // first capture is parked at one of those awaits — `countdownRef` still
+    // null and the `disabled` prop not yet rendered. The record it produced was
+    // not a harmless duplicate: it had one sample, no spread and a zero-length
+    // hold, which on disk is indistinguishable from "the countdown produced no
+    // improvement" — the exact negative result this instrument is carried
+    // outdoors to look for.
+    // The insert is held open, so the first capture is genuinely parked between
+    // `createRecord` and `beginCountdown` for as long as this test wants.
+    const created = deferred<FieldRecord>()
+    mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) => {
+      const record = recordFrom(input.fix)
+      mockStored = [record, ...mockStored]
+      return created.promise.then(() => record)
+    })
+
+    await arriveWithAFix()
+
+    // Two taps with no commit between them, which is what a double-tap on a
+    // device is. Both presses are dispatched inside one outer `act`, and
+    // neither is awaited: `fireEvent.press` invokes the handler synchronously,
+    // so both reach `captureNow` before React has committed anything and before
+    // the `disabled` prop is in the tree to stop the second. Only
+    // `writeInFlightRef` can turn it away.
+    //
+    // One outer `act`, not two `fireEvent.press` promises awaited together:
+    // concurrent (rather than nested) act scopes restore React's act
+    // environment out of order, and the resulting tree reports the body as
+    // unmounted part-way through the capture — a defect in the test, not in the
+    // screen, but one that quietly turns this assertion green for the wrong
+    // reason.
+    await act(async () => {
+      void fireEvent.press(captureButton())
+      void fireEvent.press(captureButton())
+    })
+
+    // A third, now genuinely parked mid-await inside the first capture: the
+    // insert has begun, `beginCountdown` has not run, and `countdownRef` is
+    // still null.
+    await settle()
+    await fireEvent.press(captureButton())
+
+    created.resolve(recordFrom({ quality: 'none' }))
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    expect(mockStored).toHaveLength(1)
+    // And exactly one countdown came out of it.
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — STILL SHARPENING')
+  })
+
+  it('refines the record exactly once when the countdown runs to completion', async () => {
+    await arriveWithAFix()
+
+    await fireEvent.press(captureButton())
+    await settle()
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+
+    await emitReadings([7, 6, 5, 4])
+    await runOutTheCountdown()
+
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/Countdown complete/)).toBeTruthy()
+  })
+
+  it('refines exactly once when the override accepts early, and no later timer refines again', async () => {
+    await arriveWithAFix()
+
+    await fireEvent.press(captureButton())
+    await settle()
+
+    await emitReadings([7, 6])
+
+    // The same control, now the override.
+    await fireEvent.press(captureButton())
+    await settle()
+
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/^Accepted —/)).toBeTruthy()
+
+    // The countdown's own timeout was still pending when the override ran. If
+    // it were not torn down — or if `countdownRef` were not claimed
+    // synchronously — this is where the second refinement would land.
+    await runOutTheCountdown()
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not end the countdown when the plateau signal fires', async () => {
+    // A deliberate rule, not an oversight (spec §9.1). On real hardware the
+    // verdict read `plateaued` for a full minute while accuracy fell from 6.4 m
+    // to 4.0 m, so a countdown that ended on the signal would end in the middle
+    // of genuine improvement — and the trip that is about to measure how often
+    // that happens needs the countdown to run regardless.
+    await arriveWithAFix(6)
+
+    await fireEvent.press(captureButton())
+    await settle()
+
+    // Four readings with no meaningful improvement across the window is exactly
+    // what `holdVerdict` calls `plateaued`.
+    await emitReadings([6, 6, 6, 6])
+
+    // The screen says so — in words, and by making the override prominent.
+    expect(screen.getByText('ACCEPT NOW — NOT IMPROVING')).toBeTruthy()
+    expect(screen.getByText(/About as sharp as it gets here/)).toBeTruthy()
+
+    // And does not act on it: no refinement, and the countdown is still
+    // collecting.
+    expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
+    expect(screen.getByText(/^collecting — /)).toBeTruthy()
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — STILL SHARPENING')
+  })
+
+  it('leaves no timer running and updates no state when the screen unmounts mid-countdown', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const view = await arriveWithAFix()
+    await fireEvent.press(captureButton())
+    await settle()
+    expect(jest.getTimerCount()).toBeGreaterThan(0)
+
+    await view.unmount()
+
+    // A loop reschedules itself forever, so "the timer queue drains and stays
+    // drained" is what proves it was actually stopped rather than merely
+    // hidden. One one-shot callback outlives the countdown (React Native's
+    // animation module flushes its own queue); two more turns of a very long
+    // clock leave nothing at all.
+    await act(async () => {
+      jest.advanceTimersByTime(30_000)
+    })
+    expect(jest.getTimerCount()).toBe(0)
+    await act(async () => {
+      jest.advanceTimersByTime(30_000)
+    })
+    expect(jest.getTimerCount()).toBe(0)
+
+    await runOutTheCountdown()
+    expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
+    // React reports an update on an unmounted component through console.error.
+    expect(consoleError).not.toHaveBeenCalled()
+  })
+
+  it('keeps one transcript row per collected reading, and keeps them after the countdown completes', async () => {
+    await arriveWithAFix(9)
+
+    await fireEvent.press(captureButton())
+    await settle()
+
+    // Row one is the reading the tap recorded; three more arrive during the
+    // countdown.
+    expect(screen.getAllByTestId('transcript-row')).toHaveLength(1)
+    await emitReadings([7, 6, 5])
+    expect(screen.getAllByTestId('transcript-row')).toHaveLength(4)
+
+    await runOutTheCountdown()
+
+    // The rows are the evidence the trip exists to collect. They survive the
+    // countdown that produced them and are cleared only by the next tap.
+    expect(screen.getAllByTestId('transcript-row')).toHaveLength(4)
+    expect(screen.getByText(/ended by the countdown, 4 readings averaged/)).toBeTruthy()
+  })
+})
+
+describe('the ambient save', () => {
+  it('cannot run while a write is in flight', async () => {
+    const created = deferred<FieldRecord>()
+    mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) => {
+      const record = recordFrom(input.fix)
+      mockStored = [record, ...mockStored]
+      return created.promise.then(() => record)
+    })
+
+    await arriveWithAFix()
+
+    // The capture claims the write; the ambient save is pressed while it is
+    // still in flight and before React has committed the `disabled` prop, in
+    // the same window as the double-tap above. Only `writeInFlightRef` can turn
+    // it away.
+    await act(async () => {
+      void fireEvent.press(captureButton())
+      void fireEvent.press(screen.getByTestId('ambient-button'))
+    })
+    await settle()
+
+    // Only the capture's own insert.
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    // And once React catches up, the control says why rather than silently
+    // doing nothing.
+    expect(screen.getByTestId('ambient-button')).toBeDisabled()
+
+    created.resolve(recordFrom({ quality: 'none' }))
+    await settle()
+  })
+
+  it('cannot run while a countdown is running', async () => {
+    await arriveWithAFix()
+
+    await fireEvent.press(captureButton())
+    await settle()
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+
+    await fireEvent.press(screen.getByTestId('ambient-button'))
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Save ambient fix — after the countdown')).toBeTruthy()
+  })
+})
+
+describe('the capture frame', () => {
+  it('says the record is saved but provisional while the countdown runs, and settled once it ends', async () => {
+    await arriveWithAFix()
+
+    // Nothing captured yet: no claim either way.
+    expect(screen.queryByTestId('capture-state')).toBeNull()
+
+    await fireEvent.press(captureButton())
+    await settle()
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — STILL SHARPENING')
+    expect(screen.getByText('Record written; its position is provisional.')).toBeTruthy()
+
+    await emitReadings([7, 6])
+    await runOutTheCountdown()
+
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — SHARPENING DONE')
+    expect(screen.getByText('Record written; its position is no longer changing.')).toBeTruthy()
+  })
+
+  it('pulses only while a countdown is running, and holds steady under reduced motion', async () => {
+    // Reduced motion is the harness default (see jest.setup.js), so this is the
+    // branch a user who asked the system for less motion gets: the ring is
+    // rendered, at a fixed opacity, and no animation is started.
+    // The ring is decorative and hidden from accessibility (it repeats what the
+    // words already say), so the queries have to be told to look at hidden
+    // elements — which is itself the assertion that it carries no meaning of
+    // its own.
+    await arriveWithAFix()
+    expect(screen.queryByTestId('capture-pulse', HIDDEN)).toBeNull()
+
+    await fireEvent.press(captureButton())
+    await settle()
+
+    const ring = screen.getByTestId('capture-pulse', HIDDEN)
+    expect(ring.props.style.opacity).toBe(PULSE_STEADY_OPACITY)
+
+    await runOutTheCountdown()
+    expect(screen.queryByTestId('capture-pulse', HIDDEN)).toBeNull()
+  })
+
+  it('animates the frame when reduced motion is off, and leaves nothing running after', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
+
+    await arriveWithAFix()
+    await fireEvent.press(captureButton())
+    await settle()
+
+    // The animated ring, not the steady one: its opacity is the `Animated.Value`
+    // the loop drives, which starts at the bottom of the range rather than at
+    // the held middle. (The value itself does not move under Jest — the pulse
+    // asks for the native driver, and the native animation module is mocked
+    // here, so the JS-side value stays where the loop left it. What this
+    // asserts is the branch, which is the part the reduced-motion setting
+    // actually decides.)
+    const ring = screen.getByTestId('capture-pulse', HIDDEN)
+    expect(ring.props.style.opacity).toBe(PULSE_MIN_OPACITY)
+    expect(ring.props.style.opacity).not.toBe(PULSE_STEADY_OPACITY)
+
+    // The whole point of the teardown: a loop is infinite, so anything it has
+    // scheduled must be gone once the countdown ends, or a field device
+    // animates a frame nobody is looking at until the battery goes.
+    await runOutTheCountdown()
+    expect(screen.queryByTestId('capture-pulse', HIDDEN)).toBeNull()
+    // A loop reschedules itself forever, so "the timer queue drains and stays
+    // drained" is what proves it was actually stopped rather than merely
+    // hidden. One one-shot callback outlives the countdown (React Native's
+    // animation module flushes its own queue); two more turns of a very long
+    // clock leave nothing at all.
+    await act(async () => {
+      jest.advanceTimersByTime(30_000)
+    })
+    expect(jest.getTimerCount()).toBe(0)
+    await act(async () => {
+      jest.advanceTimersByTime(30_000)
+    })
+    expect(jest.getTimerCount()).toBe(0)
+
+    // Restored by hand rather than by `jest.restoreAllMocks()`, which would
+    // also remove the file-wide reduced-motion default from jest.setup.js.
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(true)
+  })
+})
