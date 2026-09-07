@@ -312,25 +312,41 @@ function formatDegrees(value: number): string {
 }
 
 /**
- * The countdown lengths the screen offers.
+ * The countdown lengths the screen offers, and the one it starts on.
  *
- * Deliberately a choice on the screen rather than one number reasoned out at a
- * desk: nobody yet knows what a countdown should be, and this instrument
- * exists to find out. The spread is chosen to make the answer visible rather
- * than to be uniformly plausible —
+ * The default is no longer a placeholder. It comes from stored records taken
+ * on a Samsung S25 outdoors, each row a real capture:
  *
- *  - **5 s** is the shortest wait worth standing still for. If it buys nothing
- *    measurable, the whole idea of a countdown is wrong.
- *  - **10 s** and **20 s** are the range a person will actually tolerate at
- *    every pin across a survey day, which is the constraint that decides this.
- *  - **30 s** is far enough out that the √n improvement has usually flattened,
- *    so it is where the plateau signal can be checked against the numbers.
- *  - **60 s** is longer than anyone would want. It is here to establish what
- *    the hardware can reach at all, which is the ceiling the shorter values
- *    have to be judged against.
+ * ```
+ *  ~4 s  n=5   ±1.6 m
+ *  ~6 s  n=7   ±1.5 m
+ * ~11 s  n=12  ±1.2 m
+ * ~15 s  n=16  ±1.3 m
+ *  20 s  n=21  ±1.0 to ±1.4 m across several runs
+ *  60 s  n=61  ±1.1 m, spread ±1.3 m
+ * ```
+ *
+ * The curve is flat from about ten seconds: 60 s was no better than 20 s and
+ * worse than the best 20 s, and 15 s was no better than 11 s. **Twelve seconds
+ * is where the measured improvement stops**, so it is the default — and a
+ * longer wait is not merely wasted, it is worse, because the spread grows with
+ * the time spent standing still (±0.3 m at 20 s against ±1.3 m at 60 s) and
+ * the spread is the honesty check on the whole fix.
+ *
+ * The other choices stay so the finding can be re-measured rather than taken
+ * on trust —
+ *
+ *  - **5 s** is the short wait the records say is measurably worse (n=5,
+ *    ±1.6 m). It is the control.
+ *  - **12 s** is the default, from the measurement above.
+ *  - **20 s** is what the default used to be, kept so the comparison that
+ *    settled it can be run again on other hardware and in other sky.
+ *  - **30 s** and **60 s** are longer than anyone would want. They establish
+ *    what the receiver reaches at all, and 60 s is where the spread was
+ *    measured growing.
  */
-const COUNTDOWN_CHOICES = [5, 10, 20, 30, 60] as const
-const DEFAULT_COUNTDOWN_S = 20
+const COUNTDOWN_CHOICES = [5, 12, 20, 30, 60] as const
+const DEFAULT_COUNTDOWN_S = 12
 
 /** How often the countdown readout re-renders. Four times a second reads as smooth without busying the thread. */
 const TICK_MS = 250
@@ -514,17 +530,21 @@ function formatLogRow(row: LogRow): string {
  * The last `LOG_ROWS` readings, newest first, each carrying the verdict as it
  * stood *at that reading* — not today's verdict replayed over old data.
  *
- * `holdVerdict` only looks at its own `WINDOW` (4) most recent readings, so
- * calling it on `readings.slice(0, i + 1)` for each `i` reproduces exactly
- * what the screen would have said at that point in the stream: readings after
- * position `i` cannot influence it, because `holdVerdict` never sees them.
+ * `holdVerdict` is a pure function of the readings it is handed, so calling it
+ * on `readings.slice(0, i + 1)` for each `i` reproduces exactly what the screen
+ * would have said at that point in the stream: readings after position `i`
+ * cannot influence it, because `holdVerdict` never sees them. It reads all of
+ * them and not merely a trailing window — the verdict latches once it has said
+ * `plateaued` — which is precisely why the prefix has to be passed rather than
+ * the tail.
  *
- * Newest first: this log exists to catch a verdict that lags what the
- * accuracy is actually doing (finding: verdict read `plateaued` for a full
- * minute while accuracy fell from 6.4 m to 4.0 m). The way to check a
- * suspicious verdict on a row is to look at the fresher rows above it — with
- * newest first, "above" is later in time, so a `plateaued` row sitting under
- * still-falling accuracy is right there without scrolling down and losing
+ * Newest first: this log exists to catch a verdict that lags what the accuracy
+ * is actually doing — the defect that produced the current rule was the
+ * opposite, a verdict that ran ahead of it and read `plateaued` at the second
+ * reading of a hold that went on improving for another ten seconds. The way to
+ * check a suspicious verdict on a row is to look at the fresher rows above it —
+ * with newest first, "above" is later in time, so a `plateaued` row sitting
+ * under still-falling accuracy is right there without scrolling down and losing
  * the row you started from.
  */
 function buildLogRows(readings: Reading[], sessionStartMs: number | null): LogRow[] {
@@ -842,18 +862,25 @@ function DiagnosticsBody(props: BodyProps) {
   /**
    * Whether the countdown may end itself when the fix stops improving.
    *
-   * Off by default, and the control below says why: `holdVerdict` has been
-   * observed reading `plateaued` for a full minute while accuracy fell from
-   * 6.4 m to 4.0 m, so auto-finish would end most countdowns within seconds of
-   * a tap and the trip that is about to measure exactly that would come home
-   * with nothing. On is the behaviour the product wants once the signal is
-   * trustworthy, and the toggle is here so it can be felt on hardware.
+   * **On by default now that the plateau signal has a minimum-sample guard.**
+   * It was off because `holdVerdict` had been watched declaring `plateaued`
+   * within a second of a tap, in the middle of genuine improvement — on the
+   * measured Samsung S25 run it fired at n=2, when the averaged fix was ±5.2 m
+   * and waiting reaches ±1.4 m. It now cannot claim a plateau before ten
+   * samples, judges the averaged accuracy rather than each reading's own noisy
+   * estimate, and never takes a verdict back. On that hardware the first
+   * plateau lands at n=12, about 11 s after the tap.
+   *
+   * That is the point of switching it on: a capture that ends itself when the
+   * fix stops improving means she waits as long as the fix needs and no
+   * longer, instead of standing in a paddock waiting out a timer for nothing.
+   * The override stays live for every moment of a countdown either way.
    *
    * Deliberately screen state rather than a stored setting: it is a property of
    * a diagnostic session, not a preference, and persisting it would let a
-   * session that switched it on silently spoil the next day's measurements.
+   * session that switched it off silently spoil the next day's measurements.
    */
-  const [autoFinish, setAutoFinish] = useState(false)
+  const [autoFinish, setAutoFinish] = useState(true)
   // Re-render clock. `collected` is a ref, so the readout beside the control
   // would otherwise only move when a new reading happened to arrive; the
   // seconds remaining have to fall whether or not the receiver is talking.
@@ -1596,12 +1623,12 @@ function DiagnosticsBody(props: BodyProps) {
   /**
    * Whether the fix has stopped getting better, according to `holdVerdict`.
    *
-   * What is done about it is `autoFinish`'s decision, not this value's. Off —
-   * the default — it only moves the override to a solid fill and changes a
-   * sentence, and the countdown runs on until it expires or she ends it. On, it
-   * ends the countdown, which is the behaviour the product wants and the reason
-   * the toggle exists; see `autoFinish` above for why that is not yet the
-   * default.
+   * What is done about it is `autoFinish`'s decision, not this value's. On —
+   * the default — it ends the countdown, which is the behaviour the product
+   * wants and what the measured signal now supports. Off, it only moves the
+   * override to a solid fill and changes a sentence, and the countdown runs on
+   * until it expires or she ends it; that setting is kept so a measurement can
+   * still be taken over a full fixed wait.
    */
   const plateaued = countdown !== null && holdVerdict(collected.current) === 'plateaued'
   // Read at render time, like `collected.current` above: the ticker and the
@@ -2066,32 +2093,35 @@ function DiagnosticsBody(props: BodyProps) {
         <Type variant="label" dim>AUTO-FINISH</Type>
         <View style={{ height: spacing.xs }} />
         {/*
-          The plateau rule, on a switch, because the product wants one behaviour
-          and the evidence currently supports the other.
+          The plateau rule, on a switch — now on by default, because the
+          evidence has caught up with what the product wants.
 
           What the product wants: if the fix is as good as it is going to get,
           the countdown should finish on its own rather than make her stand in a
           paddock waiting out a timer for nothing.
 
-          Why it is off by default: `holdVerdict` has been watched on real
-          hardware reading `plateaued` for a full minute while accuracy fell
-          from 6.4 m to 4.0 m. With auto-finish on, that countdown would have
-          ended within seconds of the tap, in the middle of genuine improvement
-          — and this screen is about to be carried outdoors specifically to
-          measure how often that happens. Defaulting it on would destroy the
-          evidence the trip exists to collect.
+          Why it was off: `holdVerdict` judged each reading's own accuracy
+          estimate, which jitters, and had no minimum sample count — so on the
+          measured Samsung S25 run it declared a plateau at n=2, 0.6 s after the
+          tap, when the averaged fix was ±5.2 m and waiting reaches ±1.4 m. With
+          auto-finish on, that countdown would have ended there.
 
-          So it ships as real, working behaviour that a tester switches on
-          deliberately, feels, and switches off again before taking a
-          measurement. Locked while a capture is running for the same reason the
-          length chooser is: changing the terms of a wait already underway has
-          no honest meaning.
+          Why it is on now: the signal judges the averaged accuracy, cannot
+          claim a plateau before ten samples, and never takes a verdict back. On
+          that hardware it first fires at n=12, about 11 s after the tap, which
+          is where the stored records say the wait stops paying.
+
+          The switch stays, so a fixed full-length wait can still be measured
+          against a self-finishing one. Locked while a capture is running for
+          the same reason the length chooser is: changing the terms of a wait
+          already underway has no honest meaning.
         */}
         <Type variant="small" dim>
-          The refinement can end itself the moment the fix stops improving. Off by default: the
-          plateau signal has been seen reading &quot;plateaued&quot; for a full minute while
-          accuracy improved from 6.4 m to 4.0 m, so it would cut countdowns short in the middle of
-          real improvement. Switch it on to feel the intended behaviour.
+          The refinement can end itself the moment the fix stops improving. On by default: the
+          plateau signal is judged on the averaged accuracy — the number actually stored — and
+          cannot fire before ten readings have accumulated, so it no longer cuts a countdown short
+          in the middle of real improvement. On a Samsung S25 outdoors it first fires about 11 s
+          after the tap. Switch it off to make every countdown run its full length.
         </Type>
         <View style={{ height: spacing.xs }} />
         <Button

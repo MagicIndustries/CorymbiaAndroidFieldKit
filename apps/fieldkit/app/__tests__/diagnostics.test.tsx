@@ -416,20 +416,26 @@ describe('the capture control', () => {
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
   })
 
-  it('does not end the countdown on a plateau while auto-finish is off', async () => {
-    // Off is the default, and it is the setting the outdoor trip has to run
-    // under: `holdVerdict` has been watched reading `plateaued` for a full
-    // minute while accuracy fell from 6.4 m to 4.0 m, so a countdown that ended
-    // on the signal would end in the middle of genuine improvement and the
-    // measurement would never be made.
+  it('does not end the countdown on a plateau while auto-finish is switched off', async () => {
+    // Auto-finish is ON by default now that the plateau signal has a
+    // minimum-sample guard, so this test has to switch it off first. That
+    // setting is kept — and proved here — because a fixed full-length wait is
+    // still the thing a self-finishing one has to be measured against.
     await arriveWithAFix(6)
+
+    await fireEvent.press(screen.getByTestId('auto-finish-toggle'))
+    await settle()
+    expect(screen.getByText(/^AUTO-FINISH OFF/)).toBeTruthy()
 
     await fireEvent.press(captureButton())
     await settle()
 
-    // Four readings with no meaningful improvement across the window is exactly
-    // what `holdVerdict` calls `plateaued`.
-    await emitReadings([6, 6, 6, 6])
+    // Ten samples — the tap's own reading plus nine — with no improvement
+    // across them is what `holdVerdict` calls `plateaued`. Nine would not be:
+    // the rule cannot claim a plateau before ten samples have accumulated,
+    // because the hardware measurements say the fix is still improving below
+    // that.
+    await emitReadings([6, 6, 6, 6, 6, 6, 6, 6, 6])
 
     // The screen says so — in words, and by making the override prominent.
     expect(screen.getByText('ACCEPT NOW — NOT IMPROVING')).toBeTruthy()
@@ -444,19 +450,19 @@ describe('the capture control', () => {
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
   })
 
-  it('ends the countdown on a plateau when auto-finish is on, refining exactly once', async () => {
+  it('ends the countdown on a plateau by default, refining exactly once', async () => {
     await arriveWithAFix(6)
 
-    await fireEvent.press(screen.getByTestId('auto-finish-toggle'))
-    await settle()
+    // On by default. Nothing is pressed to arrange this — that is the point of
+    // the assertion.
     expect(screen.getByText(/^AUTO-FINISH ON/)).toBeTruthy()
 
     await fireEvent.press(captureButton())
     await settle()
-    await emitReadings([6, 6, 6, 6])
+    await emitReadings([6, 6, 6, 6, 6, 6, 6, 6, 6])
     await settle()
 
-    // Finished by itself, well inside the 20 s countdown, and exactly once.
+    // Finished by itself, inside the 12 s countdown, and exactly once.
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('capture-state')).toHaveTextContent('POINT #1 RECORDED')
     expect(screen.getByText(/The fix stopped improving, so the countdown finished itself\./)).toBeTruthy()
