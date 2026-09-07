@@ -102,4 +102,14 @@ describe('themes', () => {
     expect(touch.min).toBe(48)
     expect(field.control).toBe(72)
   })
+
+  it('pins the field stroke-width tokens CaptureDial and TrafficLightFrame share', () => {
+    expect(field.frame).toBe(5)
+    expect(field.countdown).toBe(3)
+    expect(field.countdownGap).toBe(3)
+    // CaptureDial's own ring stroke — thicker than `countdown` because it has
+    // no separate always-on grade border to lean on (see the doc comment in
+    // scales.ts).
+    expect(field.dialRing).toBe(10)
+  })
 })

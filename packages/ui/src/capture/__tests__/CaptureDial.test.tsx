@@ -1,7 +1,7 @@
 import React from 'react'
-import { processColor } from 'react-native'
+import { processColor, Text } from 'react-native'
 import { render, screen } from '@testing-library/react-native'
-import type { ReactTestRendererJSON, ReactTestRendererNode } from 'react-test-renderer'
+import type { ReactTestRendererNode } from 'react-test-renderer'
 import { darkTheme } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
 import { CaptureDial } from '../CaptureDial'
@@ -35,12 +35,11 @@ function collectDialLayerOrder(node: ReactTestRendererNode | ReactTestRendererNo
       return
     }
     if (typeof n === 'string') return
-    const json = n as ReactTestRendererJSON
-    const testID = json.props['testID']
+    const testID = n.props['testID']
     if (typeof testID === 'string' && targets.has(testID)) {
       order.push(testID)
     }
-    walk(json.children)
+    walk(n.children)
   }
 
   walk(node)
@@ -153,11 +152,11 @@ describe('CaptureDial', () => {
     await render(
       <ThemeProvider>
         <CaptureDial grade="good" accuracyM={3}>
-          <></>
+          <Text testID="dial-readout">12 m</Text>
         </CaptureDial>
       </ThemeProvider>,
     )
-    expect(screen.getByTestId('capture-dial')).toBeTruthy()
+    expect(screen.getByTestId('dial-readout')).toHaveTextContent('12 m')
   })
 
   /**

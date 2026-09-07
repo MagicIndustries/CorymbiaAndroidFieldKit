@@ -1,6 +1,7 @@
 import React from 'react'
 import { View } from 'react-native'
 import Svg, { Circle, G, Line } from 'react-native-svg'
+import { field } from '@corymbia/tokens'
 import { Type } from '../primitives'
 import { useTheme } from '../theme'
 import { OUTER_RADIUS_PX, TARGET_RADIUS_PX, radiusForMetres, ringDash } from './dialGeometry'
@@ -24,15 +25,15 @@ const WORD: Record<FixGradeName, string> = {
  * dialGeometry.ts, not exported) plus half its own outline stroke. Forty
  * pixels of margin clears both comfortably without needing that private
  * constant here.
+ *
+ * Unlike the stroke widths below, this margin has no meaning outside this
+ * one SVG canvas — it is not an ergonomic thickness decision, just headroom
+ * arithmetic derived from this component's own radii and strokes — so it
+ * stays a local constant rather than moving to `@corymbia/tokens`.
  */
 const DIAL_MARGIN_PX = 40
 const CENTER = OUTER_RADIUS_PX + DIAL_MARGIN_PX
 const VIEW_SIZE = CENTER * 2
-
-/** Stroke widths are this canvas's own artwork geometry; colours come from the theme. */
-const RING_STROKE_WIDTH = 10
-const ACCURACY_STROKE_WIDTH = 3
-const CROSSHAIR_STROKE_WIDTH = 3
 
 /**
  * The dial (spec §9.2). One circular control doing three jobs at once, each
@@ -106,7 +107,7 @@ export function CaptureDial({
           r={OUTER_RADIUS_PX}
           fill="none"
           stroke={theme.colors.surfaceSunken}
-          strokeWidth={RING_STROKE_WIDTH}
+          strokeWidth={field.dialRing}
         />
         {ring === null ? null : (
           <Circle
@@ -116,7 +117,7 @@ export function CaptureDial({
             r={OUTER_RADIUS_PX}
             fill="none"
             stroke={colour}
-            strokeWidth={RING_STROKE_WIDTH}
+            strokeWidth={field.dialRing}
             strokeDasharray={ring.dasharray}
             strokeDashoffset={ring.dashoffset}
           />
@@ -128,7 +129,7 @@ export function CaptureDial({
           r={accuracyRadius}
           fill={colour}
           stroke={colour}
-          strokeWidth={ACCURACY_STROKE_WIDTH}
+          strokeWidth={field.countdown}
         />
         <G testID="dial-crosshair">
           <Line
@@ -138,7 +139,7 @@ export function CaptureDial({
             x2={CENTER + TARGET_RADIUS_PX}
             y2={CENTER}
             stroke={theme.colors.textDim}
-            strokeWidth={CROSSHAIR_STROKE_WIDTH}
+            strokeWidth={field.countdown}
           />
           <Line
             testID="dial-crosshair-vertical"
@@ -147,7 +148,7 @@ export function CaptureDial({
             x2={CENTER}
             y2={CENTER + TARGET_RADIUS_PX}
             stroke={theme.colors.textDim}
-            strokeWidth={CROSSHAIR_STROKE_WIDTH}
+            strokeWidth={field.countdown}
           />
         </G>
       </Svg>

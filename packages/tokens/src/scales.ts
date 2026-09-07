@@ -70,6 +70,12 @@ export const field = {
    * ring at all — it is the first one covered up. Thinner rather than thicker
    * so the grade border stays the dominant edge of the frame, which is what a
    * survey position is judged by.
+   *
+   * Reused as-is, not duplicated under a new name, for `CaptureDial`'s other
+   * thin linework: the accuracy circle's outline and the crosshair's two
+   * lines (spec §9.2). Neither is a countdown ring, but both want exactly the
+   * "thin, secondary stroke" weight this token already establishes for a
+   * field control, next to `dialRing`'s thicker, standalone edge.
    */
   countdown: 3,
   /**
@@ -80,6 +86,17 @@ export const field = {
    * ever moves further from the (unscaled) countdown ring.
    */
   countdownGap: 3,
+  /**
+   * `CaptureDial`'s own ring stroke (spec §9.2): the track that is always
+   * drawn, and — while a countdown is running — the same-width progress
+   * stroke painted over it in the grade colour. One ring doing both jobs is
+   * deliberate: the dial has no separate always-on grade border the way
+   * `TrafficLightFrame` does, carried instead by the accuracy circle, so this
+   * ring is the only edge a glance has to register the control by and must
+   * stand on its own rather than nest thinly inside a thicker frame the way
+   * `countdown` nests inside `frame`.
+   */
+  dialRing: 10,
 } as const
 
 /**
