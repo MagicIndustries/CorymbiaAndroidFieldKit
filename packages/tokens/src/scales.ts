@@ -62,6 +62,24 @@ export const field = {
   control: 72,
   /** The traffic-light frame thickness. */
   frame: 5,
+  /**
+   * The countdown ring's thickness, drawn concentrically *inside* the frame
+   * (spec §9.2). Deliberately not `frame`: the countdown and the grade border
+   * are two rings that must be visible at the same time, and one drawn at the
+   * other's width, on the other's path, in the other's colour is not a second
+   * ring at all — it is the first one covered up. Thinner rather than thicker
+   * so the grade border stays the dominant edge of the frame, which is what a
+   * survey position is judged by.
+   */
+  countdown: 3,
+  /**
+   * The unpainted gap between the grade border's inner edge and the countdown
+   * ring's outer edge. It is what makes them read as two concentric rings
+   * rather than one thick one, and it is why the pulse cannot cause a
+   * collision: the border layer scales up from 1.0, so its inner edge only
+   * ever moves further from the (unscaled) countdown ring.
+   */
+  countdownGap: 3,
 } as const
 
 /**

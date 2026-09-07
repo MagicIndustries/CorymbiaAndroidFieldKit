@@ -405,10 +405,12 @@ function CaptureBody() {
       <TrafficLightFrame
         grade={grade}
         refining={acquiring}
-        // The perimeter is the countdown's honest progress, so it is drawn only
-        // while there is a countdown to be honest about.
-        secondsRemaining={acquiring ? capture.secondsRemaining : undefined}
-        secondsTotal={acquiring ? capture.secondsTotal : undefined}
+        // The ring is the countdown's honest progress, so it is drawn only
+        // while there is a countdown to be honest about — and it is fed the
+        // hook's continuous fraction rather than the whole-seconds readout
+        // beside it, which only moves once a second (see
+        // `Capture.remainingFraction`).
+        countdownRemaining={acquiring ? capture.remainingFraction : undefined}
       >
         {acquiring ? (
           <>
@@ -470,11 +472,16 @@ function CaptureBody() {
               testID="capture-button"
               label="ACCEPT NOW"
               spokenLabel="Accept the fix accumulated so far and end the wait"
-              // Prominence, not a decision (§9.1.5): once the fix has stopped
-              // improving the override goes solid, because there is nothing
-              // left to wait for. It is the same control, doing the same thing,
-              // and it is live either way.
-              kind={capture.verdict === 'plateaued' ? 'primary' : 'accurate'}
+              // One appearance, because there is only ever one moment to
+              // appear in. §9.1.5 was corrected on this branch so that a
+              // plateau finishes the wait rather than announcing one first,
+              // and on this screen auto-finish is unconditional: the render
+              // that first reports `plateaued` is the same one that ends the
+              // countdown, so a button that changed its prominence there would
+              // be solid for about a frame and never be seen. The instrument
+              // keeps that line, and is right to — its auto-finish can be
+              // switched off, so its plateau really is a state she sits in.
+              kind="accurate"
               size="field"
               onPress={capture.acceptNow}
             />

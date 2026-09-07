@@ -153,6 +153,14 @@ const START_MS = Date.UTC(2026, 8, 7, 1, 0, 0)
 const CAP_S = 15
 
 /**
+ * The hook's readout tick, in milliseconds — four times a second, the rate
+ * the countdown ring is redrawn at. Mirrored here rather than exported,
+ * because the tests that turn on it are about the *gap* between that rate and
+ * the once-a-second whole-seconds readout.
+ */
+const TICK_MS = 250
+
+/**
  * A cap long enough that it cannot be what ends a plateau test. The plateau
  * tests below run at most eleven seconds of readings, so a countdown that
  * finishes in one of them finished because `holdVerdict` said so.
@@ -463,6 +471,64 @@ describe('useCapture', () => {
     expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
     // Nothing wrote a new phase into a hook that no longer exists.
     expect(view.result.current.phase).toBe('acquiring')
+  })
+
+  it('reports the remaining wait as a fraction that moves between ticks, not once a second', async () => {
+    // The countdown ring is drawn from this number, and the whole-seconds
+    // readout beside it is not the same quantity. `Math.ceil` is right for
+    // `TIME LEFT` — a fractional second there is noise — and wrong for a ring:
+    // a ceil-ed integer over a constant total changes at 1 Hz while the ticker
+    // runs at 4 Hz, so the ring advanced in fifteen discrete 6.7% jumps and
+    // went from one fifteenth remaining straight to unmounted.
+    //
+    // Half a second is the interval that tells the two apart: two ticks of the
+    // ticker, and no change at all in the whole-seconds readout.
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    expect(result.current.remainingFraction).toBeCloseTo(1, 6)
+
+    await act(async () => {
+      jest.advanceTimersByTime(TICK_MS)
+    })
+    const afterOneTick = result.current.remainingFraction
+    const secondsAfterOneTick = result.current.secondsRemaining
+
+    await act(async () => {
+      jest.advanceTimersByTime(TICK_MS)
+    })
+
+    expect(afterOneTick).toBeLessThan(1)
+    expect(result.current.remainingFraction).toBeLessThan(afterOneTick)
+    // And the readout that should only move once a second has not moved,
+    // which is what makes this a statement about the fraction rather than
+    // about the clock having advanced at all.
+    expect(result.current.secondsRemaining).toBe(secondsAfterOneTick)
+  })
+
+  it('runs the fraction the whole way down, so the ring can reach empty', async () => {
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    // One tick short of the cap: the smallest value the fraction takes while
+    // the countdown is still running. On the old integer quotient this was
+    // 1/15 — the ring jumped from there to gone.
+    await act(async () => {
+      jest.advanceTimersByTime(CAP_S * 1000 - TICK_MS)
+    })
+    expect(result.current.phase).toBe('acquiring')
+    expect(result.current.remainingFraction).toBeLessThan(1 / CAP_S)
+    expect(result.current.remainingFraction).toBeGreaterThan(0)
   })
 
   it('returns to ready when the next capture is asked for', async () => {

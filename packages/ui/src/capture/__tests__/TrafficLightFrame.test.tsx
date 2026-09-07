@@ -1,5 +1,5 @@
 import React from 'react'
-import { AccessibilityInfo, Animated, Text } from 'react-native'
+import { AccessibilityInfo, Animated, Text, processColor } from 'react-native'
 import { act, render, screen } from '@testing-library/react-native'
 import { darkTheme } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
@@ -93,40 +93,90 @@ describe('TrafficLightFrame countdown perimeter', () => {
     expect(screen.queryByTestId('perimeter')).toBeNull()
   })
 
-  it('renders no perimeter when only secondsRemaining is given', async () => {
-    await render(
-      <ThemeProvider>
-        <TrafficLightFrame grade="good" secondsRemaining={5}>
-          <Text>contents</Text>
-        </TrafficLightFrame>
-      </ThemeProvider>,
-    )
-    expect(screen.queryByTestId('perimeter')).toBeNull()
-  })
-
-  // The mirror of the case above: a guard mutated to drop the
-  // `secondsRemaining` check (e.g. checking only `secondsTotal`) would still
-  // pass that test, since it never supplies `secondsTotal` alone.
-  it('renders no perimeter when only secondsTotal is given', async () => {
-    await render(
-      <ThemeProvider>
-        <TrafficLightFrame grade="good" secondsTotal={10}>
-          <Text>contents</Text>
-        </TrafficLightFrame>
-      </ThemeProvider>,
-    )
-    expect(screen.queryByTestId('perimeter')).toBeNull()
-  })
-
   it('renders the perimeter once a countdown is running', async () => {
     await render(
       <ThemeProvider>
-        <TrafficLightFrame grade="good" secondsRemaining={5} secondsTotal={10}>
+        <TrafficLightFrame grade="good" countdownRemaining={0.5}>
           <Text>contents</Text>
         </TrafficLightFrame>
       </ThemeProvider>,
     )
     expect(screen.getByTestId('perimeter')).toBeTruthy()
+  })
+
+  // A countdown at its very last tick is still a countdown: the ring has to
+  // be able to reach empty, rather than stepping from a fifteenth of the way
+  // round straight to unmounted. `0` is the one remaining fraction a
+  // presence guard written as a truthiness check would silently drop.
+  it('still renders the perimeter at the instant the wait reaches zero', async () => {
+    await render(
+      <ThemeProvider>
+        <TrafficLightFrame grade="good" countdownRemaining={0}>
+          <Text>contents</Text>
+        </TrafficLightFrame>
+      </ThemeProvider>,
+    )
+    expect(screen.getByTestId('perimeter')).toBeTruthy()
+  })
+
+  /**
+   * THE COUNTDOWN AND THE GRADE BORDER MUST BOTH BE VISIBLE AT ONCE.
+   *
+   * The first implementation traced the countdown stroke along the grade
+   * border's own centreline, in the same colour, at the same width. Every
+   * test in this file passed: the perimeter was present, its geometry was
+   * right, its colour was right. On a device nothing appeared to move — the
+   * stroke covered the border, and as it retreated it uncovered an identical
+   * ring in an identical colour. A test that asserts presence is what let
+   * that through, so this one asserts *separation*, by the two properties the
+   * component uses to separate them.
+   */
+  async function measuredCountdown(grade: 'good' | 'fair' | 'poor' = 'good') {
+    await render(
+      <ThemeProvider>
+        <TrafficLightFrame grade={grade} refining countdownRemaining={0.5}>
+          <Text>contents</Text>
+        </TrafficLightFrame>
+      </ThemeProvider>,
+    )
+    const box = screen.getByTestId('perimeter')
+    await act(async () => {
+      box.props.onLayout({ nativeEvent: { layout: { width: 300, height: 200 } } })
+    })
+    return {
+      border: screen.getByTestId('traffic-light-border').props.style,
+      track: screen.getByTestId('perimeter-track').props,
+    }
+  }
+
+  it('draws the countdown as its own ring, thinner than the grade border', async () => {
+    const { border, track } = await measuredCountdown()
+    expect(track.strokeWidth).toBeLessThan(border.borderWidth)
+  })
+
+  it('leaves an unpainted gap between the two, so neither ring can hide the other', async () => {
+    const { border, track } = await measuredCountdown()
+    // `x` is the traced rectangle's left edge, which is the stroke's centre,
+    // so its outer edge is half a stroke width further out. That edge has to
+    // clear the grade border's inner edge — `borderWidth` from the box — with
+    // room to spare, or the countdown is drawn on top of the thing it is
+    // supposed to be running around.
+    const trackOuterEdge = track.x - track.strokeWidth / 2
+    expect(trackOuterEdge).toBeGreaterThan(border.borderWidth)
+  })
+
+  it('keeps the grade border at full colour and full width while the countdown runs', async () => {
+    // The other half of the fix, and the constraint that ruled out every
+    // approach that shares the border's path: §9.2 forbids the grade colour
+    // weakening at any point in the countdown, for the same reason it forbids
+    // a fading pulse. A good fix must never read as fair.
+    const { border, track } = await measuredCountdown()
+    expect(border.borderColor).toBe(darkTheme.colors.statusGood)
+    expect(border.borderWidth).toBe(5)
+    expect(border.opacity).toBeUndefined()
+    // And the countdown carries the same grade colour rather than introducing
+    // a second colour vocabulary beside it.
+    expect(track.stroke).toEqual({ type: 0, payload: processColor(darkTheme.colors.statusGood) })
   })
 })
 

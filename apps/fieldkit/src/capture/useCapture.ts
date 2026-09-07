@@ -142,7 +142,26 @@ export type Capture = {
   latest: Reading | null
   /** What the override would store, or null when no countdown is running. */
   preview: CapturePreview | null
+  /**
+   * Whole seconds left, rounded up — the `TIME LEFT` readout, where a
+   * fractional second would be noise and `0s` must not appear while the wait
+   * is still running.
+   */
   secondsRemaining: number
+  /**
+   * The same wait as a continuous fraction, 1 down to 0, refreshed on every
+   * tick rather than once a second.
+   *
+   * **This is what the countdown ring is drawn from, and it is deliberately
+   * not `secondsRemaining / secondsTotal`.** That quotient is a rounded-up
+   * integer over a constant: on the fifteen-second cap it changes at 1 Hz
+   * while the ticker runs at 4 Hz, so the ring advanced in fifteen discrete
+   * jumps of 6.7% — and it never reached empty, because the smallest value it
+   * ever took was one fifteenth before the phase flipped and the ring
+   * unmounted. Derived here from the same `endsAtMs - tickMs` the readout
+   * uses, so the two can never disagree about how much wait is left.
+   */
+  remainingFraction: number
   secondsTotal: number
   verdict: HoldVerdict
   /** The row on disk: the tap's, then the refinement's. Null before the first tap. */
@@ -767,14 +786,18 @@ export function useCapture(deps: CaptureDeps): Capture {
     finishRef.current('plateau')
   }, [countdown, verdict])
 
-  const secondsRemaining =
-    countdown === null ? 0 : Math.max(0, Math.ceil((countdown.endsAtMs - tickMs) / 1000))
+  const remainingMs = countdown === null ? 0 : Math.max(0, countdown.endsAtMs - tickMs)
+  const secondsRemaining = Math.ceil(remainingMs / 1000)
+  // Deliberately the un-rounded milliseconds over the un-rounded cap. See
+  // `Capture.remainingFraction`.
+  const remainingFraction = Math.min(1, remainingMs / (secondsTotal * 1000))
 
   return {
     phase,
     latest,
     preview,
     secondsRemaining,
+    remainingFraction,
     secondsTotal,
     verdict,
     record,

@@ -43,26 +43,40 @@ const PULSE_SCALE = 1.012
  * perfectly steady frame instead, not a degraded animation: the grade is
  * carried by the colour and the word either way, so stillness costs nothing.
  *
- * `secondsRemaining`/`secondsTotal` draw the countdown around the frame's own
- * perimeter (spec §9.2): the honest progress of the wait, so it empties as
- * the seconds run down rather than filling as if toward something. The frame
- * itself is live at all times, but a countdown is not, so the perimeter only
- * renders while both props are present and `secondsTotal` is positive —
- * there is no resting empty or full track to fall back to.
+ * `countdownRemaining` draws the countdown around the frame's perimeter (spec
+ * §9.2): the honest progress of the wait, so it empties as the seconds run
+ * down rather than filling as if toward something. It is a *fraction* rather
+ * than a count of seconds, because a whole-seconds figure moves once a second
+ * however often the screen re-renders — fifteen discrete jumps on a
+ * fifteen-second cap — and because a ring that steps from one-fifteenth
+ * straight to unmounted never reaches empty.
+ *
+ * The countdown is drawn as its own concentric ring just *inside* the grade
+ * border, not along it (see `TRACK_INSET` in `CaptureFramePerimeter`): drawn
+ * on the border's own path, in the border's own colour, it covered the border
+ * and uncovered an identical ring behind it, so nothing appeared to move for
+ * the whole countdown. The grade border itself is never touched by the
+ * countdown — full width, full colour, full opacity at every instant — which
+ * is what §9.2 requires of the colour a survey position is judged by.
+ *
+ * The frame itself is live at all times, but a countdown is not, so the ring
+ * only renders while `countdownRemaining` is given — there is no resting
+ * empty or full track to fall back to.
  */
 export function TrafficLightFrame({
   grade,
   refining,
-  secondsRemaining,
-  secondsTotal,
+  countdownRemaining,
   children,
 }: {
   grade: FixGradeName
   refining?: boolean
-  /** Seconds left in the current countdown. Omit when no countdown is running. */
-  secondsRemaining?: number
-  /** The countdown's total duration in seconds. Omit when no countdown is running. */
-  secondsTotal?: number
+  /**
+   * The fraction of the wait still to run, 1 down to 0, refreshed as often as
+   * the caller re-renders. Omit when no countdown is running — an absent
+   * countdown draws no ring at all, rather than an empty one.
+   */
+  countdownRemaining?: number
   children: React.ReactNode
 }) {
   const { theme } = useTheme()
@@ -139,9 +153,9 @@ export function TrafficLightFrame({
           transform: [{ scale }],
         }}
       />
-      {secondsRemaining !== undefined && secondsTotal !== undefined && secondsTotal > 0 ? (
-        <CaptureFramePerimeter progress={secondsRemaining / secondsTotal} colour={colour} />
-      ) : null}
+      {countdownRemaining === undefined ? null : (
+        <CaptureFramePerimeter progress={countdownRemaining} colour={colour} />
+      )}
       <View style={{ padding: spacing.lg, gap: spacing.sm }}>
         <Type variant="label" style={{ color: colour }}>
           {WORD[grade]}
