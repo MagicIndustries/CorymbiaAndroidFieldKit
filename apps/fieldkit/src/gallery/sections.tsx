@@ -50,6 +50,21 @@ export function GallerySections() {
 
   return (
     <View>
+      {/*
+        The capture screen's only entry point until Plan 5 builds the launcher.
+        Without it nothing in the app navigates to `/capture`, so none of spec
+        §9.1–§9.6 can be judged on a device — which is where the parts that
+        cannot be tested from a desk (the pulse, the perimeter, glare
+        legibility, thumb reach) actually have to be judged.
+      */}
+      <Section title="Capture">
+        <Button
+          label="Open the capture screen"
+          kind="secondary"
+          onPress={() => router.push('/capture')}
+        />
+      </Section>
+
       <Section title="Diagnostics">
         <Button
           label="Open the GPS and database diagnostics"

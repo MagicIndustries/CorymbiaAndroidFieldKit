@@ -1,8 +1,14 @@
 import React from 'react'
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native'
-import { ThemeProvider } from '@corymbia/ui'
+import { INPUT_AFFORDANCE_ORDER, ThemeProvider } from '@corymbia/ui'
 import { type as typeScale } from '@corymbia/tokens'
-import { averageReadings, createFakeLocationSource, type Reading } from '@corymbia/geo'
+import {
+  averageReadings,
+  createFakeLocationSource,
+  distanceMetres,
+  DUPLICATE_THRESHOLD_M,
+  type Reading,
+} from '@corymbia/geo'
 import type { Fix, FieldRecord } from '@corymbia/data'
 
 /**
@@ -76,6 +82,7 @@ jest.mock('@corymbia/geo', () => {
 const mockRepo = {
   createRecord: jest.fn(),
   refineRecordFix: jest.fn(),
+  renameRecord: jest.fn(),
 }
 
 jest.mock('@corymbia/data', () => {
@@ -84,8 +91,27 @@ jest.mock('@corymbia/data', () => {
     ...actual,
     createRecord: (...args: unknown[]) => mockRepo.createRecord(...args),
     refineRecordFix: (...args: unknown[]) => mockRepo.refineRecordFix(...args),
+    renameRecord: (...args: unknown[]) => mockRepo.renameRecord(...args),
   }
 })
+
+/**
+ * The router, mocked as an object rather than a fresh one per call.
+ *
+ * The screen's only navigation is the `recorded` state's way out, which until
+ * Plan 5 builds the launcher is the gallery at `/`. Nothing here needs a real
+ * navigation container, and mounting one would put the whole of expo-router's
+ * layout machinery between these tests and the two lines they are about.
+ */
+const mockRouter = {
+  push: jest.fn(),
+  replace: jest.fn(),
+  back: jest.fn(),
+}
+
+jest.mock('expo-router', () => ({
+  useRouter: () => mockRouter,
+}))
 
 const mockDevice = {
   id: 'device-under-test',
@@ -173,9 +199,24 @@ function reading(accuracyM: number, timestampMs: number, latitude = -37.8136): R
 
 let mockCaptureNumber = 0
 
+/**
+ * Every record the mocked repository has handed out, by id.
+ *
+ * The three repository functions this screen reaches are not independent
+ * fixtures: `refineRecordFix` and `renameRecord` change one column each of a
+ * row `createRecord` already wrote, and the real implementations are explicit
+ * about what they do *not* touch — `records.ts` names `capture_number` and
+ * `captured_at` in both, and `record_capture_number_is_immutable` enforces the
+ * first at the database. A fixture that minted a fresh capture number on every
+ * refinement would hand the screen a tube label that changed halfway through a
+ * capture, and a test asserting the recorded state's capture number would then
+ * be asserting the fixture's arithmetic rather than the screen's.
+ */
+const mockRecords = new Map<string, FieldRecord>()
+
 function recordFrom(fix: Fix): FieldRecord {
   mockCaptureNumber += 1
-  return {
+  const record: FieldRecord = {
     id: `record-${String(mockCaptureNumber)}`,
     activityId: null,
     contextActivityId: null,
@@ -190,6 +231,21 @@ function recordFrom(fix: Fix): FieldRecord {
     deviceId: mockDevice.id,
     attributes: {},
   }
+  mockRecords.set(record.id, record)
+  return record
+}
+
+/**
+ * Applies a change to a stored record the way the repository does — in place,
+ * on the row that is already there — or throws the way `refineRecordFix` and
+ * `renameRecord` both do when the id names nothing.
+ */
+function amendRecord(id: string, change: Partial<FieldRecord>): FieldRecord {
+  const existing = mockRecords.get(id)
+  if (!existing) throw new Error(`Record ${id} does not exist in the fixture.`)
+  const amended: FieldRecord = { ...existing, ...change }
+  mockRecords.set(id, amended)
+  return amended
 }
 
 const START_MS = Date.UTC(2026, 8, 7, 1, 0, 0)
@@ -206,18 +262,27 @@ beforeEach(() => {
   jest.setSystemTime(START_MS)
 
   mockCaptureNumber = 0
+  mockRecords.clear()
   mockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
   mockCreateSourceSpy.mockClear()
   watchCallCount = 0
+  mockRouter.push.mockClear()
+  mockRouter.replace.mockClear()
+  mockRouter.back.mockClear()
 
   mockRepo.createRecord.mockReset()
   mockRepo.refineRecordFix.mockReset()
+  mockRepo.renameRecord.mockReset()
   mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) =>
     Promise.resolve(recordFrom(input.fix)),
   )
   mockRepo.refineRecordFix.mockImplementation(
     (_db: unknown, input: { recordId: string; fix: Fix }) =>
-      Promise.resolve({ ...recordFrom(input.fix), id: input.recordId }),
+      Promise.resolve(amendRecord(input.recordId, { fix: input.fix })),
+  )
+  mockRepo.renameRecord.mockImplementation(
+    (_db: unknown, input: { recordId: string; title: string | null }) =>
+      Promise.resolve(amendRecord(input.recordId, { title: input.title })),
   )
 })
 
@@ -281,6 +346,47 @@ async function emit(accuracyM: number, latitude?: number) {
 }
 
 /**
+ * Ends the countdown the way her hand does — the same one control, which in the
+ * acquiring state reads `ACCEPT NOW`.
+ */
+async function acceptNow() {
+  await fireEvent.press(captureButton())
+  await settle()
+}
+
+/** The recorded state's way back to `ready`, which is the same control again. */
+async function takeAnotherReading() {
+  await fireEvent.press(captureButton())
+  await settle()
+}
+
+/**
+ * The flat accuracy that produces a plateau, in metres, and the sample count
+ * `holdVerdict` requires before it may claim one. Both are lifted verbatim
+ * from `useCapture.test.ts`, including the reason 0.8 is not a rounder number:
+ * with uniform readings the crossing point depends only on the accuracy, and
+ * for anything from about 1 m to 6.7 m it lands exactly on the minimum sample
+ * count — so a test written with 8 m would pass identically against a build
+ * with no minimum-sample guard at all.
+ */
+const FLAT_M = 0.8
+const MIN_SAMPLES = 10
+
+/**
+ * Stands still until the fix stops improving, which is how a capture normally
+ * finishes (spec §9.1.5): the tap's own reading is sample one, so nine more
+ * reach the minimum. Nine seconds of readings against a fifteen-second cap, and
+ * the override is never touched, so a countdown that ends here ended on the
+ * plateau or not at all.
+ */
+async function standStillUntilItSettles() {
+  for (let i = 0; i < MIN_SAMPLES - 1; i += 1) {
+    await emit(FLAT_M)
+  }
+  await settle()
+}
+
+/**
  * The traffic-light frame's own subtree.
  *
  * `TrafficLightFrame` takes no `testID` of its own, so this scopes to
@@ -320,9 +426,44 @@ describe('the ready state', () => {
 
     // Spec §9.1.4: exactly one action is ever live. Not "the primary one is
     // obvious" — one.
-    expect(screen.getAllByRole('button')).toHaveLength(1)
+    //
+    // The help affordance is excluded by testID rather than by loosening the
+    // count, and the distinction is not a convenience: §9.1.4 is about actions
+    // on the survey — things that write, or that end a wait — and `?` does
+    // neither. It opens an explanation and closes again, leaving the record
+    // exactly as it was. Excluding it by name keeps this assertion's teeth: a
+    // second capture action added here still fails, because it would not carry
+    // that testID.
+    const actions = screen
+      .getAllByRole('button')
+      .filter((node) => node.props.testID !== 'capture-help')
+    expect(actions).toHaveLength(1)
     expect(captureButton()).toHaveTextContent('CAPTURE')
     expect(screen.queryByText('ACCEPT NOW')).toBeNull()
+  })
+
+  it('carries the screen’s help affordance, which the countdown then takes away', async () => {
+    await arriveWithAFix()
+
+    // Doctrine rule 7: a tappable help affordance per screen, and it must open
+    // something rather than reveal itself on hover — there is no hover in a
+    // paddock. Asserted through the modal it opens, not merely its presence:
+    // a `?` that renders and does nothing satisfies presence and fails the rule.
+    await fireEvent.press(screen.getByTestId('capture-help'))
+    expect(screen.getByText('Capturing a point')).toBeTruthy()
+    // A phrase that exists nowhere but the help body, so this cannot pass on
+    // the ready state's own line about standing still.
+    expect(screen.getByText(/readings agree with each other/)).toBeTruthy()
+    await fireEvent.press(screen.getByText('Got it'))
+
+    // And doctrine rule 17's exemption, which is the reason this is asserted
+    // rather than assumed: *acquiring* collapses to a single-focus view where
+    // nothing else is on screen, and a `?` beside the two numbers she is
+    // standing still for is exactly the "else". Recorded in `docs/ui-doctrine.md`
+    // as a granted exemption, so a later reader does not read its absence as an
+    // oversight and "fix" it.
+    await tap()
+    expect(screen.queryByTestId('capture-help')).toBeNull()
   })
 
   it('renders the live coordinates in monospace', async () => {
@@ -533,6 +674,247 @@ describe('the location source (spec §9.1, CaptureDeps)', () => {
 
     expect(mockCreateSourceSpy).toHaveBeenCalledTimes(1)
     expect(watchCallCount).toBe(1)
+  })
+})
+
+describe('the recorded state (spec §9.6, doctrine rule 17)', () => {
+  it('reads as finished: the capture number, the final accuracy and what made it', async () => {
+    await arriveWithAFix(8)
+    await tap()
+    await emit(6)
+    await acceptNow()
+
+    // Doctrine rule 17: *recorded* is a state that reads as finished — what was
+    // saved, its final accuracy, and that it will not change again — not a
+    // countdown that stopped.
+    expect(readoutText('capture-recorded')).toBe('CAPTURE 1')
+
+    // The FINAL accuracy, which is the refinement's and not the tap's. Computed
+    // here through the real `averageReadings` over the same two readings the
+    // countdown collected, so a screen that printed the tap's ±8.0 m — the
+    // number that was on screen a moment earlier, and the easy mistake — fails.
+    const { accuracyM } = averageReadings([
+      reading(8, START_MS),
+      reading(6, START_MS + 1000),
+    ])
+    expect(readoutText('capture-recorded-accuracy')).toBe(`±${accuracyM.toFixed(1)} m`)
+    expect(readoutText('capture-recorded-samples')).toBe('2 readings averaged')
+
+    // And the two ways onward (doctrine rule 17): capture again, or leave.
+    expect(captureButton()).toHaveTextContent('TAKE ANOTHER READING')
+    expect(screen.getByTestId('capture-leave')).toBeTruthy()
+  })
+
+  it('names how the wait ended when she ended it herself', async () => {
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    expect(screen.getByTestId('capture-message')).toHaveTextContent('You accepted it early.')
+  })
+
+  it('names a plateau here, which is the only place it is ever said', async () => {
+    await arriveWithAFix(FLAT_M)
+    await tap()
+    await standStillUntilItSettles()
+
+    // Spec §9.1.5, corrected: the countdown ending itself on a plateau is the
+    // NORMAL way a capture finishes, and the screen deliberately does not
+    // announce it live — the render that first reports `plateaued` is the same
+    // one that ends the countdown, so on a device the announcement would exist
+    // for about a frame. This state is therefore the only place that fact ever
+    // reaches her, which is why it is asserted here and nowhere else.
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('capture-message')).toHaveTextContent(
+      'The fix stopped improving, so the countdown finished itself.',
+    )
+  })
+
+  it('takes another reading back to the ready state, with its panels gone again', async () => {
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+    expect(screen.getByTestId('capture-recorded')).toBeTruthy()
+
+    await takeAnotherReading()
+
+    // Doctrine rule 17 is a round trip, not a one-way transition: the recorded
+    // panels have to go away again, or the screen has grown widgets rather than
+    // changed mode.
+    expect(captureButton()).toHaveTextContent('CAPTURE')
+    expect(screen.queryByTestId('capture-recorded')).toBeNull()
+    expect(screen.queryByTestId('capture-affordances')).toBeNull()
+    expect(screen.queryByTestId('capture-leave')).toBeNull()
+  })
+
+  it('leaves to the gallery, which is where the launcher will be', async () => {
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    await fireEvent.press(screen.getByTestId('capture-leave'))
+
+    // Plan 5 builds the launcher; until then `/` is the gallery, and it is the
+    // only route this screen knows.
+    expect(mockRouter.replace).toHaveBeenCalledWith('/')
+  })
+})
+
+describe('the four affordances (spec §9.6)', () => {
+  it('shows all four, in the one order used everywhere in the application', async () => {
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    const tiles = within(screen.getByTestId('capture-affordances')).getAllByTestId(
+      /^affordance-[a-z]+$/,
+    )
+    // §9.6, verbatim: "location (already complete), title, voice note, photo.
+    // Identical icons, identical order, everywhere in the application."
+    expect(tiles.map((tile) => tile.props.testID)).toEqual([
+      'affordance-location',
+      'affordance-title',
+      'affordance-voice',
+      'affordance-photo',
+    ])
+
+    // And the three this screen shares with `InputAffordanceRow` are in the
+    // same relative order as that component's own canonical list — doctrine
+    // rule 5's "in the same order" is a claim about the whole application, so
+    // it is asserted against the exported constant rather than against a
+    // literal repeated here. A screen that reordered its tiles would satisfy
+    // the literal above only by being edited to match, and this one not at all.
+    const shared = INPUT_AFFORDANCE_ORDER.filter((kind) => kind !== 'description')
+    expect(tiles.map((tile) => tile.props.testID)).toEqual([
+      'affordance-location',
+      ...shared.map((kind) => `affordance-${kind}`),
+    ])
+  })
+
+  it('has voice and photo present and disabled, and says when they arrive', async () => {
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    // There is no media table, so building these would mean inventing storage.
+    // Present-and-disabled is the honest state: she can see that the app knows
+    // about them and that they are not available yet (doctrine rule 3 — every
+    // level of disclosure is a legitimate stopping point, and a level that is
+    // not built must not pretend otherwise).
+    expect(screen.getByTestId('affordance-voice')).toBeDisabled()
+    expect(screen.getByTestId('affordance-photo')).toBeDisabled()
+    expect(screen.getByTestId('capture-media-pending')).toHaveTextContent(/media capture/)
+
+    // The one that is real must not be swept up in the same disablement.
+    expect(screen.getByTestId('affordance-title')).not.toBeDisabled()
+  })
+
+  it('gives the saved point a name, through the repository that writes the event', async () => {
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), '  Frog pond outflow  ')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    // The record's own id, not the capture number and not a fresh one: a rename
+    // that addressed the wrong row would title someone else's pin, and
+    // `renameRecord` writes an append-only `'edited'` event either way.
+    expect(mockRepo.renameRecord).toHaveBeenCalledTimes(1)
+    expect(mockRepo.renameRecord).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ recordId: 'record-1', title: 'Frog pond outflow' }),
+    )
+
+    // And the tile now reads as complete, which is doctrine rule 9's two
+    // channels rather than a colour change: the label itself changes.
+    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title ✓')
+  })
+})
+
+describe('the duplicate guard (spec §9.5, doctrine rule 4)', () => {
+  /**
+   * Captures a point, ends the wait early, and goes back to ready — so the next
+   * capture has a previous point to be compared against.
+   */
+  async function captureAPoint(latitude?: number) {
+    await emit(8, latitude)
+    await tap()
+    await acceptNow()
+  }
+
+  it('warns about a close-spaced pin and still records it — it never blocks', async () => {
+    await arriveWithAFix()
+    await captureAPoint()
+    await takeAnotherReading()
+    await captureAPoint()
+
+    // THE RECORD IS THERE. This is doctrine rule 4, and it is the rule most
+    // likely to be "improved" away by someone who reasons that a duplicate
+    // ought to be prevented: two soil samples a metre apart are a normal thing
+    // to record, and only the ecologist standing there knows which she meant.
+    // The row is written by the tap, long before any comparison is possible, so
+    // the guard is a warning about what just happened and not a gate before it.
+    //
+    // ASSERTED FIRST, AND DELIBERATELY. A guard moved earlier — to refuse the
+    // tap, or to refuse the save — is the mutation this test exists to catch,
+    // and it must fail on the RECORD'S ABSENCE rather than on the warning's:
+    // "the second point was never written" is the sentence that names what
+    // actually went wrong, and a failure reading "no warning found" would send
+    // the next reader looking at the warning.
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(2)
+    expect(readoutText('capture-recorded')).toBe('CAPTURE 2')
+    expect(captureButton()).toHaveTextContent('TAKE ANOTHER READING')
+
+    // And the warning itself. Spec §9.5: a new pin within the threshold of the
+    // previous one is worth querying, because an accidental double-capture is a
+    // real field failure too.
+    expect(screen.getByTestId('capture-duplicate')).toBeTruthy()
+  })
+
+  it('says nothing about a pin that is genuinely somewhere else', async () => {
+    // About 11 m up the paddock — comfortably outside the threshold, asserted
+    // rather than asserted-by-eyeball, so a change to either the fixture
+    // latitude or `DUPLICATE_THRESHOLD_M` cannot leave this test quietly
+    // testing the same case as the one above.
+    const elsewhere = -37.8137
+    expect(
+      distanceMetres(
+        { latitude: -37.8136, longitude: 144.9631 },
+        { latitude: elsewhere, longitude: 144.9631 },
+      ),
+    ).toBeGreaterThan(DUPLICATE_THRESHOLD_M)
+
+    await arriveWithAFix()
+    await captureAPoint()
+    await takeAnotherReading()
+    await captureAPoint(elsewhere)
+
+    expect(screen.queryByTestId('capture-duplicate')).toBeNull()
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(2)
+  })
+
+  it('offers to continue, and does not take that answer as standing', async () => {
+    await arriveWithAFix()
+    await captureAPoint()
+    await takeAnotherReading()
+    await captureAPoint()
+
+    // §9.5's "offers to continue": the warning is acknowledgeable, which is all
+    // continuing can mean when nothing was ever refused.
+    await fireEvent.press(screen.getByTestId('capture-duplicate-dismiss'))
+    expect(screen.queryByTestId('capture-duplicate')).toBeNull()
+
+    // And the answer was about those two points, not about close-spaced pins in
+    // general. A dismissal that carried forward would silently suppress the
+    // warning on every capture after the first she waved through — which is the
+    // accidental-double-capture failure §9.5 exists to catch, quietly disabled
+    // by her own reasonable answer to a different question.
+    await takeAnotherReading()
+    await captureAPoint()
+    expect(screen.getByTestId('capture-duplicate')).toBeTruthy()
   })
 })
 
