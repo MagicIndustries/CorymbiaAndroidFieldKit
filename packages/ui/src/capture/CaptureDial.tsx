@@ -141,7 +141,11 @@ const LOCK_RIPPLE_PEAK_OPACITY = 0.9
  * radius or opacity.
  *
  * Colour never carries the grade alone (doctrine rule 9): the grade word
- * is always rendered alongside the colour. The lock is held to the same
+ * is always rendered alongside the colour, and a poor fix additionally
+ * dashes the accuracy circle's own outline (spec §9.2.2) — a third channel
+ * that reads at a glance even where a washed-out colour or an unread word
+ * would not. See `poorFixDashed` below for why that guards on `!lockedNow`
+ * as well as the grade. The lock is held to the same
  * rule (spec §9.2.1): `accessibilityValue.text` on the outer view carries
  * the lock as a plain fact, independent of the colour and motion this
  * component also uses to show it, so a screen (or a screen reader) can
@@ -386,6 +390,30 @@ export function CaptureDial({
   })
   const crosshairColour = lockedNow ? colour : theme.colors.textDim
 
+  // Doctrine rule 9 / spec §9.2.2: a poor fix dashes the accuracy circle's
+  // own outline, on top of the grade word and the status colour, so the
+  // signal survives washed-out colour and an unread word alike. On the
+  // accuracy circle specifically (not the ring, which is the clock, and not
+  // the crosshair, which is a fixed target) because the filled circle *is*
+  // the accuracy, and a dashed boundary on it reads as "this edge is
+  // uncertain" — precisely what a poor fix means.
+  //
+  // Gated on `!lockedNow`, not on `grade === 'poor'` alone: a poor fix never
+  // locks by construction (it is, by definition, the fix that stops short of
+  // the crosshair instead of converging onto it), but `locked` and `grade`
+  // are two independent props this component is simply told, not values it
+  // derives from each other — nothing in this file stops a caller (or a
+  // test) from handing it both at once. Without this guard that combination
+  // would draw a dashed boundary on a circle simultaneously filled and
+  // outlined at the *locked* weight, which is a hybrid this design never
+  // intends: "locked" means a definite object, and a definite object's edge
+  // is not the uncertain one. The guard costs nothing on the path the app
+  // actually exercises and forecloses the strange state on every other path.
+  const poorFixDashed = grade === 'poor' && !lockedNow
+  const accuracyOutlineDash: [number, number] | undefined = poorFixDashed
+    ? [field.dialAccuracyOutlineDash, field.dialAccuracyOutlineDashGap]
+    : undefined
+
   return (
     <View
       testID="capture-dial"
@@ -423,6 +451,7 @@ export function CaptureDial({
           fillOpacity={accuracyFillOpacity}
           stroke={colour}
           strokeWidth={accuracyOutlineWeight}
+          strokeDasharray={accuracyOutlineDash}
         />
         {rippling ? (
           <>

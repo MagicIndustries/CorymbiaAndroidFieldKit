@@ -118,5 +118,12 @@ describe('themes', () => {
     // locked weight is also reused, unchanged, for the crosshair once lit.
     expect(field.dialAccuracyOutline).toBe(1.75)
     expect(field.dialAccuracyOutlineLocked).toBe(4)
+    // The accuracy circle's dash geometry on a poor fix (doctrine rule 9,
+    // spec §9.2.2) — added closing the gap task-5's report recorded: the
+    // deleted TrafficLightFrame's `borderStyle: 'dashed'` had no numeric
+    // pattern of its own for these to inherit, so they are this task's own
+    // figures, sized against `dialAccuracyOutline` (see scales.ts).
+    expect(field.dialAccuracyOutlineDash).toBe(8)
+    expect(field.dialAccuracyOutlineDashGap).toBe(5)
   })
 })

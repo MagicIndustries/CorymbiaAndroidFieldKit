@@ -209,6 +209,68 @@ describe('CaptureDial', () => {
   })
 })
 
+describe('CaptureDial the poor-fix dashed outline (doctrine rule 9, spec §9.2.2)', () => {
+  // 8/5 are field.dialAccuracyOutlineDash/DashGap (packages/tokens/src/scales.ts),
+  // asserted here as literals rather than by importing the token — the same
+  // reasoning the lock's fill/outline test above gives: a test that imported
+  // the same constant the component draws with would pass no matter what
+  // that constant held.
+  it('dashes the accuracy outline on a poor fix, and no other grade', async () => {
+    await renderDial({ grade: 'poor', accuracyM: 3 })
+    expect(screen.getByTestId('dial-accuracy').props.strokeDasharray).toEqual([8, 5])
+  })
+
+  it('draws a solid outline on a good fix', async () => {
+    await renderDial({ grade: 'good', accuracyM: 3 })
+    expect(screen.getByTestId('dial-accuracy').props.strokeDasharray).toBeUndefined()
+  })
+
+  it('draws a solid outline on a fair fix', async () => {
+    await renderDial({ grade: 'fair', accuracyM: 3 })
+    expect(screen.getByTestId('dial-accuracy').props.strokeDasharray).toBeUndefined()
+  })
+
+  /**
+   * A poor fix never actually locks — by definition it is the fix that
+   * stops short of the crosshair rather than converging onto it — but
+   * `grade` and `locked` are two independent props this component is simply
+   * told, not values it derives from each other. Nothing stops a caller (or
+   * this test) handing it both, so the treatment must not leave that
+   * combination looking like a rendering bug: a dashed outline on a circle
+   * simultaneously filled and firmed to the *locked* weight would read as
+   * neither "uncertain" nor "definite" cleanly. Reduced motion is mocked so
+   * the locked state renders immediately, deterministically, with no
+   * animation to wait out (same pattern the lock's own fill/outline test
+   * above uses).
+   */
+  it('drops the dash rather than leaving a dashed-and-locked hybrid, if a poor fix is ever reported locked', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(true)
+    await renderDial({ grade: 'poor', accuracyM: 1, locked: true })
+    await screen.findByTestId('dial-accuracy')
+    const accuracy = screen.getByTestId('dial-accuracy')
+    expect(accuracy.props.strokeDasharray).toBeUndefined()
+    // The locked visual still proceeds normally otherwise: firm outline,
+    // deep fill — nothing about dropping the dash blocks the rest of the
+    // lock treatment from rendering.
+    expect(accuracy.props.strokeWidth).toBeCloseTo(4, 5)
+    expect(accuracy.props.fillOpacity).toBeCloseTo(0.45, 5)
+  })
+
+  it('brings the dash back the moment lock is lost again', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(true)
+    const { rerender } = await renderDial({ grade: 'poor', accuracyM: 1, locked: true })
+    await screen.findByTestId('dial-accuracy')
+    expect(screen.getByTestId('dial-accuracy').props.strokeDasharray).toBeUndefined()
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="poor" accuracyM={7} locked={false} />
+      </ThemeProvider>,
+    )
+    expect(screen.getByTestId('dial-accuracy').props.strokeDasharray).toEqual([8, 5])
+  })
+})
+
 describe('CaptureDial the lock (spec §9.2.1)', () => {
   it('renders the crosshair in textDim while unlocked, even when a lock prop is explicitly false', async () => {
     await renderDial({ grade: 'good', accuracyM: 3, locked: false })

@@ -728,9 +728,12 @@ says why, and offers to play.
 This distinction was learnt the hard way: a mockup built to settle this very design rendered
 one static frame and appeared broken, because it treated both cases as the same case.
 
-**Always backed by words**: the grade chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`), the numeric
-accuracy, a dashed treatment when poor, and the lock's own label. Colour never carries meaning
-alone.
+**Colour never carries meaning alone.** The grade chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`)
+and the numeric accuracy back the status colour in words at every phase; on a poor fix the
+accuracy circle's own outline additionally dashes — not a border, the dial has none of its
+own; the circle *is* the accuracy, so its edge is where "this fix is uncertain" belongs
+(`CaptureDial.tsx`, `field.dialAccuracyOutlineDash`/`dialAccuracyOutlineDashGap` in
+`packages/tokens/src/scales.ts`); and the lock carries its own label the same way (§9.2.1).
 
 **There is no separate `SHARPENING…` state.** That chip existed because a hold produced a
 provisional number that was not yet the saved one. Under §9.1 the record is already on disk

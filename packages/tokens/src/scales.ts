@@ -117,6 +117,34 @@ export const field = {
    * soft.
    */
   dialAccuracyOutlineLocked: 4,
+  /**
+   * The accuracy circle's outline dash length on a poor fix, in px (doctrine
+   * rule 9, spec §9.2.2: "a dashed treatment when poor"). A poor fix is the
+   * one case where the accuracy circle visibly stops short of the crosshair
+   * rather than converging onto it — the exact condition a dashed boundary
+   * exists to say ("this edge is uncertain") — so the treatment lives on the
+   * accuracy circle's own outline, not the ring (the clock) or the crosshair
+   * (a fixed target).
+   *
+   * Sized against `dialAccuracyOutline` (1.75px), not against anything the
+   * deleted `TrafficLightFrame` used: that frame dashed a rectangle with
+   * React Native's own `borderStyle: 'dashed'`, which has no numeric dash
+   * geometry of its own to inherit, and a rectangle's straight edges are a
+   * different drawing problem from a circle's curved one regardless. At
+   * ~4.5x the unlocked outline's own weight, each dash reads as a solid
+   * segment rather than a hairline that could be mistaken for anti-aliasing
+   * — the risk with a short dash on a thin stroke — without growing so long
+   * it reads as a broken ring rather than a deliberately dashed one.
+   */
+  dialAccuracyOutlineDash: 8,
+  /**
+   * The gap between dashes on a poor fix's accuracy outline, in px. Shorter
+   * than the dash itself (5px against 8px, roughly 2:3) so the eye reads
+   * mostly-line-interrupted-by-gaps rather than a row of separate dots —
+   * dashes and gaps close to equal length are the dotted look this is
+   * deliberately not going for.
+   */
+  dialAccuracyOutlineDashGap: 5,
 } as const
 
 /**
