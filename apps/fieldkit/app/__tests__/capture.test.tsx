@@ -870,6 +870,28 @@ describe('the lock (spec §9.2.1)', () => {
 
     expect(readoutText('capture-lock-label')).toBe('· LOCKED ON')
   })
+
+  it('stays unlocked in the ready state, even when the live reading is already sharp enough', async () => {
+    // The lock means "this capture has converged as far as this receiver
+    // takes it" — and in the ready state there is no capture to have
+    // converged. `LOCKED_M` is sharp enough that `isLocked(radiusForMetres(...))`
+    // is true on the raw distance test alone (the test above proves exactly
+    // that, once a capture is under way), so this is not a test that the
+    // fixture fails to reach the threshold — it is a test that the ready
+    // state suppresses the lock's treatment regardless.
+    await arriveWithAFix(LOCKED_M)
+
+    // No tap: still in the ready state, `CAPTURE` still the one live control.
+    expect(captureButton()).toHaveTextContent('CAPTURE')
+
+    expect(screen.queryByTestId('capture-lock-label')).toBeNull()
+    // And the dial's own accessibility fact — the channel that survives
+    // independently of colour and motion — agrees: not merely "no word
+    // rendered" but "the dial itself was told it is not locked".
+    expect(screen.getByTestId('capture-dial').props.accessibilityValue).toEqual({
+      text: 'Not locked',
+    })
+  })
 })
 
 describe('the adjacency requirement (spec §9.1.2)', () => {

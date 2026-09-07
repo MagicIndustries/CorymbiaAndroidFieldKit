@@ -18,25 +18,14 @@ import {
   INPUT_AFFORDANCE_ORDER,
   Screen,
   Type,
+  isLocked,
+  radiusForMetres,
   resolveReach,
   useLayout,
   useTheme,
   type FixGradeName,
   type InputAffordanceKind,
 } from '@corymbia/ui'
-// `radiusForMetres` and `isLocked` are `@corymbia/ui`'s own pure geometry
-// (packages/ui/src/capture/dialGeometry.ts) — the same module `CaptureDial`
-// itself is built on — but the package's barrel (`packages/ui/src/index.ts`
-// -> `capture/index.ts`) does not re-export them; only `CaptureDial` and
-// `FixGradeName` are. That is a real gap between this task's brief, which
-// names both as things this screen consumes "from `@corymbia/ui`", and the
-// repository as it stands. `packages/ui` is off limits to this task, so the
-// barrel cannot be widened here — this reaches the same file `CaptureDial`
-// imports from, by its path within the package rather than through the
-// barrel. `@corymbia/ui`'s package.json declares no `exports` map, so this
-// subpath resolves like any other file in the package; nothing here is a
-// private API reached through a back door closed to everyone else.
-import { isLocked, radiusForMetres } from '@corymbia/ui/src/capture/dialGeometry'
 import { renameRecord, type Database, type FieldRecord, type StoredFix } from '@corymbia/data'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
@@ -379,8 +368,19 @@ function CaptureBody() {
    * of any dependency on `@corymbia/geo`. `radiusForMetres`/`isLocked` are
    * `@corymbia/ui`'s own pure geometry, not `@corymbia/geo`'s, so this line is
    * the one place the screen's grading and the dial's geometry meet.
+   *
+   * Gated on `acquiring`. The lock means "this capture has converged as far
+   * as this receiver takes it", and outside a countdown there is no capture
+   * to have converged — the ready state's live reading can already sit
+   * inside the crosshair before she has tapped anything, and the raw
+   * distance test alone cannot tell that apart from a real lock. The dial
+   * still gets the honest accuracy and radius in every phase (`dialAccuracyM`
+   * above is unconditional); only the lock's *treatment* — the lit
+   * crosshair, the fill-and-firm, the ripple, the word — is reserved for a
+   * capture actually in progress, so the ceremony fires once, at the moment
+   * it was designed to mark: the end of a wait she stood through.
    */
-  const locked = isLocked(radiusForMetres(dialAccuracyM))
+  const locked = acquiring && isLocked(radiusForMetres(dialAccuracyM))
 
   /**
    * Where the capture block sits, from the reach zone (spec §5.4, §9.1) and
@@ -470,9 +470,14 @@ function CaptureBody() {
           lock beyond the boolean it was handed and the colour/motion it
           already carries — the words that survive in glare or for a
           colour-blind reader are this screen's to add. Rendered once, ahead
-          of the phase-specific content below, because a fix can be locked in
-          either phase: the dial is live at all times, and a live reading can
-          already sit on the crosshair before she has tapped anything.
+          of the phase-specific content below, so it sits beside the grade
+          word regardless of phase — but `locked` above is itself gated on
+          `acquiring`, so in practice this only ever renders during a
+          countdown. The dial is live at all times and a live reading can
+          already sit inside the crosshair before she has tapped anything,
+          but that is not a capture that has converged, only an idle reading
+          that happens to be sharp — the lock's ceremony is reserved for the
+          capture the ceremony is about.
         */}
         {locked ? (
           <Type variant="label" testID="capture-lock-label">
