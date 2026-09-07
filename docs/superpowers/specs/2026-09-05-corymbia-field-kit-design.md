@@ -703,8 +703,28 @@ the countdown ending on the signal a withdrawable verdict would be a statement a
 capture that no longer exists.
 
 Beside it, in words rather than a bar: **how much sharper the fix is than it was at the
-tap**, signed. A countdown that made the fix *worse* is the single most useful thing this
-interaction could report, and a readout that only ever showed improvement would hide it.
+tap**. A countdown that went badly is the single most useful thing this interaction could
+report, and a readout that could only ever show improvement would hide it.
+
+**That number cannot report it, and an earlier version of this section wrongly said it
+could.** It described the delta as signed, on the reasoning that a worsening countdown must
+be visible. It is right about the requirement and wrong about the instrument: the delta is
+structurally incapable of going negative, which was established by fuzzing twenty thousand
+trials against the real `averageReadings` rather than argued from the code. Inverse-variance
+weighting is monotonic in the sample set, and the tap's own reading is always a member of
+it, so every reading that arrives can only shrink the combined accuracy. A capture that went
+badly and one that went well produce the same shape of number.
+
+**The spread is what reports it**, and is shown beside the improvement for exactly that
+reason. Spread is the greatest distance from any reading to the averaged position, it is
+already computed and already stored on the record as provenance, and unlike the accuracy it
+genuinely worsens when a capture goes wrong — she moved, the sky closed in, the receiver
+wandered between readings. A tight spread with a good accuracy is a fix to trust; a good
+accuracy with a wide spread is the case the accuracy number alone would quietly hide.
+
+So the pair is the readout: **how much sharper, and how far apart.** The first can only
+improve and is described that way rather than as signed; the second is the honesty check on
+it.
 
 **The hatched gap bar is gone.** It drew a solid bar for current accuracy and a hatched
 extension for what a hold *could* add — a prediction about a future the app cannot make. It
