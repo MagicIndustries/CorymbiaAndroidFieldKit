@@ -1,0 +1,519 @@
+import { act, renderHook } from '@testing-library/react-native'
+import { createFakeLocationSource, holdVerdict, type Reading } from '@corymbia/geo'
+import type { Database, Device, FieldRecord, Fix } from '@corymbia/data'
+
+/**
+ * Tests for the capture state machine.
+ *
+ * WHAT IS AND IS NOT MOCKED, and why. The same division `diagnostics.test.tsx`
+ * draws, for the same reasons.
+ *
+ * Not mocked: `averageReadings`, `holdVerdict`, `sampleEvidence`, `nowIso`.
+ * They are the logic under observation. A test that stubbed `holdVerdict`
+ * could not tell whether this hook ends a countdown on a plateau — nor whether
+ * it honours the minimum-sample guard, which is the single most important rule
+ * below.
+ *
+ * Not mocked either: the location source. It is a *dependency* of the hook
+ * rather than a module it reaches for, so `createFakeLocationSource` is simply
+ * passed in — which is most of the point of lifting this out of the screen.
+ *
+ * Mocked: `createRecord` and `refineRecordFix`. Not because SQLite is
+ * inconvenient but because it is already proved — 348 tests in packages/data
+ * cover the schema, the CHECK constraints and both of these functions. What is
+ * NOT proved anywhere else is this hook's state machine: how many records one
+ * tap produces, how many refinements one countdown produces, and what happens
+ * to the timers when the hook goes away. Mocking them is also what lets a test
+ * hold a write open between two of its awaits, which is the only way to drive
+ * the double-tap window at its real await boundary.
+ */
+
+// ---------------------------------------------------------------------------
+// Module mocks. Each factory reaches its fixture through a lazy arrow, because
+// `jest.mock` is hoisted above the `const` below it — a factory that touched
+// `mockRepo` at definition time would run before it exists.
+// ---------------------------------------------------------------------------
+
+const mockRepo = {
+  createRecord: jest.fn(),
+  refineRecordFix: jest.fn(),
+}
+
+jest.mock('@corymbia/data', () => {
+  const actual = jest.requireActual('@corymbia/data')
+  return {
+    ...actual,
+    createRecord: (...args: unknown[]) => mockRepo.createRecord(...args),
+    refineRecordFix: (...args: unknown[]) => mockRepo.refineRecordFix(...args),
+  }
+})
+
+// Imported after the mocks so it picks them up.
+import { useCapture } from '../useCapture'
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+/**
+ * A handle, not a database. Nothing in this file calls a method on it: the two
+ * repository functions the hook uses are replaced above, and the hook only
+ * passes the handle through to them. Every method rejects rather than
+ * resolving, so a hook that started talking to the database directly would
+ * fail loudly here instead of quietly succeeding against a stub.
+ */
+const testDb: Database = {
+  execute: () => Promise.reject(new Error('the test database is a handle, not a database')),
+  all: () => Promise.reject(new Error('the test database is a handle, not a database')),
+  first: () => Promise.reject(new Error('the test database is a handle, not a database')),
+  transaction: () => Promise.reject(new Error('the test database is a handle, not a database')),
+  close: () => Promise.resolve(),
+}
+
+const testDevice: Device = {
+  id: 'device-under-test',
+  installId: 'install-1',
+  label: 'test-handset',
+  manufacturer: 'Test',
+  brand: 'Test',
+  modelName: 'Model',
+  modelId: 'model-1',
+  deviceType: 'phone',
+  osName: 'Android',
+  osVersion: '15',
+  isPhysical: true,
+  appVersion: '1.0.0',
+  appBuild: '1',
+  firstSeenAt: '2026-09-07T00:00:00.000Z',
+  lastSeenAt: '2026-09-07T00:00:00.000Z',
+}
+
+/**
+ * A reading with everything the save path insists on: a usable accuracy and an
+ * explicit `isMocked: false`. `undefined` there is the platform declining to
+ * say, which the save path refuses to store — correct behaviour, and the
+ * subject of its own test below rather than an accident of this fixture.
+ */
+function reading(accuracyM: number, timestampMs: number): Reading {
+  return {
+    latitude: -37.8136,
+    longitude: 144.9631,
+    accuracyM,
+    altitudeM: 31,
+    verticalAccuracyM: 4,
+    isMocked: false,
+    timestampMs,
+  }
+}
+
+let mockCaptureNumber = 0
+
+function recordFrom(fix: Fix): FieldRecord {
+  mockCaptureNumber += 1
+  return {
+    id: `record-${String(mockCaptureNumber)}`,
+    activityId: null,
+    contextActivityId: null,
+    kind: 'pin',
+    captureNumber: mockCaptureNumber,
+    sequence: null,
+    filedAt: null,
+    title: null,
+    description: null,
+    fix,
+    capturedAt: new Date(Date.now()).toISOString(),
+    deviceId: testDevice.id,
+    attributes: {},
+  }
+}
+
+/**
+ * A promise the test resolves by hand, so a capture can be held open between
+ * two of its awaits — which is the window the double-tap defect lived in.
+ *
+ * Written without a definite-assignment assertion: the initial no-op is
+ * replaced synchronously by the executor, which runs before `Promise` returns.
+ */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let settle: (value: T) => void = () => undefined
+  const promise = new Promise<T>((resolveWith) => {
+    settle = resolveWith
+  })
+  return {
+    promise,
+    resolve: (value) => {
+      settle(value)
+    },
+  }
+}
+
+const START_MS = Date.UTC(2026, 8, 7, 1, 0, 0)
+
+/** The default countdown cap these tests run against, in seconds. */
+const CAP_S = 15
+
+/**
+ * A cap long enough that it cannot be what ends a plateau test. The plateau
+ * tests below run at most eleven seconds of readings, so a countdown that
+ * finishes in one of them finished because `holdVerdict` said so.
+ */
+const LONG_CAP_S = 60
+
+/**
+ * The flat accuracy the two minimum-sample tests emit, in metres, and **the
+ * one number in this file that had to be derived rather than picked.**
+ *
+ * With uniform readings `averageReadings` reports `max(σ/√n, σ/3)`, so the
+ * whole accuracy series is σ scaled by a fixed factor and the point at which
+ * `holdVerdict`'s trailing window falls under `MEANINGFUL_IMPROVEMENT_M`
+ * depends only on σ. For any σ from about 1 m up to about 6.7 m — which is
+ * every plausible GPS accuracy, and includes the 8 m the diagnostics tests use
+ * — that crossing lands at n=10, *exactly* `MIN_SAMPLES`. A test written with
+ * such a value would pass identically against a build with no minimum-sample
+ * guard at all, because the guard would be holding back a plateau that was not
+ * going to be claimed for another sample anyway.
+ *
+ * 0.8 m is chosen to break that coincidence. Verified against the real
+ * `holdVerdict` (see the `it` block that pins it): the guarded crossing is
+ * n=10 as always, while the *unguarded* crossing — the loop run from n=2, i.e.
+ * `MIN_SAMPLES` set to 2 — is n=5, a full five samples earlier. That gap is
+ * what test 6's first phase sits inside.
+ */
+const FLAT_M = 0.8
+
+/** How many samples `holdVerdict` requires before it may claim a plateau. */
+const MIN_SAMPLES = 10
+
+let source: ReturnType<typeof createFakeLocationSource>
+
+beforeEach(() => {
+  // `setImmediate`, `nextTick` and `queueMicrotask` are deliberately left real.
+  // React's async `act` flushes its work queue through `setImmediate`, so
+  // faking it means every `await act(...)` waits for a callback the test itself
+  // is holding, and every test fails on the 5 s timeout instead of on its
+  // assertion. Everything the hook schedules — `setTimeout` for the countdown,
+  // `setInterval` for the ticker, `Date.now` for the seconds remaining — is
+  // still faked, which is the part that matters: a 60 s countdown must not take
+  // 60 s to test.
+  jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] })
+  jest.setSystemTime(START_MS)
+
+  mockCaptureNumber = 0
+  source = createFakeLocationSource({ permission: 'granted', readings: [] })
+
+  mockRepo.createRecord.mockReset()
+  mockRepo.refineRecordFix.mockReset()
+  mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) =>
+    Promise.resolve(recordFrom(input.fix)),
+  )
+  mockRepo.refineRecordFix.mockImplementation(
+    (_db: unknown, input: { recordId: string; fix: Fix }) =>
+      Promise.resolve({ ...recordFrom(input.fix), id: input.recordId }),
+  )
+})
+
+afterEach(() => {
+  jest.clearAllTimers()
+  jest.useRealTimers()
+})
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Lets every pending promise continuation run, and React apply what they set. */
+async function settle() {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
+
+/**
+ * Mounts the hook and lets the permission request and the subscription resolve.
+ * `@testing-library/react-native` v14 is async throughout, so `renderHook` and
+ * `unmount` are both awaited.
+ */
+async function mountCapture(capSeconds = CAP_S) {
+  const view = await renderHook(() =>
+    useCapture({ db: testDb, device: testDevice, source, capSeconds }),
+  )
+  await settle()
+  return view
+}
+
+/** Delivers one reading, a second after the last thing that happened. */
+async function emit(accuracyM: number) {
+  await act(async () => {
+    jest.advanceTimersByTime(1000)
+    source.emit(reading(accuracyM, Date.now()))
+  })
+}
+
+/** Delivers `count` readings a second apart, each with the same accuracy. */
+async function emitFlat(count: number, accuracyM = FLAT_M) {
+  for (let i = 0; i < count; i++) await emit(accuracyM)
+}
+
+/** Runs the clock forward by whole countdowns. */
+async function advanceCaps(count: number, capSeconds = CAP_S) {
+  await act(async () => {
+    jest.advanceTimersByTime(count * capSeconds * 1000 + 1000)
+  })
+  await settle()
+}
+
+/** A flat hold of `n` readings, as `holdVerdict` itself would be handed it. */
+function flatHold(n: number, accuracyM = FLAT_M): Reading[] {
+  return Array.from({ length: n }, (_, i) => reading(accuracyM, START_MS + i * 1000))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('useCapture', () => {
+  it('writes exactly one record on a tap and moves to acquiring', async () => {
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    // The record is real on disk before the wait starts — that is the whole
+    // model: if the app dies or she walks away, the capture survives with the
+    // fix it had and only the sharpening is lost.
+    expect(result.current.record).not.toBeNull()
+    expect(result.current.phase).toBe('acquiring')
+    expect(mockRepo.createRecord).toHaveBeenCalledWith(
+      testDb,
+      expect.objectContaining({ fix: expect.objectContaining({ quality: 'deliberate' }) }),
+    )
+  })
+
+  it('writes one record, not two, when a second tap lands inside the write window', async () => {
+    // The window this test is about: `capture()` runs an await — the insert —
+    // before the countdown exists, and nothing debounces the control, so the
+    // second tap of a double-tap arrives while the first capture is parked at
+    // that await with no countdown yet to test for.
+    //
+    // The record the missing guard produced was not a harmless duplicate: it
+    // had one sample, no spread and a zero-length hold, which on disk is
+    // indistinguishable from "the countdown produced no improvement" — the
+    // exact measurement this interaction exists to make.
+    //
+    // Driven at the real await boundary rather than by inspecting a flag: the
+    // insert is held open, so the first capture is genuinely parked between
+    // `createRecord` and the countdown for as long as this test wants.
+    const held = deferred<FieldRecord>()
+    mockRepo.createRecord.mockImplementation(() => held.promise)
+
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+
+    // The second tap, with the first capture parked mid-write.
+    await act(async () => {
+      result.current.capture()
+    })
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      held.resolve(recordFrom({ quality: 'none' }))
+      await held.promise
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    expect(result.current.phase).toBe('acquiring')
+  })
+
+  it('refines exactly once when the countdown runs to its cap', async () => {
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+    await emitFlat(3, 5)
+
+    await advanceCaps(1)
+
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(result.current.phase).toBe('recorded')
+
+    // A further full cap, to prove no later timer fires a second refinement.
+    await advanceCaps(1)
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+  })
+
+  it('refines exactly once when the override accepts early, and no timer fires afterwards', async () => {
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+    await emitFlat(2, 5)
+
+    await act(async () => {
+      result.current.acceptNow()
+    })
+    await settle()
+
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(result.current.phase).toBe('recorded')
+
+    // The cap has not been reached yet; running past it must change nothing.
+    await advanceCaps(1)
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(result.current.phase).toBe('recorded')
+  })
+
+  it('ends the countdown on a plateau, before the cap', async () => {
+    const { result } = await mountCapture(LONG_CAP_S)
+    await emit(FLAT_M)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    // The tap's own reading is sample one, so `MIN_SAMPLES - 1` more reach the
+    // minimum. All flat, which on this value is a plateau the moment the guard
+    // allows one to be claimed.
+    await emitFlat(MIN_SAMPLES - 1)
+    await settle()
+
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(result.current.phase).toBe('recorded')
+    // Which of the three completion paths ran, said out loud. The override was
+    // never touched and nine seconds of readings is nowhere near a sixty-second
+    // cap, so this is the plateau or nothing.
+    expect(result.current.message).toBe(
+      'The fix stopped improving, so the countdown finished itself.',
+    )
+    expect(Date.now() - START_MS).toBeLessThan(LONG_CAP_S * 1000)
+  })
+
+  it('will not claim a plateau before the minimum sample count, however flat the readings', async () => {
+    // The value this test turns on. `FLAT_M`'s comment explains why it is 0.8
+    // and not something more plausible-looking; these two assertions are the
+    // verification that comment claims, run against the real `holdVerdict`
+    // rather than taken on trust.
+    //
+    // Below the minimum the answer is always `'improving'` — including at the
+    // sample where an unguarded rule would already have said `'plateaued'`,
+    // which for this value is n=5.
+    expect(holdVerdict(flatHold(MIN_SAMPLES - 1))).toBe('improving')
+    expect(holdVerdict(flatHold(MIN_SAMPLES))).toBe('plateaued')
+
+    const { result } = await mountCapture(LONG_CAP_S)
+    await emit(FLAT_M)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    // Two short of the minimum, counting the tap's own reading.
+    await emitFlat(MIN_SAMPLES - 3)
+    await settle()
+
+    expect(result.current.phase).toBe('acquiring')
+    expect(result.current.verdict).toBe('improving')
+    expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
+
+    // The reading that reaches the minimum, and the one after it. The wait ends
+    // here and not a sample earlier.
+    await emitFlat(2)
+    await settle()
+
+    expect(result.current.phase).toBe('recorded')
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves no timer running and refines nothing when it is unmounted mid-countdown', async () => {
+    const view = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      view.result.current.capture()
+    })
+    await settle()
+
+    expect(view.result.current.phase).toBe('acquiring')
+    // The completion timeout and the readout ticker are both live.
+    expect(jest.getTimerCount()).toBeGreaterThan(0)
+
+    await view.unmount()
+
+    expect(jest.getTimerCount()).toBe(0)
+
+    await advanceCaps(2)
+    expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
+    // Nothing wrote a new phase into a hook that no longer exists.
+    expect(view.result.current.phase).toBe('acquiring')
+  })
+
+  it('returns to ready when the next capture is asked for', async () => {
+    const { result } = await mountCapture()
+    await emit(6)
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+    await advanceCaps(1)
+    expect(result.current.phase).toBe('recorded')
+
+    await act(async () => {
+      result.current.again()
+    })
+
+    expect(result.current.phase).toBe('ready')
+    expect(result.current.record).toBeNull()
+    expect(result.current.secondsRemaining).toBe(0)
+  })
+
+  it('still records a capture taken before there is any usable reading, with no position', async () => {
+    // Doctrine rule 4: nothing blocks capture. A tap with no fix on hand writes
+    // a real row at a real time — the countdown that follows can still give it
+    // a position — and the row says `'none'` rather than inventing one.
+    const { result } = await mountCapture()
+
+    await act(async () => {
+      result.current.capture()
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    expect(mockRepo.createRecord).toHaveBeenCalledWith(
+      testDb,
+      expect.objectContaining({ fix: { quality: 'none' } }),
+    )
+    expect(result.current.phase).toBe('acquiring')
+    // The reason is carried into the record's `'created'` event, because a
+    // `'none'` row's own columns cannot say why it has no position.
+    expect(mockRepo.createRecord).toHaveBeenCalledWith(
+      testDb,
+      expect.objectContaining({ detail: expect.stringContaining('No readings') }),
+    )
+    expect(result.current.message).not.toBeNull()
+
+    // And the countdown still gives it one.
+    await emitFlat(3, 5)
+    await advanceCaps(1)
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(result.current.phase).toBe('recorded')
+  })
+})
