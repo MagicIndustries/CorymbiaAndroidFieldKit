@@ -1,11 +1,12 @@
 import React from 'react'
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native'
 import { INPUT_AFFORDANCE_ORDER, ThemeProvider } from '@corymbia/ui'
-import { type as typeScale } from '@corymbia/tokens'
+import { darkTheme, type as typeScale } from '@corymbia/tokens'
 import {
   averageReadings,
   createFakeLocationSource,
   distanceMetres,
+  gradeAccuracy,
   DUPLICATE_THRESHOLD_M,
   type Reading,
 } from '@corymbia/geo'
@@ -315,8 +316,14 @@ async function arriveWithAFix(accuracyM = 8) {
   // @testing-library/react-native v14 is async throughout: `render`,
   // `fireEvent.*` and `unmount` all return promises and must be awaited, or the
   // work they queue lands in the middle of the next assertion.
+  //
+  // The theme is pinned to dark — the product default (spec §5.2) — rather
+  // than left to resolve from the system colour scheme, which in a headless
+  // environment answers light. The traffic light's border colour is asserted
+  // below, and that assertion has to be a statement about the frame rather
+  // than about what the test host reports.
   const view = await render(
-    <ThemeProvider>
+    <ThemeProvider initial="dark">
       <CaptureScreen />
     </ThemeProvider>,
   )
@@ -365,9 +372,10 @@ async function takeAnotherReading() {
  * `holdVerdict` requires before it may claim one. Both are lifted verbatim
  * from `useCapture.test.ts`, including the reason 0.8 is not a rounder number:
  * with uniform readings the crossing point depends only on the accuracy, and
- * for anything from about 1 m to 6.7 m it lands exactly on the minimum sample
- * count — so a test written with 8 m would pass identically against a build
- * with no minimum-sample guard at all.
+ * from about 4.4 m upward the guarded crossing and the unguarded one coincide
+ * — so a test written with 8 m, where both land at n=11, would pass
+ * identically against a build with no minimum-sample guard at all. See that
+ * file's `FLAT_M` for the computed table.
  */
 const FLAT_M = 0.8
 const MIN_SAMPLES = 10
@@ -516,6 +524,94 @@ describe('the acquiring state', () => {
     expect(heroSized).toHaveLength(2)
   })
 
+  /**
+   * WHAT THE TWO NUMBERS SAY, not merely how big they are.
+   *
+   * Their font size and their containment were asserted and their *content*
+   * was not, anywhere. Changing `capture.preview?.accuracyM` to
+   * `capture.latest?.accuracyM` on the screen — a one-word edit, and the
+   * plausible-looking one — left the whole suite passing while the readout
+   * showed the raw bouncing single reading instead of the number the override
+   * would store, and the traffic light, deriving from the same variable,
+   * graded the wrong number with it. That is the exact confusion this design
+   * exists to prevent.
+   *
+   * The fixture is chosen so the two answers differ in both channels: the
+   * accumulated fix is ±3.7 m and good, the latest single reading is ±6.0 m
+   * and fair.
+   */
+  describe('the two numbers, by value', () => {
+    /** The samples the countdown has accumulated after `standStillBriefly`. */
+    const COLLECTED = [
+      reading(8, START_MS),
+      reading(6, START_MS + 1000),
+      reading(6, START_MS + 2000),
+    ]
+
+    async function standStillBriefly() {
+      await arriveWithAFix(8)
+      await tap()
+      await emit(6)
+      await emit(6)
+    }
+
+    it('prints the accuracy the override would store, not the latest single reading', async () => {
+      await standStillBriefly()
+
+      // Computed through the real `averageReadings` over the exact samples
+      // the countdown collected, as the recorded-state test does, rather than
+      // a number typed in here.
+      const { accuracyM } = averageReadings(COLLECTED)
+      expect(readoutText('capture-accuracy')).toBe(`±${accuracyM.toFixed(1)} m`)
+
+      // And the two candidates really are different numbers, which is what
+      // gives the assertion above its teeth.
+      expect(`±${accuracyM.toFixed(1)} m`).not.toBe('±6.0 m')
+    })
+
+    it('grades that same number, in the word and in the border colour', async () => {
+      await standStillBriefly()
+
+      // The grade derives from the accuracy above, so a readout showing the
+      // wrong number grades the wrong number too. Both channels of doctrine
+      // rule 9 are asserted: the word, and the colour behind it.
+      const { accuracyM } = averageReadings(COLLECTED)
+      expect(gradeAccuracy(accuracyM)).toBe('good')
+      // The latest single reading grades differently, so this cannot pass
+      // against a screen reading from the wrong variable.
+      expect(gradeAccuracy(6)).toBe('fair')
+
+      expect(screen.getByText('GOOD FIX')).toBeTruthy()
+      expect(screen.queryByText('FAIR FIX')).toBeNull()
+      expect(screen.getByTestId('traffic-light-border').props.style.borderColor).toBe(
+        darkTheme.colors.statusGood,
+      )
+    })
+
+    it('counts the seconds down from the cap, in whole seconds', async () => {
+      await standStillBriefly()
+
+      // Two seconds of readings against the fifteen-second cap. Pinned to the
+      // exact string: `TIME LEFT` is one of the two numbers she is standing
+      // still for, and a readout that showed the elapsed time instead — or
+      // the cap, unmoved — would satisfy any assertion weaker than this.
+      expect(readoutText('capture-seconds')).toBe('13s')
+    })
+
+    it('draws the countdown ring while the wait runs, and at no other time', async () => {
+      await arriveWithAFix(8)
+      // The frame is live at all times; a countdown is not, so there is no
+      // resting track before the tap.
+      expect(screen.queryByTestId('perimeter')).toBeNull()
+
+      await tap()
+      expect(screen.getByTestId('perimeter')).toBeTruthy()
+
+      await acceptNow()
+      expect(screen.queryByTestId('perimeter')).toBeNull()
+    })
+  })
+
   it('says the verdict in the words the spec pins, while the fix is still improving', async () => {
     await arriveWithAFix()
     await tap()
@@ -549,9 +645,39 @@ describe('the acquiring state', () => {
     // negative — inverse-variance weighting is monotonic and the tap's own
     // reading is always in the sample set — so presenting it as a signed delta
     // would claim a worsening it can never show.
+    //
+    // Pinned to the exact digit, through the real `averageReadings` over the
+    // exact samples the countdown collected. `/sharper than the tap/` on its
+    // own also matched the floor branch's "no sharper than the tap yet", so a
+    // build that printed a hard-coded 0.0 satisfied it.
+    const { accuracyM } = averageReadings([
+      reading(12, START_MS),
+      reading(2, START_MS + 1000),
+      reading(2, START_MS + 2000),
+    ])
     const improvement = readoutText('capture-improvement')
-    expect(improvement).toMatch(/sharper than the tap/)
+    expect(improvement).toBe(`${(12 - accuracyM).toFixed(1)} m sharper than the tap`)
     expect(improvement).not.toMatch(/[+-]/)
+  })
+
+  it('claims no improvement at all when there is none worth claiming', async () => {
+    // The other branch of the same readout, and the only thing that exercises
+    // `IMPROVEMENT_FLOOR_M`. A tap that was already sharp followed by a
+    // reading two orders of magnitude worse moves the combined accuracy by
+    // about a ten-thousandth of a metre: real, and below the tenth of a metre
+    // the readout can print. Saying "0.0 m sharper than the tap" there is a
+    // claim of improvement dressed as none.
+    await arriveWithAFix(2)
+    await tap()
+    await emit(200)
+
+    const { accuracyM } = averageReadings([reading(2, START_MS), reading(200, START_MS + 1000)])
+    // The fixture really is inside the floor, asserted rather than assumed —
+    // otherwise a change to either number could leave this quietly testing
+    // the numeric branch again.
+    expect(2 - accuracyM).toBeGreaterThan(0)
+    expect(2 - accuracyM).toBeLessThan(0.05)
+    expect(readoutText('capture-improvement')).toBe('no sharper than the tap yet')
   })
 
   it('shows the spread beside it, which is the number that does worsen', async () => {
@@ -652,6 +778,22 @@ describe('the adjacency requirement (spec §9.1.2)', () => {
       expect(frame.getByTestId(testID)).toBeTruthy()
     }
   })
+
+  it('keeps the coordinates outside it, because they are context and not the wait', async () => {
+    await arriveWithAFix()
+    await tap()
+    await emit(7)
+
+    // The other half of §9.1.2, and the half nothing asserted: the frame is
+    // for what answers *how good is it* and *how much longer*. The
+    // coordinates are context about the receiver — its current reading, not
+    // the fix under construction — and §9.4 puts them outside deliberately.
+    // Moving them in passed every test in this file.
+    expect(screen.getByTestId('capture-latitude')).toBeTruthy()
+    const frame = insideTheFrame()
+    expect(frame.queryByTestId('capture-latitude')).toBeNull()
+    expect(frame.queryByTestId('capture-longitude')).toBeNull()
+  })
 })
 
 describe('the location source (spec §9.1, CaptureDeps)', () => {
@@ -703,6 +845,38 @@ describe('the recorded state (spec §9.6, doctrine rule 17)', () => {
     // And the two ways onward (doctrine rule 17): capture again, or leave.
     expect(captureButton()).toHaveTextContent('TAKE ANOTHER READING')
     expect(screen.getByTestId('capture-leave')).toBeTruthy()
+  })
+
+  it('names where the capture went', async () => {
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    // `useCapture` files every capture to the Inbox, which §10.2 treats as a
+    // supported destination rather than an error state. Naming it is the
+    // point: a state that reads as finished has to say where the thing it
+    // finished with has gone, and this is the line Plan 5 turns into the
+    // activity name §9.6 asks for.
+    expect(readoutText('capture-recorded-destination')).toBe(
+      'Saved to the Inbox. You can file it from there later.',
+    )
+  })
+
+  it('scrolls too, so its two ways onward cannot fall below the fold in landscape', async () => {
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    // This state carries considerably more than the acquiring one, and a
+    // phone in landscape has roughly 360dp of height. `flexGrow: 1` is what
+    // stops content taller than the viewport clipping; `justifyContent` is
+    // §5.4's bottom anchoring, which has the same overflow behaviour as
+    // centring and so needs asserting separately.
+    const style: unknown = screen.getByTestId('capture-recorded-scroll').props.contentContainerStyle
+    expect(style).toMatchObject({ flexGrow: 1, justifyContent: 'flex-end' })
+    expect(
+      within(screen.getByTestId('capture-recorded-scroll')).getByTestId('capture-leave'),
+    ).toBeTruthy()
   })
 
   it('names how the wait ended when she ended it herself', async () => {
@@ -832,6 +1006,39 @@ describe('the four affordances (spec §9.6)', () => {
     // channels rather than a colour change: the label itself changes.
     expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title ✓')
   })
+
+  it('says the name was not saved, and that the point itself is safe', async () => {
+    // A rename writes through the same append-only event log as everything
+    // else that happens to a record, in a transaction, and it can fail. What
+    // must not be lost in that failure is that the *point* is fine: the title
+    // is the one thing at risk, and "the name was not saved" and "the capture
+    // was lost" are materially different sentences to read standing in a
+    // paddock.
+    mockRepo.renameRecord.mockImplementation(() =>
+      Promise.reject(new Error('database is locked')),
+    )
+
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    expect(screen.getByTestId('capture-title-error')).toHaveTextContent(
+      'The name was not saved: database is locked. The point itself is safe.',
+    )
+    // The record is untouched and the tile has not claimed a title it does
+    // not have.
+    expect(screen.queryByTestId('capture-title-value')).toBeNull()
+    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title')
+    expect(screen.getByTestId('affordance-title-label')).not.toHaveTextContent('✓')
+    // And the control is live again, so the failure is recoverable rather
+    // than a dead end.
+    expect(screen.getByTestId('capture-title-save')).not.toBeDisabled()
+  })
 })
 
 describe('the duplicate guard (spec §9.5, doctrine rule 4)', () => {
@@ -844,6 +1051,69 @@ describe('the duplicate guard (spec §9.5, doctrine rule 4)', () => {
     await tap()
     await acceptNow()
   }
+
+  /** The latitude every other point in this block is measured from. */
+  const ORIGIN = { latitude: -37.8136, longitude: 144.9631 }
+
+  /** How far a point at `latitude` is from that origin, in metres. */
+  function metresFromOrigin(latitude: number): number {
+    return distanceMetres(ORIGIN, { latitude, longitude: ORIGIN.longitude })
+  }
+
+  /**
+   * Two latitudes that straddle `DUPLICATE_THRESHOLD_M`, and the reason they
+   * are not round numbers: **the threshold has to be what decides the
+   * outcome.** The first version of these tests captured twice at the same
+   * coordinate, 0.0 m apart, where no change to the threshold — 1 m, 50 m —
+   * could make the pair behave differently. This is the test that has to exist
+   * before the 5 m figure can be revisited on field evidence, so it is written
+   * to fail when that figure moves by a metre in either direction.
+   *
+   * About 4.4 m and about 6.1 m from the origin, north of it, at the same
+   * longitude. Asserted below rather than trusted.
+   */
+  const JUST_INSIDE = -37.81356
+  const JUST_OUTSIDE = -37.813545
+
+  it('brackets the threshold, so a change to it cannot leave these tests testing the same case', () => {
+    expect(metresFromOrigin(JUST_INSIDE)).toBeLessThan(DUPLICATE_THRESHOLD_M)
+    expect(metresFromOrigin(JUST_INSIDE)).toBeGreaterThan(DUPLICATE_THRESHOLD_M - 1)
+    expect(metresFromOrigin(JUST_OUTSIDE)).toBeGreaterThan(DUPLICATE_THRESHOLD_M)
+    expect(metresFromOrigin(JUST_OUTSIDE)).toBeLessThan(DUPLICATE_THRESHOLD_M + 2)
+  })
+
+  it('warns just inside the threshold, and says how far apart the two points are', async () => {
+    await arriveWithAFix()
+    await captureAPoint()
+    await takeAnotherReading()
+    await captureAPoint(JUST_INSIDE)
+
+    // The record first, for the reason the test below this block gives.
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(2)
+
+    // The distance is asserted, not just the warning's presence: it is the
+    // whole content of the sentence, and a guard comparing the wrong pair of
+    // points — the tap's position against the refined one, say — would still
+    // warn, just with a different number.
+    const warning = within(screen.getByTestId('capture-duplicate'))
+    expect(
+      warning.getByText(
+        `This point is ${metresFromOrigin(JUST_INSIDE).toFixed(1)} m from the one before it.`,
+      ),
+    ).toBeTruthy()
+  })
+
+  it('says nothing just outside it', async () => {
+    await arriveWithAFix()
+    await captureAPoint()
+    await takeAnotherReading()
+    await captureAPoint(JUST_OUTSIDE)
+
+    // A metre and a half further than the case above, and the whole of the
+    // difference is `DUPLICATE_THRESHOLD_M`.
+    expect(screen.queryByTestId('capture-duplicate')).toBeNull()
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(2)
+  })
 
   it('warns about a close-spaced pin and still records it — it never blocks', async () => {
     await arriveWithAFix()

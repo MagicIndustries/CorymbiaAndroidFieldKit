@@ -108,9 +108,39 @@ function reading(accuracyM: number, timestampMs: number): Reading {
 
 let mockCaptureNumber = 0
 
+/**
+ * Every record the mocked repository has handed out, by id.
+ *
+ * `createRecord` and `refineRecordFix` are not independent fixtures:
+ * `refineRecordFix` changes one column of a row `createRecord` already wrote,
+ * and the real implementation is explicit about what it does *not* touch —
+ * `records.ts` names `capture_number` and `captured_at`, and migration 003's
+ * `record_capture_number_is_immutable` enforces the first at the database. A
+ * fixture that minted a fresh capture number on every refinement models a
+ * database state that cannot exist, and hands the hook a tube label that
+ * changes halfway through a capture. Inert today, because nothing here reads
+ * the number back — but it is the one property this branch most insists on,
+ * and a fixture that contradicts it is where a test asserting it would
+ * quietly start passing for the wrong reason.
+ */
+const mockRecords = new Map<string, FieldRecord>()
+
+/**
+ * Applies a change the way the repository does — in place, on the row that is
+ * already there — or throws the way `refineRecordFix` does when the id names
+ * nothing.
+ */
+function amendRecord(id: string, change: Partial<FieldRecord>): FieldRecord {
+  const existing = mockRecords.get(id)
+  if (!existing) throw new Error(`Record ${id} does not exist in the fixture.`)
+  const amended: FieldRecord = { ...existing, ...change }
+  mockRecords.set(id, amended)
+  return amended
+}
+
 function recordFrom(fix: Fix): FieldRecord {
   mockCaptureNumber += 1
-  return {
+  const record: FieldRecord = {
     id: `record-${String(mockCaptureNumber)}`,
     activityId: null,
     contextActivityId: null,
@@ -125,6 +155,8 @@ function recordFrom(fix: Fix): FieldRecord {
     deviceId: testDevice.id,
     attributes: {},
   }
+  mockRecords.set(record.id, record)
+  return record
 }
 
 /**
@@ -174,18 +206,35 @@ const LONG_CAP_S = 60
  * With uniform readings `averageReadings` reports `max(σ/√n, σ/3)`, so the
  * whole accuracy series is σ scaled by a fixed factor and the point at which
  * `holdVerdict`'s trailing window falls under `MEANINGFUL_IMPROVEMENT_M`
- * depends only on σ. For any σ from about 1 m up to about 6.7 m — which is
- * every plausible GPS accuracy, and includes the 8 m the diagnostics tests use
- * — that crossing lands at n=10, *exactly* `MIN_SAMPLES`. A test written with
- * such a value would pass identically against a build with no minimum-sample
- * guard at all, because the guard would be holding back a plateau that was not
- * going to be claimed for another sample anyway.
+ * depends only on σ. What matters for a test of the minimum-sample guard is
+ * the gap between two crossings: the *guarded* one, from `MIN_SAMPLES`, and
+ * the *unguarded* one — the same rule run from the earliest window it can
+ * evaluate at all, n=5. Computed over the real `averageReadings`:
  *
- * 0.8 m is chosen to break that coincidence. Verified against the real
+ * ```
+ *  σ        guarded   unguarded
+ *  0.8 m      10          5
+ *  1 m        10          6
+ *  2 m        10          7
+ *  3 m        10          8
+ *  4 m        10          9
+ *  4.4 m      10         10
+ *  6 m        10         10
+ *  8 m        11         11
+ * ```
+ *
+ * **The two coincide from about σ = 4.4 m upward**, and above that the guard
+ * holds nothing back: a test written with such a value passes identically
+ * against a build with no minimum-sample guard at all. That includes the 8 m
+ * the diagnostics tests use — where both crossings are n=11, so the guard is
+ * inert there rather than landing exactly on `MIN_SAMPLES` as an earlier
+ * version of this comment claimed. Everything from about 1 m to 4.4 m does
+ * exercise the guard, by one to five samples.
+ *
+ * 0.8 m is chosen for the widest gap available. Verified against the real
  * `holdVerdict` (see the `it` block that pins it): the guarded crossing is
- * n=10 as always, while the *unguarded* crossing — the loop run from n=2, i.e.
- * `MIN_SAMPLES` set to 2 — is n=5, a full five samples earlier. That gap is
- * what test 6's first phase sits inside.
+ * n=10, while the unguarded one is n=5, a full five samples earlier. That gap
+ * is what test 6's first phase sits inside.
  */
 const FLAT_M = 0.8
 
@@ -207,6 +256,7 @@ beforeEach(() => {
   jest.setSystemTime(START_MS)
 
   mockCaptureNumber = 0
+  mockRecords.clear()
   source = createFakeLocationSource({ permission: 'granted', readings: [] })
 
   mockRepo.createRecord.mockReset()
@@ -214,9 +264,11 @@ beforeEach(() => {
   mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) =>
     Promise.resolve(recordFrom(input.fix)),
   )
+  // Amends the row that is already there, rather than minting a new one with
+  // a fresh capture number — see `mockRecords`.
   mockRepo.refineRecordFix.mockImplementation(
     (_db: unknown, input: { recordId: string; fix: Fix }) =>
-      Promise.resolve({ ...recordFrom(input.fix), id: input.recordId }),
+      Promise.resolve(amendRecord(input.recordId, { fix: input.fix })),
   )
 })
 
@@ -357,6 +409,13 @@ describe('useCapture', () => {
 
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
     expect(result.current.phase).toBe('recorded')
+
+    // The refinement changed the fix and nothing else. The capture number is
+    // the thing that may already be written on a tube, and
+    // `record_capture_number_is_immutable` enforces at the database what this
+    // asserts through the hook.
+    expect(result.current.record?.id).toBe('record-1')
+    expect(result.current.record?.captureNumber).toBe(1)
 
     // A further full cap, to prove no later timer fires a second refinement.
     await advanceCaps(1)

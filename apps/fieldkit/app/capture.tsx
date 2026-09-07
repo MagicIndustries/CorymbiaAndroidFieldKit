@@ -391,14 +391,16 @@ function CaptureBody() {
     )
 
   /**
-   * The capture block: the traffic-light frame, and nothing beside it.
+   * The capture block.
    *
-   * The wrapper exists to carry the reach anchoring above — and, because
-   * `TrafficLightFrame` takes no `testID`, to give the frame a queryable handle
-   * so a test can assert that the countdown readouts are *inside* it rather
-   * than merely somewhere on the screen. Keep it a single-child container: the
-   * moment something is placed beside the frame in here, that handle stops
-   * meaning what §9.1.2 requires it to mean.
+   * The wrapper exists to carry the reach anchoring resolved above; that is
+   * the whole of its job. It carried a second one — being the handle a test
+   * scoped its §9.1.2 containment assertions to — and with it an instruction
+   * to keep this a single-child container. Both are gone: those assertions
+   * now scope to `traffic-light-border`'s own parent, which is the frame's
+   * actual rendering rather than a container named after it, and is immune to
+   * whatever is later placed beside it. `capture-frame` stays only as an
+   * inspection handle, and nothing depends on what sits inside it.
    */
   const block = (
     <View testID="capture-frame" style={blockStyle}>
@@ -588,8 +590,12 @@ function CaptureBody() {
           Doctrine rule 7: a tappable help affordance per screen, never a hover
           — there is no hover in a paddock. It lives in the ready state and only
           there. `acquiring` is exempt by rule 17, which requires that nothing
-          else is on screen while she stands still, and `recorded` asks nothing
-          of her that needs explaining; both exemptions are written down in
+          else is on screen while she stands still. `recorded` does ask one
+          thing of her — a name — but asks it with a labelled text box whose
+          placeholder says what to type, so there is nothing a `?` beside it
+          would explain; the moment that state asks for something whose meaning
+          is not on its face, filing to an activity or attaching media, it
+          takes a help affordance with it. Both exemptions are written down in
           `docs/ui-doctrine.md` so their absence reads as a decision rather than
           as an oversight.
         */}
@@ -809,9 +815,19 @@ function RecordedState({
                 CLOSE TO THE LAST POINT
               </Type>
               <Type>{`This point is ${duplicate.metresApart.toFixed(1)} m from the one before it.`}</Type>
+              {/*
+                No promise of deletion. `softDeleteRecord` exists in
+                `@corymbia/data` and has no caller anywhere under `apps/`, so
+                "you can delete this one later" offered a capability the
+                application does not have — the worst kind of reassurance to
+                give someone who has just double-tapped over a survey point.
+                What she can actually do is name them apart, which the tiles
+                below this warning offer, so that is what it says.
+              */}
               <Type variant="small" dim>
-                Both are saved. If that was a double tap, you can delete this one later. If you
-                meant two samples this close together, carry on — nothing has been refused.
+                Both are saved. If that was a double tap, naming them apart will tell them apart
+                later. If you meant two samples this close together, carry on — nothing has been
+                refused.
               </Type>
               <Button
                 testID="capture-duplicate-dismiss"
@@ -867,6 +883,20 @@ function RecordedSummary({ record }: { record: FieldRecord }) {
       </Type>
       <Type variant="small" dim>
         This position is final. Nothing after this will change it.
+      </Type>
+      {/*
+        WHERE IT WENT. `useCapture` files every capture to the Inbox — it is
+        handed a database, a device and a source and has no activity to file
+        to — and that is a supported destination rather than an error state
+        (§10.2): capturing without context is a legitimate way to work, and
+        the Inbox is somewhere she works with and files from later.
+        Somewhere is not nowhere, though, and a recorded state that named no
+        destination at all left her to guess. This is also the line Plan 5
+        grows when activities exist: the name §9.6 asks for goes here, in
+        place of "the Inbox".
+      */}
+      <Type variant="small" dim testID="capture-recorded-destination">
+        Saved to the Inbox. You can file it from there later.
       </Type>
 
       {/*
