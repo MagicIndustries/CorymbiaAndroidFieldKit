@@ -421,7 +421,13 @@ describe('the capture control', () => {
     // minimum-sample guard, so this test has to switch it off first. That
     // setting is kept — and proved here — because a fixed full-length wait is
     // still the thing a self-finishing one has to be measured against.
-    await arriveWithAFix(6)
+    //
+    // 1.5 m, not an arbitrary flat value: readings this sharp cross
+    // `holdVerdict`'s window threshold at n=6 if nothing stops it (proved in
+    // `packages/geo/src/__tests__/trend.test.ts`), which is exactly what lets
+    // the assertion at n=6 below tell a working minimum-sample guard from a
+    // broken one, rather than passing either way.
+    await arriveWithAFix(1.5)
 
     await fireEvent.press(screen.getByTestId('auto-finish-toggle'))
     await settle()
@@ -430,12 +436,25 @@ describe('the capture control', () => {
     await fireEvent.press(captureButton())
     await settle()
 
+    // Well under the ten-sample minimum `holdVerdict` requires before it will
+    // declare a plateau at all: the tap's own reading plus these five is six.
+    // The guard must still call this 'improving' here — if it did not, the
+    // screen would already be offering the override this early, which is the
+    // exact defect the guard exists to prevent (see `MIN_SAMPLES` in
+    // `packages/geo/src/trend.ts`). This is the composition the unit tests on
+    // `holdVerdict` alone cannot see: it is this screen's job to still be
+    // asking, not telling, at n=6.
+    await emitReadings([1.5, 1.5, 1.5, 1.5, 1.5])
+    expect(screen.queryByText('ACCEPT NOW — NOT IMPROVING')).toBeNull()
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — REFINING')
+    expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
+
     // Ten samples — the tap's own reading plus nine — with no improvement
     // across them is what `holdVerdict` calls `plateaued`. Nine would not be:
     // the rule cannot claim a plateau before ten samples have accumulated,
     // because the hardware measurements say the fix is still improving below
     // that.
-    await emitReadings([6, 6, 6, 6, 6, 6, 6, 6, 6])
+    await emitReadings([1.5, 1.5, 1.5, 1.5])
 
     // The screen says so — in words, and by making the override prominent.
     expect(screen.getByText('ACCEPT NOW — NOT IMPROVING')).toBeTruthy()
@@ -451,7 +470,12 @@ describe('the capture control', () => {
   })
 
   it('ends the countdown on a plateau by default, refining exactly once', async () => {
-    await arriveWithAFix(6)
+    // 1.5 m for the same reason as the test above: it is sharp enough that,
+    // without the minimum-sample guard composed into this screen's
+    // auto-finish path, `holdVerdict` would call it plateaued at n=6 — five
+    // seconds and a genuinely still-converging fix short of where the guard
+    // requires it to wait.
+    await arriveWithAFix(1.5)
 
     // On by default. Nothing is pressed to arrange this — that is the point of
     // the assertion.
@@ -459,7 +483,18 @@ describe('the capture control', () => {
 
     await fireEvent.press(captureButton())
     await settle()
-    await emitReadings([6, 6, 6, 6, 6, 6, 6, 6, 6])
+
+    // Well under the ten-sample minimum: the tap's own reading plus these
+    // five is six. If the minimum-sample guard were not composed into this
+    // screen's auto-finish path, a plateau declared this early would end the
+    // countdown and refine the record now — five seconds in, on a fix that
+    // (per the same measurement) still had somewhere to go.
+    await emitReadings([1.5, 1.5, 1.5, 1.5, 1.5])
+    await settle()
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — REFINING')
+    expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
+
+    await emitReadings([1.5, 1.5, 1.5, 1.5])
     await settle()
 
     // Finished by itself, inside the 15 s countdown, and exactly once.
