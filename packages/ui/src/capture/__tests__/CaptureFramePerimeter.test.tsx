@@ -1,6 +1,7 @@
 import React from 'react'
 import { act, render, screen } from '@testing-library/react-native'
-import { darkTheme } from '@corymbia/tokens'
+import { processColor } from 'react-native'
+import { darkTheme, field } from '@corymbia/tokens'
 import { CaptureFramePerimeter, perimeterGeometry } from '../CaptureFramePerimeter'
 
 // `colour` takes a resolved colour value, same as the border it must always
@@ -9,17 +10,19 @@ import { CaptureFramePerimeter, perimeterGeometry } from '../CaptureFramePerimet
 // prop exists to honour applies to the tests exercising it too.
 const COLOUR = darkTheme.colors.statusGood
 
-// A 300x200 measured box, inset by field.frame (5) so the traced rectangle
-// is 295x195, with a corner radius capped at radii.xl (16) — well under half
-// of either side, so all four corners use the full 16.
+// A 300x200 measured box, inset by field.frame/2 (2.5) on every side so the
+// traced rectangle is 295x195. The corner radius is drawn on the
+// centreline, not the border's outer radius: radii.xl (16) minus the 2.5
+// inset, sharing the same arc centre as the border it must overlay.
 //
-// Hand calculation: perimeter = straight runs + one full circle of corner
-// arcs = 2*(295-32) + 2*(195-32) + 2*pi*16
-//                    = 2*263 + 2*163 + 32*pi
-//                    = 526 + 326 + 100.530964...
-//                    = 952.530964...
+// Hand calculation: r = 16 - 2.5 = 13.5
+// perimeter = straight runs + one full circle of corner arcs
+//           = 2*(295-27) + 2*(195-27) + 2*pi*13.5
+//           = 2*268 + 2*168 + 27*pi
+//           = 536 + 336 + 84.823001...
+//           = 956.823001...
 const SIZE = { width: 300, height: 200 }
-const HAND_CALCULATED_PERIMETER = 2 * (295 - 32) + 2 * (195 - 32) + 2 * Math.PI * 16
+const HAND_CALCULATED_PERIMETER = 2 * (295 - 27) + 2 * (195 - 27) + 2 * Math.PI * 13.5
 
 describe('perimeterGeometry', () => {
   it('matches a hand calculation of the rounded-rectangle perimeter', () => {
@@ -72,5 +75,35 @@ describe('CaptureFramePerimeter', () => {
     expect(track.props.y).toBeCloseTo(2.5, 6)
     expect(track.props.width).toBeCloseTo(295, 6)
     expect(track.props.height).toBeCloseTo(195, 6)
+  })
+
+  // The geometry can be perfectly correct while never reaching the stroke at
+  // all — a wiring slip, distinct from an arithmetic one. `progress=0.25` is
+  // used deliberately: it is the one value already known (see
+  // `extractStroke.ts` in `react-native-svg`) to round-trip a non-zero
+  // `strokeDashoffset` through the library's native host-prop extraction
+  // intact, so this is the one place these four props can be asserted on
+  // the rendered element rather than only on the pure function.
+  it('wires the geometry onto the rendered stroke: colour, width, dasharray and offset all present', async () => {
+    await render(<CaptureFramePerimeter progress={0.25} colour={COLOUR} />)
+    const box = screen.getByTestId('perimeter')
+    await act(async () => {
+      box.props.onLayout({ nativeEvent: { layout: { width: 300, height: 200 } } })
+    })
+
+    const track = screen.getByTestId('perimeter-track')
+    const { perimeter, strokeDashoffset } = perimeterGeometry(SIZE, 0.25)
+
+    // `stroke` is lowered to react-native-svg's brush shape, not the raw
+    // colour string — `processColor` is the same lowering the library
+    // itself applies, so this compares like with like.
+    expect(track.props.stroke).toEqual({ type: 0, payload: processColor(COLOUR) })
+    expect(track.props.strokeWidth).toBe(field.frame)
+    // A scalar `strokeDasharray` is lowered to a two-element array (an odd-
+    // length dash list is duplicated onto itself so it still alternates).
+    expect(track.props.strokeDasharray).toHaveLength(2)
+    expect(track.props.strokeDasharray[0]).toBeCloseTo(perimeter, 6)
+    expect(track.props.strokeDasharray[1]).toBeCloseTo(perimeter, 6)
+    expect(track.props.strokeDashoffset).toBeCloseTo(strokeDashoffset, 6)
   })
 })

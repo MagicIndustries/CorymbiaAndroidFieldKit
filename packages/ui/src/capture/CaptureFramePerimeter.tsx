@@ -27,9 +27,22 @@ export function perimeterGeometry(size: PerimeterSize, progress: number) {
   const inset = field.frame / 2
   const width = Math.max(0, size.width - field.frame)
   const height = Math.max(0, size.height - field.frame)
+  // `radii.xl` is the border's *outer* corner radius (it is what the
+  // Animated.View border layer in TrafficLightFrame is rounded to). This
+  // Rect is traced on the centreline of that border — inset by `inset` on
+  // every side — and insetting a rounded rectangle uniformly by δ on every
+  // side moves each corner's arc centre inward by δ on both axes, so the
+  // radius that shares that same arc centre (the centreline radius) is
+  // `radii.xl - inset`, not `radii.xl` unreduced. Using the outer radius
+  // here would shift the arc centre by (inset, inset) and oversize the
+  // curve, so the stroke and the border's own curve would diverge at every
+  // corner. Clamped at 0 so a box too small for the reduced radius never
+  // goes negative, and against half of each side as before.
+  const r = Math.max(0, Math.min(radii.xl - inset, width / 2, height / 2))
   // Perimeter of a rounded rectangle: the straight runs plus one full circle
-  // made of the four corner arcs.
-  const r = Math.min(radii.xl, width / 2, height / 2)
+  // made of the four corner arcs — computed from `r`, the radius actually
+  // drawn, so the dash length and the path agree and the ring reaches empty
+  // exactly at zero.
   const perimeter = 2 * (width - 2 * r) + 2 * (height - 2 * r) + 2 * Math.PI * r
   const remaining = Math.min(1, Math.max(0, progress))
 

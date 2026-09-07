@@ -93,10 +93,24 @@ describe('TrafficLightFrame countdown perimeter', () => {
     expect(screen.queryByTestId('perimeter')).toBeNull()
   })
 
-  it('renders no perimeter when only one of the two props is given', async () => {
+  it('renders no perimeter when only secondsRemaining is given', async () => {
     await render(
       <ThemeProvider>
         <TrafficLightFrame grade="good" secondsRemaining={5}>
+          <Text>contents</Text>
+        </TrafficLightFrame>
+      </ThemeProvider>,
+    )
+    expect(screen.queryByTestId('perimeter')).toBeNull()
+  })
+
+  // The mirror of the case above: a guard mutated to drop the
+  // `secondsRemaining` check (e.g. checking only `secondsTotal`) would still
+  // pass that test, since it never supplies `secondsTotal` alone.
+  it('renders no perimeter when only secondsTotal is given', async () => {
+    await render(
+      <ThemeProvider>
+        <TrafficLightFrame grade="good" secondsTotal={10}>
           <Text>contents</Text>
         </TrafficLightFrame>
       </ThemeProvider>,
