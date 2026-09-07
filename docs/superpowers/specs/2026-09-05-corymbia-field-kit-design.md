@@ -551,8 +551,18 @@ It is not forgotten and it is not deferred: it is replaced. There is now **one c
    control: during a countdown the button reads `ACCEPT NOW`. So exactly one action is ever
    live, and the override is reachable at every moment the countdown is running.
 5. **A plateau ends the countdown, and the override is live throughout.** When the fix has
-   stopped improving, the screen says so, makes the override prominent, and finishes the
-   wait. This reverses an earlier position — "nothing auto-completes on a trend" — which was
+   stopped improving, the wait finishes and the recorded state says that is why it ended.
+
+   **It does not announce the plateau first.** An earlier draft of this clause said the
+   screen "says so, makes the override prominent, and finishes the wait" — all three, in that
+   order. The first two are a leftover from the version of this design in which a plateau
+   only ever *suggested*, and they cannot survive alongside auto-finish: the render that
+   first shows `plateaued` is the same one that ends the countdown, so on a device the
+   prompt would exist for about a frame. Telling her a fix has settled and then removing the
+   screen before she can read it is worse than not telling her, and inviting her to accept a
+   wait that has already ended is an invitation to press nothing. The fact still reaches her,
+   in the place she can actually act on it: the recorded state names how the capture ended.
+   This reverses an earlier position — "nothing auto-completes on a trend" — which was
    held because `holdVerdict` was not yet trustworthy: it judged each reading's own accuracy
    estimate, which jitters half a metre between consecutive samples, and had no minimum
    sample count, so on the measured Samsung S25 run it declared `plateaued` at the second
