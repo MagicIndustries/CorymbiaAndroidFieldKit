@@ -1185,10 +1185,11 @@ describe('filing, reordering and refiling', () => {
   const failingOn = (
     base: Database,
     doomed: (sql: string, params: SqlValue[]) => boolean,
+    message = 'the tablet died mid-refile',
   ): Database => ({
     ...base,
     async execute(sql, params = []) {
-      if (doomed(sql, params)) throw new Error('the tablet died mid-refile')
+      if (doomed(sql, params)) throw new Error(message)
       await base.execute(sql, params)
     },
   })
@@ -1442,6 +1443,31 @@ describe('filing, reordering and refiling', () => {
       expect(row?.fix_sample_count).toBeNull()
       expect(row?.fix_spread_m).toBeNull()
       expect(row?.fix_hold_ms).toBeNull()
+    })
+
+    it('rolls back the fix update when the event insert fails, leaving neither written', async () => {
+      // The property the doc comment leans on: "a record whose columns say
+      // ±3 m with no event saying how it got there" must not be reachable. If
+      // the record UPDATE landed and the event INSERT then failed, that is
+      // exactly the state it would produce — a refined fix on disk with no
+      // audit trail explaining how it got there.
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const doomed = failingOn(
+        db,
+        (sql) => /INSERT INTO event/.test(sql),
+        'the tablet died mid-refinement',
+      )
+      await expect(
+        refineRecordFix(doomed, { recordId: record.id, fix: DELIBERATE, deviceId }),
+      ).rejects.toThrow(/died mid-refinement/)
+
+      // The record still reads exactly as the tap wrote it — the UPDATE was
+      // rolled back along with the failed INSERT, not left standing alone.
+      expect((await getRecord(db, record.id))?.fix).toEqual(INSTANT)
+      // And no 'edited' event exists: the failed refinement left no trace,
+      // rather than a half-written one.
+      expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created'])
     })
 
     it('refuses a record that does not exist', async () => {
