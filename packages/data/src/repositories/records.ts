@@ -1,4 +1,4 @@
-import type { Database } from '../db/port'
+import type { Database, SqlValue } from '../db/port'
 import { newId } from '../ids'
 import { serialiseAttributes, type RecordKind } from '../kinds'
 import { nowIso } from '../time'
@@ -93,9 +93,10 @@ export type AltitudeEvidence =
 /**
  * The averaging evidence a deliberate fix carries — migration 003's
  * `record_spread_matches_sample_count`. Spread is the disagreement between
- * readings, so it exists exactly when there was more than one reading: SAVE NOW
- * takes a single reading and has no spread to report; SHARPEN takes several and
- * must report theirs. Modelled as its own union so a one-reading capture cannot
+ * readings, so it exists exactly when there was more than one reading: the
+ * initial tap saves a single reading and has no spread to report; a countdown
+ * that runs afterward accumulates several and must report theirs. Modelled as
+ * its own union so a one-reading capture cannot
  * be forced to fabricate a spread of 0 (asserting agreement between readings
  * that were never compared), and a many-reading capture cannot omit one.
  *
@@ -386,6 +387,73 @@ const SELECT = `SELECT id, activity_id, context_activity_id, kind, capture_numbe
                 FROM record WHERE deleted_at IS NULL`
 
 /**
+ * Every column that carries the fix, named once, because two statements now
+ * write them: `createRecord` at capture, and `refineRecordFix` when a countdown
+ * over the same spot produces a sharper answer.
+ *
+ * One list rather than two, because the failure mode of two is silent. A column
+ * added to the insert and forgotten in the update would leave a refined record
+ * wearing half of its old position and half of its new one — a row every CHECK
+ * constraint in migration 003 accepts, because each half is individually legal,
+ * and which nothing downstream could tell from a real measurement.
+ */
+const FIX_COLUMNS = [
+  'latitude',
+  'longitude',
+  'accuracy_m',
+  'altitude_m',
+  'datum',
+  'fix_quality',
+  'fix_age_seconds',
+  'fix_sample_count',
+  'fix_spread_m',
+  'fix_hold_ms',
+  'vertical_accuracy_m',
+  'is_mocked',
+  'location_provider',
+  'accuracy_convention',
+  'altitude_reference',
+  'gps_time',
+] as const
+
+/**
+ * The values for `FIX_COLUMNS`, in that order.
+ *
+ * The class discriminant does all the work: an ambient fix has an age and no
+ * averaging evidence, a deliberate fix the reverse, and `'none'` carries none of
+ * either and no position at all — which is what
+ * `record_ambient_carries_age`, `record_deliberate_is_survey_grade` and
+ * `record_none_has_no_position` each independently insist on.
+ */
+function fixColumnValues(fix: Fix): SqlValue[] {
+  const positioned = fix.quality !== 'none' ? fix : null
+  return [
+    positioned?.latitude ?? null,
+    positioned?.longitude ?? null,
+    positioned?.accuracyM ?? null,
+    positioned?.altitudeM ?? null,
+    positioned?.datum ?? null,
+    fix.quality,
+    fix.quality === 'ambient' ? fix.ageSeconds : null,
+    fix.quality === 'deliberate' ? fix.sampleCount : null,
+    fix.quality === 'deliberate' ? fix.spreadM : null,
+    fix.quality === 'deliberate' ? fix.holdMs : null,
+    positioned?.verticalAccuracyM ?? null,
+    // NOT `positioned?.isMocked ? 1 : 0` — when positioned is null that
+    // expression evaluates `undefined ? 1 : 0`, which is 0, not null, and
+    // trips record_none_has_no_position (is_mocked IS NULL required).
+    positioned ? (positioned.isMocked ? 1 : 0) : null,
+    positioned?.provider ?? null,
+    positioned?.accuracyConvention ?? null,
+    positioned?.altitudeReference ?? null,
+    // GPS time is provenance of the fix, so it arrives with the fix. A
+    // positionless record has no satellite clock reading, which is what
+    // record_none_has_no_position insists on.
+    positioned?.gpsTime ?? null,
+  ]
+}
+
+/**
  * The next tube label: one more than the highest ever issued, across the whole
  * database (spec §7.2).
  *
@@ -449,13 +517,33 @@ export async function createRecord(
     /** Which activity was running when the capture happened; captured automatically upstream. */
     contextActivityId?: string | null
     attributes?: unknown
+    /**
+     * Why this capture looks the way it does, written into the `'created'`
+     * event rather than onto the record.
+     *
+     * The case this exists for is a `'none'` fix. `record_none_has_no_position`
+     * forces latitude, longitude, accuracy and GPS time all to NULL, so the row
+     * itself can only ever say *that* there is no position, never *why* — and
+     * "she tapped before the receiver had a lock" and "this platform never
+     * reports whether a position is mocked, so no position could be asserted"
+     * are entirely different facts about the same NULLs. One is a moment in a
+     * survey; the other is a property of the hardware that applies to every
+     * capture on that device.
+     *
+     * It goes in the event log rather than in `description` because the event
+     * log is append-only chain of custody (spec §8.5): `description` is the
+     * observer's own free text about the observation, is editable, and leaves
+     * the app in exports, so an instrument's explanation of a NULL written
+     * there would be indistinguishable from something she typed and would
+     * survive only until she typed over it.
+     */
+    detail?: string
   },
 ): Promise<FieldRecord> {
   const attributes = serialiseAttributes(input.kind, input.attributes ?? {})
   const id = newId('rec')
   const at = nowIso()
   const fix = input.fix
-  const positioned = fix.quality !== 'none' ? fix : null
   const contextActivityId = input.contextActivityId ?? null
 
   await db.transaction(async () => {
@@ -469,12 +557,11 @@ export async function createRecord(
       `INSERT INTO record (id, activity_id, context_activity_id, kind,
                            capture_number, sequence, title,
                            short_label, description,
-                           latitude, longitude, accuracy_m, altitude_m, datum,
-                           fix_quality, fix_age_seconds, fix_sample_count, fix_spread_m, fix_hold_ms,
-                           vertical_accuracy_m, is_mocked, location_provider,
-                           accuracy_convention, altitude_reference,
-                           captured_at, gps_time, device_id, attributes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                           ${FIX_COLUMNS.join(', ')},
+                           captured_at, device_id, attributes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?,
+               ${FIX_COLUMNS.map(() => '?').join(', ')},
+               ?, ?, ?, ?, ?)`,
       [
         id,
         input.activityId,
@@ -484,29 +571,8 @@ export async function createRecord(
         sequence,
         input.title ?? null,
         input.description ?? null,
-        positioned?.latitude ?? null,
-        positioned?.longitude ?? null,
-        positioned?.accuracyM ?? null,
-        positioned?.altitudeM ?? null,
-        positioned?.datum ?? null,
-        fix.quality,
-        fix.quality === 'ambient' ? fix.ageSeconds : null,
-        fix.quality === 'deliberate' ? fix.sampleCount : null,
-        fix.quality === 'deliberate' ? fix.spreadM : null,
-        fix.quality === 'deliberate' ? fix.holdMs : null,
-        positioned?.verticalAccuracyM ?? null,
-        // NOT `positioned?.isMocked ? 1 : 0` — when positioned is null that
-        // expression evaluates `undefined ? 1 : 0`, which is 0, not null, and
-        // trips record_none_has_no_position (is_mocked IS NULL required).
-        positioned ? (positioned.isMocked ? 1 : 0) : null,
-        positioned?.provider ?? null,
-        positioned?.accuracyConvention ?? null,
-        positioned?.altitudeReference ?? null,
+        ...fixColumnValues(fix),
         at,
-        // GPS time is provenance of the fix, so it arrives with the fix. A
-        // positionless record has no satellite clock reading, which is what
-        // record_none_has_no_position insists on.
-        positioned?.gpsTime ?? null,
         input.deviceId,
         attributes,
         at,
@@ -522,6 +588,7 @@ export async function createRecord(
       // necessarily where the record ends up filed — the Inbox's whole point is
       // that these two can differ.
       activityId: contextActivityId ?? input.activityId,
+      detail: input.detail,
     })
   })
 
@@ -985,6 +1052,152 @@ export async function refileRecord(
 
   const record = await getRecord(db, input.recordId)
   if (!record) throw new Error(`Record ${input.recordId} vanished immediately after being refiled.`)
+  return record
+}
+
+/**
+ * An accuracy as it reads in a refinement's audit line: a figure to one decimal,
+ * or the plain statement that there was no position to be accurate about.
+ *
+ * Prose for a person reading a record's history, not a number anything computes
+ * from — the exact figures are in the record's own columns and in the event's
+ * `accuracy_m`. Rounding here keeps the sentence readable without pretending to
+ * a precision GNSS does not have.
+ */
+function describeAccuracy(accuracyM: number | null): string {
+  return accuracyM === null ? 'no position' : `±${accuracyM.toFixed(1)} m`
+}
+
+/**
+ * Replaces a record's fix with a better measurement of the same capture.
+ *
+ * This is the second half of the capture interaction (spec §9.1). One tap saves
+ * whatever fix exists at that instant — a real row on disk, which survives the
+ * app being killed, the battery going, or her simply walking away — and the
+ * screen then counts down while she stands still. When the countdown completes,
+ * or she accepts what has accumulated, the averaged fix lands here and refines
+ * the row that is already there. Nothing waits in memory to be saved, because a
+ * capture that exists only in memory is a capture that can be lost by walking
+ * away from it.
+ *
+ * ## Why the event is `'edited'`
+ *
+ * `'edited'` is the existing action for a change to a record that already
+ * exists, and `moveRecord` already uses it for exactly that. `'created'` would
+ * be a lie — the record was created at the tap, and the log says so one row
+ * above. A new `'refined'` action would mean a migration to widen
+ * `event_action_known`, and a whole new verb in the audit vocabulary, for a
+ * distinction the detail line already draws.
+ *
+ * ## Why the detail carries both accuracies
+ *
+ * The event's own position columns hold one position, and they hold the new
+ * one. With only that, the history would show a fix that was always ±3 m. What
+ * actually happened is that a ±6 m fix was stood over for twenty seconds and
+ * refined to ±3 m — and which of those two happened is precisely the question
+ * an audit of a biodiversity record asks. So the previous accuracy goes into
+ * `detail`, where it is the only place it survives.
+ *
+ * ## The detail prefix is a contract, not prose
+ *
+ * The detail is written as `fix refined from <before> to <after>`, and the
+ * leading `fix refined from ` is the only thing that distinguishes a refinement
+ * from a manual edit in the event log: both are `'edited'` events on the same
+ * record, carrying the same columns, and `moveRecord` writes `'edited'` too.
+ * Any reader that has to tell "the countdown sharpened this" from "someone
+ * retyped the coordinates" — an export, a detail view, an audit — has that
+ * prefix and nothing else to go on.
+ *
+ * So the wording of that prefix is API. It may gain text after it; it must not
+ * be reworded, re-cased or have anything inserted before it without changing
+ * every reader that matches on it. `records.test.ts` asserts the exact string
+ * for that reason, so a rewrite here fails there rather than silently making
+ * every past refinement indistinguishable from a hand edit.
+ *
+ * ## What it does not touch
+ *
+ * `captured_at` and `capture_number`. The capture happened at the tap, not at
+ * the end of the countdown, and the tube label was written then; a refinement
+ * that renumbered the tube would be worse than no refinement at all.
+ * `record_capture_number_is_immutable` enforces the second of those at the
+ * database, and this function additionally never names either column.
+ *
+ * ## What it refuses
+ *
+ * A record that does not exist, and a soft-deleted one — a refinement improves
+ * a capture she is still standing over, and a tombstone is not that. Also a
+ * `'none'` fix: every other quality replaces a measurement with a measurement,
+ * while `'none'` is the absence of one, and writing it through a function whose
+ * name promises an improvement would blank a stored position. A record that
+ * should have no position is one that was captured without one.
+ *
+ * Refining *from* `'none'` is allowed and is a real field case: she taps before
+ * the receiver has a lock, gets a row with no position, and the countdown that
+ * follows gives it one.
+ *
+ * The update and the event are one transaction, for the same reason every other
+ * write in this file is: a record whose columns say ±3 m with no event saying
+ * how it got there is a record whose provenance quietly stopped being true.
+ */
+export async function refineRecordFix(
+  db: Database,
+  input: { recordId: string; fix: Fix; deviceId: string },
+): Promise<FieldRecord> {
+  // Checked before the transaction opens: it is a fact about the argument, not
+  // about the database, so there is nothing to read first and nothing to roll
+  // back after.
+  if (input.fix.quality === 'none') {
+    throw new Error(
+      `Record ${input.recordId} cannot be refined to no position at all. A refinement replaces ` +
+        'a measurement with a better one; ‘none’ is the absence of a measurement, and storing ' +
+        'it here would erase a position under the name of improving it. A record that should ' +
+        'have no position is one that was captured without one.',
+    )
+  }
+  const fix = input.fix
+
+  await db.transaction(async () => {
+    const existing = await db.first<{
+      deleted_at: string | null
+      accuracy_m: number | null
+      activity_id: string | null
+    }>('SELECT deleted_at, accuracy_m, activity_id FROM record WHERE id = ?', [input.recordId])
+    if (!existing) {
+      throw new Error(`Record ${input.recordId} does not exist, so there is no fix to refine.`)
+    }
+    if (existing.deleted_at !== null) {
+      throw new Error(
+        `Record ${input.recordId} has been deleted, so its fix cannot be refined. A refinement ` +
+          'sharpens a capture she is still standing over; a tombstone is not that, and moving ' +
+          'the position of a deleted record would rewrite history rather than record it.',
+      )
+    }
+
+    const at = nowIso()
+    await db.execute(
+      `UPDATE record SET ${FIX_COLUMNS.map((column) => `${column} = ?`).join(', ')},
+                         updated_at = ?
+       WHERE id = ?`,
+      [...fixColumnValues(fix), at, input.recordId],
+    )
+    await appendEvent(db, {
+      recordId: input.recordId,
+      action: 'edited',
+      deviceId: input.deviceId,
+      fix,
+      // The activity the record is in now. `createRecord` stamps its event with
+      // the context activity because at capture the two can differ; by the time
+      // a refinement happens the record is wherever it is, and that is the
+      // activity this change happened inside.
+      activityId: existing.activity_id,
+      detail:
+        `fix refined from ${describeAccuracy(existing.accuracy_m)} ` +
+        `to ${describeAccuracy(fix.accuracyM)}`,
+    })
+  })
+
+  const record = await getRecord(db, input.recordId)
+  if (!record) throw new Error(`Record ${input.recordId} vanished immediately after being refined.`)
   return record
 }
 

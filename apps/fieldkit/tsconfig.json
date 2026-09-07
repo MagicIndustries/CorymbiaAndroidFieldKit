@@ -1,4 +1,13 @@
 {
   "extends": ["expo/tsconfig.base", "../../tsconfig.base.json"],
+  "compilerOptions": {
+    // `types` has to be stated because this workspace now has tests. Automatic
+    // @types acquisition walks node_modules/@types upwards from this file, and
+    // under pnpm `@types/jest` is a root devDependency that this workspace does
+    // not link, so `describe`/`it`/`expect` resolve nowhere and every test file
+    // fails to typecheck. Naming it explicitly is what packages/ui and
+    // packages/data already do.
+    "types": ["jest"]
+  },
   "include": ["app", "src"]
 }

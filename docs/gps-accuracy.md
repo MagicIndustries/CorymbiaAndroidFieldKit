@@ -1,8 +1,9 @@
 # How the field kit works out its GPS accuracy
 
 This document explains the number the app puts next to a sample position — the
-"± 4 m" figure — where it comes from, how holding the SHARPEN control changes
-it, and why it is calculated the cautious way rather than the flattering way.
+"± 4 m" figure — where it comes from, how the countdown that follows a capture
+changes it, and why it is calculated the cautious way rather than the
+flattering way.
 
 It is written for the person using the app in the field, not for a
 statistician. The formulas are here because they have to be somewhere, but each
@@ -52,11 +53,12 @@ That second point is the reason for the floor described in section 5.
 
 ---
 
-## 2. What a hold collects
+## 2. What the countdown collects
 
-When you press and hold SHARPEN on the capture screen, the app does not throw
-away the readings it already had and take a fresh one. It **keeps every reading
-the receiver produces while you hold**, each one a complete little record:
+One tap on the capture control saves a real record immediately, and the
+countdown that follows does not throw away the readings already taken and
+start over. It **keeps every reading the receiver produces while the countdown
+runs**, each one a complete little record:
 
 - latitude and longitude,
 - the receiver's accuracy estimate for that reading, in metres,
@@ -64,7 +66,7 @@ the receiver produces while you hold**, each one a complete little record:
 - a timestamp,
 - a flag saying whether the reading came from a mock location provider.
 
-A typical hold looks like a receiver settling down as it acquires more
+A typical countdown looks like a receiver settling down as it acquires more
 satellites and refines its solution. Something like:
 
 | # | accuracy |
@@ -112,7 +114,7 @@ longitude = Σ(w × longitude) / Σw
 In words: **add up every reading's coordinate after multiplying it by that
 reading's weight, then divide by the total weight.** The fix lands near the
 readings the receiver was confident about, and the poor early readings barely
-move it. That is the entire point of holding the control — before this change,
+move it. That is the entire point of the countdown — before this change,
 the app took a plain average, so a 40 m reading taken in the first second
 dragged the final position exactly as hard as the 4 m reading taken in the
 last.
@@ -288,6 +290,55 @@ figure permanently onto the record. The floor at a third of the best reading is
 a blunt instrument, but it is on the right side: it lets averaging deliver the
 real improvement it can (up to a factor of three) and then stops it claiming
 what the hardware never earned.
+
+### In practice the floor binds after about ten seconds
+
+This is not a rare edge case reserved for very long holds. It is what normally
+happens, and it is the reason the countdown is short.
+
+Measured on a Samsung S25 outdoors, readings arriving once a second: the
+combined figure fell below a third of the best single reading at the
+**thirteenth** reading and stayed there. From that moment the reported accuracy
+was **exactly** the best single reading divided by three, and every further
+reading was inert — it added weight to a total that was no longer being used.
+Only a *better individual reading* moved the number after that.
+
+This is one device, one site, one session under clear sky — a starting point
+for this hardware, not an established property of Android GPS. With that
+caveat carried through everything below:
+
+- **Accuracy is flat from about ten seconds.** Stored captures from that
+  session: ±1.6 m at 5 readings, ±1.5 m at 7, then ±1.0–1.4 m from 12 readings
+  through 61 — specifically ±1.2 m at 12, ±1.3 m at 16, ±1.0 to ±1.4 m at 21
+  across several runs, and ±1.1 m at 61. Sixty seconds was **no better** than
+  twenty: ±1.1 m sits inside the ±1.0–1.4 m the twenty-second runs themselves
+  span. It was not worse — an earlier version of this document overstated
+  that, and the sixty-second figure does not support it.
+- **Run-to-run variance at a fixed duration exceeds the difference between
+  durations, and that is the stronger and better-supported finding.** The
+  stored twenty-second runs alone span spreads of ±0.3 m, ±0.6 m, ±1.0 m,
+  ±2.2 m and ±2.6 m, and the one stored sixty-second run's ±1.3 m spread sits
+  inside that range — so "longer waits degrade spread" is not something two
+  runs can establish, and this data does not support it either; an earlier
+  version of this document made that claim and it is withdrawn. What the same
+  records *do* support: two twenty-second captures in the same session
+  produced accuracies of ±1.0 m and ±2.8 m — a wider gap than any measured
+  difference between twenty seconds and sixty. Conditions and satellite
+  geometry at the moment of capture dominate the result, and waiting longer
+  cannot rescue a fix that started out bad — which is a better argument for a
+  short wait than any claim about spread ever was.
+- **The mechanism, described above, is the floor binding.** From the reading
+  it binds at, every further sample is inert, and only a better individual
+  reading — never more of them — moves the number.
+
+So a longer hold is not obviously a safer hold on this hardware: once the
+floor binds, more time does not reliably buy a better fix, and the run-to-run
+spread at a single duration is large enough to swamp whatever a longer wait
+might otherwise offer. That measurement is what sets the capture screen's
+fifteen-second countdown **cap** — a safety net for a run whose fix never
+settles, not an expected duration — and what lets the countdown end itself,
+which is the normal way it ends, the moment the fix stops improving; see
+`packages/geo/src/trend.ts`.
 
 ---
 

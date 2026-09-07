@@ -8,9 +8,10 @@ import type { Reading } from './classify'
  *
  * The weight is inverse variance: `1 / accuracyM²`. A reading Android calls
  * good to 2 m carries 25 times the weight of one it calls good to 10 m, which
- * is the whole reason holding the SHARPEN control is worth doing — the fix
- * settles toward the readings the receiver was most confident about, instead
- * of being dragged around by the poor ones it took while acquiring satellites.
+ * is the whole reason the countdown after a capture is worth waiting through —
+ * the fix settles toward the readings the receiver was most confident about,
+ * instead of being dragged around by the poor ones it took while acquiring
+ * satellites.
  */
 type WeightedReading = { reading: Reading; weight: number }
 
@@ -56,7 +57,7 @@ function weightOf(reading: Reading): number | null {
 }
 
 /**
- * Averages the readings taken while she held the SHARPEN control.
+ * Averages the readings taken while the post-capture countdown ran.
  *
  * Readings are combined by **inverse-variance weighting**: each contributes in
  * proportion to `w = 1 / accuracyM²`, so the position is

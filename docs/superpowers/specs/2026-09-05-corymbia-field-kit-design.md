@@ -186,12 +186,20 @@ corners are easiest. This inverts phone thinking.
 - Interactive controls live in the bottom third by default, and hug the bottom corners only
   on a **tablet in landscape** — the one case where the thumbs actually rest near the
   corners. A phone in landscape keeps the bottom band despite being `expanded` by width.
-- **Which capture control sits on the dominant side is itself a preference**, not a fixed
-  decision. The two differ in what they demand: `SAVE NOW` is the frequent action, while
-  `SHARPEN` is the effortful one, needing a sustained press. Whether the dominant thumb
-  should be given frequency or effort depends on how she actually holds the device and for
-  how long — which is not knowable from a desk. So it is a setting, defaulting to `SAVE NOW`
-  on the dominant side, and swappable without changing handedness.
+- **There is one capture control, so there is no side to choose.** This bullet formerly made
+  which of two boxes took the dominant side a preference — `SAVE NOW` being the frequent
+  action and `SHARPEN` the effortful one, with no way to know from a desk which deserved the
+  stronger thumb. §9.1 has since replaced the pair with a single control, and a choice
+  between one thing is not a choice. Handedness still drives placement — which corner the
+  working column occupies, and which side the control sits on — it simply no longer has a
+  second box to trade against.
+- **`capturePrimary` stays in the schema, unread.** The setting and its column are left
+  exactly where they are rather than migrated away: removing a settings column costs a
+  migration, and the underlying question — what the dominant thumb should be given on the
+  real capture screen — is still open, merely no longer answerable by swapping two boxes.
+  Plan 3 decides whether it acquires a new meaning or is retired. Until then it is stored,
+  displayed on the diagnostics screen as the persistence proof it has always doubled as, and
+  read by nothing.
 - Readouts occupy the centre — looked at, not touched.
 - **Reach zones are user-configurable.** A handedness and anchor setting determines which
   corner the working column occupies and which side primary actions sit on. Changing it
@@ -437,9 +445,16 @@ A small key-value store, in the same database, holding what the user has chosen 
 what she has recorded. Distinct from the domain tables on purpose: these are preferences, not
 observations, and they never appear in an export.
 
-What it holds today: the theme override, handedness, which capture control takes the dominant
-side, and the form density. Each has a default, so an unset key is not an error and a fresh
-install behaves correctly before anything is written.
+What it holds today: the theme override, handedness, and the form density. Each has a
+default, so an unset key is not an error and a fresh install behaves correctly before
+anything is written.
+
+It also still holds **`capturePrimary`**, which is no longer live settings content. It chose
+which of two capture boxes took the dominant side, and §9.1 replaced the pair with a single
+control, so there is nothing left for it to choose. The key and its column stay exactly where
+they are rather than being migrated away (§5.4): it is stored, shown on the diagnostics
+screen as the persistence proof it has always doubled as, and read by nothing. Plan 3 decides
+whether it acquires a new meaning or is retired.
 
 The reason it exists at all is that an override which resets at every launch is not an
 override — and the field conditions these settings exist for do not change between launches.
@@ -497,50 +512,242 @@ and it is cheap to write now and expensive to retrofit.
 
 ## 9. The capture interaction
 
-### 9.1 Two controls, side by side
+### 9.1 One control: tap to record, then stand still
 
-- **Left — `⚡ SAVE NOW`**, in brand lime. Tap once, done.
-- **Right — `◎ SHARPEN`**, outlined in brand teal. Hold to improve, release to save.
+**This supersedes the two-control design**, which was `⚡ SAVE NOW` beside `◎ SHARPEN` — tap
+the left box to save at once, press and hold the right one to average readings and release
+to save, with which box took the dominant side a preference. That design was built and taken
+outdoors, and it failed on hardware for two reasons, neither of which was visible from a
+desk:
 
-Two visible boxes rather than one button with a hidden hold gesture: a non-technical user
-never discovers a hidden gesture. Side by side, the trade-off reads as speed on the left,
-quality on the right. During a hold the left box dims and the right relabels to `RELEASE TO
-SAVE`, so the screen only ever offers one live action.
+- **Pressing and holding moves the device.** A sustained press shifts a phone in the hand,
+  and shifts a 10-inch tablet held one-handed a great deal more. That movement is precisely
+  the error the averaging exists to remove, so the gesture was fighting its own purpose.
+- **The feedback was nowhere near the thumb.** Everything that responded to a hold —
+  accuracy, sample count, the verdict — sat in a panel far above the control, so while her
+  thumb was on the button the only part of the screen that moved was somewhere else
+  entirely.
 
-Placement follows the reach zone setting: a bottom band by default, and one box under each
-thumb in the bottom corners on a tablet in landscape.
+It is not forgotten and it is not deferred: it is replaced. There is now **one control**.
 
-**Which control sits on which side is configurable** (§5.4). The default puts `SAVE NOW` on
-the dominant side because it is the more frequent action, but `SHARPEN` demands a sustained
-press and may deserve the stronger thumb — that is hers to decide after a day in the field,
-not a matter to settle in advance. Swapping them must not require changing handedness, since
-the two preferences are independent.
+1. **One tap records the current fix immediately.** A real row on disk, not a draft held in
+   memory. If the app is killed, the battery goes, or she simply walks away, the capture
+   survives with the fix it had; only the sharpening is lost. This also makes the hurried
+   path exactly one tap, which is what the second box existed for.
+2. **The screen then counts down while she stands still**, showing the accuracy now, how
+   much it has improved since the tap, how many readings have gone into it, and how many
+   seconds remain. All of that sits inside the traffic-light frame with the button, within
+   sight of the thumb pressing it. **That adjacency is a requirement, not a layout
+   preference** — it is the specific defect this supersession exists to fix, and a design
+   that puts the countdown readout in a panel above the control has not implemented this
+   section.
+3. **When the countdown completes, the saved record is refined in place** with the averaged
+   fix. `refineRecordFix` writes the new fix and appends an `'edited'` event carrying **both
+   the previous and the new accuracy**, so the chain of custody shows a ±6 m fix that was
+   stood over and sharpened to ±3 m, rather than a record that was always ±3 m. The capture
+   number and the capture time do not move — the capture happened at the tap, and the number
+   may already be written on a tube.
+4. **An override accepts whatever has accumulated and ends the wait.** It is the same
+   control: during a countdown the button reads `ACCEPT NOW`. So exactly one action is ever
+   live, and the override is reachable at every moment the countdown is running.
+5. **A plateau ends the countdown, and the override is live throughout.** When the fix has
+   stopped improving, the screen says so, makes the override prominent, and finishes the
+   wait. This reverses an earlier position — "nothing auto-completes on a trend" — which was
+   held because `holdVerdict` was not yet trustworthy: it judged each reading's own accuracy
+   estimate, which jitters half a metre between consecutive samples, and had no minimum
+   sample count, so on the measured Samsung S25 run it declared `plateaued` at the second
+   reading, 0.6 s after the tap, when the averaged fix was ±5.2 m and waiting reaches
+   ±1.4 m. A signal like that allowed to end a capture would have ended it four times worse
+   than the fix she was standing there for.
+
+   That defect is fixed rather than tolerated (§9.3), and the signal now fires at 13 samples
+   — about 12 s — on the same run. So the countdown ending itself is the intended behaviour:
+   she waits as long as the fix needs and no longer. What has *not* changed is that she can
+   always end it herself; the override is reachable at every moment a countdown is running,
+   and a plateau never blocks anything.
+
+**A tap before the receiver has a lock still records.** Doctrine rule 4: nothing blocks
+capture. The row is written with an honest `'none'` position, and the countdown that follows
+is what gives it one — `refineRecordFix` accepts a refinement *from* no position for exactly
+this case, while refusing one *to* no position.
+
+**The countdown default is fifteen seconds, and it is a cap, not an expected duration.**
+`holdVerdict` (`packages/geo/src/trend.ts`) ending the wait on a plateau is the normal way a
+capture finishes — on the measured hardware below that is about twelve seconds after the
+tap. The countdown length is the safety net for a run whose fix never settles, chosen
+generously so it is almost never the thing that actually ends a capture, and it is not tuned
+against the plateau threshold: that threshold comes from where the measured data itself
+bends (`packages/geo/src/trend.ts`), with no reference to how long the countdown runs.
+
+Stored captures on a Samsung S25 outdoors, readings at 1 Hz, each row a real capture:
+
+| wait | readings | accuracy |
+|------|----------|----------|
+| ~4 s | 5 | ±1.6 m |
+| ~6 s | 7 | ±1.5 m |
+| ~11 s | 12 | ±1.2 m |
+| ~15 s | 16 | ±1.3 m |
+| 20 s | 21 | ±1.0 to ±1.4 m across several runs |
+| 60 s | 61 | ±1.1 m |
+
+This is one device, one site, one session under clear sky — a starting point for this
+hardware, not an established property of Android GPS. The curve is flat from about ten
+seconds. Sixty seconds was **no better** than twenty — ±1.1 m sits inside the ±1.0–1.4 m the
+twenty-second runs themselves span — not worse, as an earlier version of this section
+claimed. The mechanism is the floor in `averageReadings`: once enough samples accumulate the
+reported accuracy is exactly a third of the best single reading, so further samples are
+inert and only a better individual reading helps (`docs/gps-accuracy.md` §5).
+
+An earlier version of this section also claimed a longer wait actively degrades the honesty
+check, from a single twenty-second/sixty-second spread comparison. That claim does not
+survive the rest of the stored records: the twenty-second runs alone span spreads of ±0.3 m,
+±0.6 m, ±1.0 m, ±2.2 m and ±2.6 m, and the sixty-second run's ±1.3 m sits inside that range.
+It is withdrawn. The finding the same records do support, and more strongly: **run-to-run
+variance at a fixed duration exceeds the difference between durations.** Two twenty-second
+captures in the same session produced accuracies of ±1.0 m and ±2.8 m — a wider gap than any
+measured difference between twenty seconds and sixty. Conditions and satellite geometry at
+the moment of capture dominate the result, and waiting longer cannot rescue a fix that
+started out bad, which argues for a short cap on its own terms, without needing a spread
+claim the data does not support.
+
+So fifteen seconds is not a compromise between what she will tolerate and what the receiver
+needs, and it is not fitted to the plateau threshold either. It is a generous cap on top of a
+self-ending wait that, on this hardware, finished itself three seconds sooner on the one run
+measured.
+The diagnostics screen keeps the chooser — 5, 15, 20, 30 and 60 seconds — so the comparison
+can be run again on other hardware, in other sky, before the number is fixed for the field
+app.
+
+Placement follows the reach zone setting: a bottom band by default, and the bottom corner
+under the dominant thumb on a tablet in landscape. Handedness still drives that. Which
+control takes the dominant side no longer means anything, because there is one (§5.4).
 
 ### 9.2 The traffic-light frame
 
-A coloured frame around the entire capture screen, live at all times, doing two jobs:
+A coloured frame, live at all times, doing two jobs:
 
 - **Fix quality**, continuously — green, amber, red. Readable from peripheral vision in
   glare, with gloves, while moving.
-- **Hold progress**, charging around the perimeter as readings accumulate.
+- **Countdown progress**, charging around the perimeter as the wait runs down.
 
-Always backed by the word in the chip (`GOOD FIX` / `SHARPENING…` / `POOR FIX`), the numeric
+Two things changed with §9.1 and are stated here rather than left to be inferred:
+
+- **The frame is around the capture block, not around the whole screen.** It encloses the
+  readout and the control together, because §9.1.2 requires them to be one object within
+  sight of the thumb. A frame around the entire screen would put its own perimeter as far
+  from the button as the old readout panel was, which is the defect being fixed.
+- **The perimeter shows the countdown, not accumulated readings.** Under the superseded
+  press-and-hold model the only measure of progress was how many readings a hold had
+  gathered. There is now a fixed wait with a known end, so the perimeter is the honest
+  progress of *that* — it empties as the seconds run down and completes when the countdown
+  does. Sample count is still shown, as a number, inside the frame.
+
+Always backed by the word in the chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`), the numeric
 readout, and a dashed border when poor. Colour never carries the meaning alone.
 
-### 9.3 The accuracy gap bar
+**The frame itself pulses slowly while the fix is still being refined**, and stops when the
+point is recorded — motion is what says "still working, stand still" from peripheral vision,
+where a word cannot be read. It must respect the system's reduced-motion setting, rendering
+steady and running no animation when that is on.
 
-A solid bar for current accuracy, a hatched extension for what a hold could add, and one
-sentence of plain English beneath it.
+The whole frame breathes, not a secondary ring inside it. The prototype pulsed an inset ring
+because that was the easy way to keep the grade colour at full strength — a naive pulse of
+the frame's own colour would make a good fix look worse at the bottom of every cycle, which
+is the one thing this frame must never do. Both properties are required: the frame is what
+moves, *and* the fix quality stays honestly readable at every point in the cycle. Solving
+that is Plan 3's, and it is a real constraint, not a preference.
+
+**There is no separate `SHARPENING…` state.** That chip existed because a hold produced a
+provisional number that was not yet the saved one. Under §9.1 the record is already on disk
+and the countdown is refining it, so at every instant the frame grades the fix that would
+actually be stored if the wait ended now — which is a real graded fix, not a pending one.
+The countdown is shown by the seconds remaining and the perimeter, not by replacing the
+grade with a status word.
+
+### 9.3 What the countdown says in words
 
 **The verdict is derived from the observed trend, not from a hardware estimate.** While
-accuracy is still falling across recent readings: "Still improving — keep holding." Once it
-plateaus: "About as sharp as it gets here." This is honest, computable, and answers the only
-question she actually has.
+accuracy is still falling across recent readings: "Still improving — keep standing still."
+Once it plateaus: "About as sharp as it gets here — accepting now costs nothing." This is
+honest, computable, and answers the only question she actually has.
+
+**The trend is the averaged accuracy, not each reading's own estimate**, and the rule is
+calibrated against measured hardware rather than reasoned out. This replaces the earlier
+position that the sentence "suggests and never decides", which existed because the signal
+misfired; it does not misfire now, and §9.1.5 says what changed.
+
+On a measured Samsung S25 run at 1 Hz the raw per-reading accuracy jitters — 7.5, 7.2, 6.8,
+6.7, 6.3 m — while the averaged accuracy the frame prints and the record stores falls
+smoothly and monotonically — 7.5, 5.2, 4.1, 3.5, 3.1 m, reaching 1.4 m by the twenty-first
+reading. Judging the raw column produced a `plateaued` at the second reading and then
+alternated verdicts through ten seconds of fast, monotonic improvement. Judging the averaged
+column does neither.
+
+Three constants, each derived from that data and documented in `packages/geo/src/trend.ts`
+against the figure it came from:
+
+- **Ten samples minimum before a plateau can be claimed at all.** The measured curve is flat
+  from about ten seconds (§9.1) and measurably improving below it, so a plateau claim before
+  then is false by construction. This is the guard that makes the n=2 misfire impossible.
+- **A trailing window of four readings**, so the verdict is about the last four seconds and
+  an improvement from ten seconds ago cannot claim to be happening now.
+- **0.5 m of improvement across that window** to count as still improving, chosen from the
+  measured bracket alone, with no reference to the countdown length. The measured window
+  improvements fall through 0.549 m at the twelfth reading and 0.444 m at the thirteenth, and
+  0.5 m is the midpoint of that open bracket, so it is the threshold furthest from either
+  neighbouring measurement. The verdict crosses at the thirteenth reading on this run, about
+  12 s after the tap.
+
+**The verdict latches.** Once it has said `plateaued` it is never taken back, because with
+the countdown ending on the signal a withdrawable verdict would be a statement about a
+capture that no longer exists.
+
+Beside it, in words rather than a bar: **how much sharper the fix is than it was at the
+tap**, signed. A countdown that made the fix *worse* is the single most useful thing this
+interaction could report, and a readout that only ever showed improvement would hide it.
+
+**The hatched gap bar is gone.** It drew a solid bar for current accuracy and a hatched
+extension for what a hold *could* add — a prediction about a future the app cannot make. It
+belonged to a model in which the saved fix did not exist yet. Now the fix is on disk from the
+tap and the question is not "what might I gain" but "has this stopped improving", which is
+the observed trend and is answered in the sentence above.
 
 ### 9.4 Supporting readouts
 
-Satellites, datum, altitude, and live coordinates in monospace. During a hold: readings
-averaged, and the improvement delta.
+Satellites, datum, altitude, and live coordinates in monospace. These are context about the
+receiver, are not about the convergence of the capture in hand, and may sit anywhere on the
+screen.
+
+**The accuracy and the seconds remaining are not among them, and are not sized like them.**
+They are the two numbers she is standing still for, and in the acquiring state they are the
+largest things on the screen — legible at arm's length, in glare, without leaning in. The
+diagnostics prototype rendered them at the same weight as the rest of its instrument
+readouts, which is correct for an instrument and wrong for the field. Plan 3 sizes them as
+the primary content of that state, and everything else on the acquiring screen is
+subordinate to them.
+
+This is a specific instance of the doctrine's single-focus rule: a screen she looks at while
+holding a phone still over a point should answer *how good is it* and *how much longer*
+before it answers anything else.
+
+**Readings averaged and the improvement delta are not supporting readouts.** They live
+inside the traffic-light frame with the control (§9.1.2). Separating them from the button is
+the exact defect §9.1 exists to fix, and this section previously prescribed that separation.
+
+**A countdown transcript**, on the diagnostics screen while the countdown length is still
+being settled: one row per reading collected since the tap, carrying the elapsed seconds,
+that reading's own accuracy, the sample count, the running averaged accuracy, and the
+verdict — each as it stood at the moment that reading arrived, so the rows are literally what
+the control was showing. It survives the countdown and stays until the next tap.
+
+It is a distinct thing from a live reading tail, and both exist because neither does the
+other's job: a tail is trimmed, shows raw per-reading accuracy, and has no marker of where a
+countdown began or ended, so it cannot corroborate the averaged number the operator was
+watching or the improvement claimed about it. Establishing when the plateau signal actually
+fires on real hardware was the whole reason for the field measurements that set §9.1's
+default and §9.3's constants, and the transcript is what carried that evidence home. It
+stays for the same reason the chooser does — the numbers hold for one device under one sky
+and want re-measuring under another.
 
 ### 9.5 Duplicate guard
 

@@ -13,6 +13,7 @@ import {
   listUnfiledRecords,
   moveRecord,
   refileRecord,
+  refineRecordFix,
   sampleEvidence,
   softDeleteRecord,
 } from '../records'
@@ -202,6 +203,28 @@ describe('records', () => {
       deviceId,
     })
     expect(record.fix).toEqual({ quality: 'none' })
+  })
+
+  it('keeps why a record has no position, which the row itself cannot say', async () => {
+    // record_none_has_no_position forces latitude, longitude, accuracy and GPS
+    // time all to NULL, so the row can only ever record THAT there was no
+    // position. Which absence it was — tapped before the lock, or a platform
+    // that never reports whether a position is mocked, so none could be
+    // asserted at all — is a different fact, and it goes in the append-only
+    // event log rather than in `description`, where an observer's own note
+    // lives and could be typed over.
+    const record = await createRecord(db, {
+      activityId,
+      kind: 'pin',
+      fix: { quality: 'none' },
+      deviceId,
+      detail: 'this platform never reported whether the position is mocked',
+    })
+
+    const created = (await listEvents(db, record.id)).find((e) => e.action === 'created')
+    expect(created?.detail).toBe('this platform never reported whether the position is mocked')
+    // And it is not smuggled onto the record itself.
+    expect(record.description).toBeNull()
   })
 
   it('gives a record captured into an activity both numbers', async () => {
@@ -1162,10 +1185,11 @@ describe('filing, reordering and refiling', () => {
   const failingOn = (
     base: Database,
     doomed: (sql: string, params: SqlValue[]) => boolean,
+    message = 'the tablet died mid-refile',
   ): Database => ({
     ...base,
     async execute(sql, params = []) {
-      if (doomed(sql, params)) throw new Error('the tablet died mid-refile')
+      if (doomed(sql, params)) throw new Error(message)
       await base.execute(sql, params)
     },
   })
@@ -1230,6 +1254,254 @@ describe('filing, reordering and refiling', () => {
       { id: b1, sequence: 1 },
       { id: b2, sequence: 2 },
     ])
+  })
+
+  // Spec §9.1: one tap saves the fix that exists at that instant, the screen
+  // counts down while she stands still, and the saved row is then refined in
+  // place. These prove the second half of that against real SQL — including
+  // migration 003's CHECK constraints, which is where a refinement that wrote
+  // the wrong combination of columns would actually be caught.
+  describe('refineRecordFix', () => {
+    it('sharpens a one-tap fix into the averaged one the countdown produced', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      expect(record.fix).toEqual(INSTANT)
+
+      const refined = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: DELIBERATE,
+        deviceId,
+      })
+
+      // Every fix column moves together, spread included: INSTANT is a
+      // one-reading capture whose spread must be NULL, DELIBERATE is a
+      // seven-reading one whose spread must not be —
+      // record_spread_matches_sample_count refuses anything in between.
+      expect(refined.fix).toEqual(DELIBERATE)
+      // On disk, not merely in the object handed back.
+      expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
+    })
+
+    it('leaves the number written on the tube, and the capture time, exactly where they were', async () => {
+      // Two records so a reassignment would actually be visible: refining the
+      // second must not hand it the first one's label, or renumber either.
+      const first = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      const second = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const refined = await refineRecordFix(db, {
+        recordId: second.id,
+        fix: DELIBERATE,
+        deviceId,
+      })
+
+      // capture_number is the label written in marker on a physical sample
+      // tube. A refinement that moved it would leave the tube naming a
+      // different record — and record_capture_number_is_immutable would abort
+      // the whole transaction, losing the refinement too.
+      expect(refined.captureNumber).toBe(second.captureNumber)
+      expect((await getRecord(db, first.id))?.captureNumber).toBe(first.captureNumber)
+      // The capture happened at the tap, not at the end of the countdown.
+      expect(refined.capturedAt).toBe(second.capturedAt)
+      expect(refined.sequence).toBe(second.sequence)
+    })
+
+    it('records both accuracies, so the history shows a fix that was improved', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      await refineRecordFix(db, { recordId: record.id, fix: DELIBERATE, deviceId })
+
+      const events = await listEvents(db, record.id)
+      expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+      const refinement = events[1]
+      // Without the previous figure written down here, the log would show a
+      // record that was always ±4.0 m, when what happened is that a ±6.0 m fix
+      // was stood over and sharpened. The event's own columns can only hold
+      // one position, and they hold the new one.
+      expect(refinement?.detail).toBe('fix refined from ±6.0 m to ±4.0 m')
+      expect(refinement?.accuracyM).toBe(4)
+      expect(refinement?.fixQuality).toBe('deliberate')
+      expect(refinement?.activityId).toBe(activityId)
+    })
+
+    it('says so when the tap happened before the receiver had a position at all', async () => {
+      // Doctrine rule 4: nothing blocks capture, so a tap with no fix yet still
+      // writes a row — and the countdown that follows is what gives it one.
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: { quality: 'none' },
+        deviceId,
+      })
+      await refineRecordFix(db, { recordId: record.id, fix: DELIBERATE, deviceId })
+
+      const refinement = (await listEvents(db, record.id)).find((e) => e.action === 'edited')
+      expect(refinement?.detail).toBe('fix refined from no position to ±4.0 m')
+      expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
+    })
+
+    // The two tests above refine upward — a sparse fix into a richer one — so
+    // every column they check is being SET. A column added to the insert and
+    // forgotten in the shared `FIX_COLUMNS` list would still be set correctly
+    // by them, because the insert wrote it and the update simply never cleared
+    // it. The clearing direction is the one that catches that: refine to a fix
+    // whose fields are absent, and a column the update does not name keeps the
+    // old value, leaving a row wearing half of its old position and half of its
+    // new one — exactly the silent half-and-half `FIX_COLUMNS` exists to
+    // prevent, and a row every CHECK constraint in migration 003 accepts.
+
+    it('clears the columns a sparser fix does not carry, not just the ones it sets', async () => {
+      // DELIBERATE carries the lot: seven readings, a spread, a hold, an
+      // altitude with its reference frame, a vertical accuracy, a provider and
+      // a satellite clock reading.
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+
+      // A one-reading capture on a receiver that reported none of it. Every
+      // optional part of the previous fix is absent here, and each absence has
+      // to reach the row: spread NULL because one reading has no disagreement
+      // (record_spread_matches_sample_count), altitude and its reference NULL
+      // together (record_altitude_has_reference), and the rest simply unknown.
+      const BARE: Fix = {
+        quality: 'deliberate',
+        latitude: -37.8215,
+        longitude: 145.0334,
+        accuracyM: 9,
+        altitudeM: null,
+        altitudeReference: null,
+        datum: 'WGS84',
+        ...sampleEvidence(1, null),
+        holdMs: 0,
+        verticalAccuracyM: null,
+        // Stays known: record_deliberate_is_survey_grade requires a real
+        // convention on a deliberate fix, because a survey-grade number whose
+        // confidence radius is unstated is not survey grade. The absences this
+        // test is about are the four beside it.
+        accuracyConvention: 'radius68',
+        isMocked: false,
+        provider: null,
+        gpsTime: null,
+      }
+
+      const refined = await refineRecordFix(db, { recordId: record.id, fix: BARE, deviceId })
+
+      expect(refined.fix).toEqual(BARE)
+      expect((await getRecord(db, record.id))?.fix).toEqual(BARE)
+
+      // Read straight out of SQL as well, because the mapper reconstructs a
+      // union from these columns and could in principle hide a stale one behind
+      // the discriminant. NULL here is the assertion; `toEqual` above would
+      // pass on a leftover 62 m altitude only if the mapper dropped it.
+      const row = await db.first<{
+        altitude_m: number | null
+        altitude_reference: string | null
+        vertical_accuracy_m: number | null
+        location_provider: string | null
+        gps_time: string | null
+        fix_spread_m: number | null
+        fix_sample_count: number | null
+        fix_hold_ms: number | null
+      }>(
+        `SELECT altitude_m, altitude_reference, vertical_accuracy_m, location_provider,
+                gps_time, fix_spread_m, fix_sample_count, fix_hold_ms
+         FROM record WHERE id = ?`,
+        [record.id],
+      )
+      expect(row?.altitude_m).toBeNull()
+      expect(row?.altitude_reference).toBeNull()
+      expect(row?.vertical_accuracy_m).toBeNull()
+      expect(row?.location_provider).toBeNull()
+      expect(row?.gps_time).toBeNull()
+      expect(row?.fix_spread_m).toBeNull()
+      expect(row?.fix_sample_count).toBe(1)
+      expect(row?.fix_hold_ms).toBe(0)
+    })
+
+    it('clears the averaging evidence when a deliberate fix is refined to an ambient one', async () => {
+      // The class discriminant swaps which set of columns is legal: a
+      // deliberate fix has sample count, spread and hold and no age; an ambient
+      // one has an age and none of the three. record_deliberate_is_survey_grade
+      // and record_ambient_carries_age each police their own half, so a stale
+      // sample count left behind by the update aborts the transaction rather
+      // than surviving — which is the same failure, caught one layer down.
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+
+      const refined = await refineRecordFix(db, { recordId: record.id, fix: AMBIENT, deviceId })
+
+      expect(refined.fix).toEqual(AMBIENT)
+      expect((await getRecord(db, record.id))?.fix).toEqual(AMBIENT)
+
+      const row = await db.first<{
+        fix_quality: string
+        fix_age_seconds: number | null
+        fix_sample_count: number | null
+        fix_spread_m: number | null
+        fix_hold_ms: number | null
+      }>(
+        `SELECT fix_quality, fix_age_seconds, fix_sample_count, fix_spread_m, fix_hold_ms
+         FROM record WHERE id = ?`,
+        [record.id],
+      )
+      expect(row?.fix_quality).toBe('ambient')
+      expect(row?.fix_age_seconds).toBe(240)
+      expect(row?.fix_sample_count).toBeNull()
+      expect(row?.fix_spread_m).toBeNull()
+      expect(row?.fix_hold_ms).toBeNull()
+    })
+
+    it('rolls back the fix update when the event insert fails, leaving neither written', async () => {
+      // The property the doc comment leans on: "a record whose columns say
+      // ±3 m with no event saying how it got there" must not be reachable. If
+      // the record UPDATE landed and the event INSERT then failed, that is
+      // exactly the state it would produce — a refined fix on disk with no
+      // audit trail explaining how it got there.
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const doomed = failingOn(
+        db,
+        (sql) => /INSERT INTO event/.test(sql),
+        'the tablet died mid-refinement',
+      )
+      await expect(
+        refineRecordFix(doomed, { recordId: record.id, fix: DELIBERATE, deviceId }),
+      ).rejects.toThrow(/died mid-refinement/)
+
+      // The record still reads exactly as the tap wrote it — the UPDATE was
+      // rolled back along with the failed INSERT, not left standing alone.
+      expect((await getRecord(db, record.id))?.fix).toEqual(INSTANT)
+      // And no 'edited' event exists: the failed refinement left no trace,
+      // rather than a half-written one.
+      expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created'])
+    })
+
+    it('refuses a record that does not exist', async () => {
+      await expect(
+        refineRecordFix(db, { recordId: 'rec_missing', fix: DELIBERATE, deviceId }),
+      ).rejects.toThrow(/does not exist, so there is no fix to refine/)
+    })
+
+    it('refuses a record that has been deleted', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      await softDeleteRecord(db, record.id, deviceId)
+
+      await expect(
+        refineRecordFix(db, { recordId: record.id, fix: DELIBERATE, deviceId }),
+      ).rejects.toThrow(/has been deleted, so its fix cannot be refined/)
+      // And the tombstone's own fix is untouched, which is the point: a
+      // deletion is history, not a row to keep editing.
+      const row = await db.first<{ accuracy_m: number }>(
+        'SELECT accuracy_m FROM record WHERE id = ?',
+        [record.id],
+      )
+      expect(row?.accuracy_m).toBe(6)
+    })
+
+    it('refuses to refine a position away', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+
+      await expect(
+        refineRecordFix(db, { recordId: record.id, fix: { quality: 'none' }, deviceId }),
+      ).rejects.toThrow(/cannot be refined to no position at all/)
+
+      expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
+      expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created'])
+    })
   })
 })
 
