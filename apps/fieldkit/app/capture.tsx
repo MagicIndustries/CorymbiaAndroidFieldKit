@@ -68,7 +68,7 @@ function formatAccuracy(accuracyM: number | null): string {
  * wording is the answer to the only question she actually has — so they are a
  * lookup rather than something composed at the call site.
  */
-const VERDICT_SENTENCE: Record<HoldVerdict, string> = {
+export const VERDICT_SENTENCE: Record<HoldVerdict, string> = {
   improving: 'Still improving — keep standing still.',
   plateaued: 'About as sharp as it gets here — accepting now costs nothing.',
 }
@@ -95,9 +95,9 @@ const IMPROVEMENT_FLOOR_M = 0.05
  * Saying "no sharper than the tap" there would describe a comparison against a
  * measurement that was never taken.
  */
-function describeImprovement(preview: CapturePreview | null, tapHadPosition: boolean): string {
+function describeImprovement(preview: CapturePreview | null): string {
   if (preview === null) return 'nothing usable to average yet'
-  if (!tapHadPosition) return 'from no position at all'
+  if (!preview.tapHadPosition) return 'from no position at all'
   if (preview.improvedByM < IMPROVEMENT_FLOOR_M) return 'no sharper than the tap yet'
   return `${preview.improvedByM.toFixed(1)} m sharper than the tap`
 }
@@ -316,10 +316,7 @@ function CaptureBody() {
               }}
             >
               <Type variant="small" dim testID="capture-improvement">
-                {describeImprovement(
-                  capture.preview,
-                  capture.record !== null && capture.record.fix.quality !== 'none',
-                )}
+                {describeImprovement(capture.preview)}
               </Type>
               <Type variant="small" dim testID="capture-spread">
                 {describeSpread(capture.preview)}
@@ -384,22 +381,24 @@ function CaptureBody() {
       <Screen spokenDescription="Acquiring a fix. The reading is already saved and is being refined while you stand still. The accuracy and the seconds remaining, how much sharper the fix is than the tap, how far apart the readings are, and a control that accepts what has accumulated and ends the wait.">
         {/*
           The acquiring state scrolls. Rotation is unlocked and a phone in
-          landscape has roughly 360dp of height, where centred content in a
-          non-scrolling container clips symmetrically and takes the override off
-          the bottom with it. `flexGrow: 1` with `justifyContent: 'center'`
-          renders identically to a centred container when the content fits, and
-          keeps §9.1.4's "reachable at every moment" true when it does not.
+          landscape has roughly 360dp of height, where non-scrolling content
+          taller than the viewport clips and takes the override off the bottom
+          with it. `flexGrow: 1` is what fixes that: when the children are
+          taller than the viewport the container grows to fit them, there is no
+          free space left, and `justifyContent` is a no-op either way.
 
-          The vertical centring is this constraint's, not the reach zone's: the
-          reach anchor still decides which side the block sits on and how wide
-          it may grow (see `blockStyle`), but a bottom-anchored band cannot also
-          be the thing that scrolls into view, and a control she cannot reach at
-          all is the worse failure.
+          So `justifyContent: 'flex-end'` here has identical overflow behaviour
+          to centring, and is what §5.4 actually asks for: controls live in the
+          bottom third by default, bottom-anchored on every screen, which
+          `flex-end` states directly instead of relying on a coincidence of
+          overflow to keep the block low. It also means `resolveReach`'s
+          `bottomBand` — `alignSelf: 'stretch'` — has an observable effect here:
+          without it the block was always vertically centred regardless of what
+          the reach zone resolved to.
         */}
         <ScrollView
           testID="capture-scroll"
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ flexGrow: 1, justifyContent: 'center' }}
+          contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
         >
           <View style={{ gap: spacing.md }}>
             {block}

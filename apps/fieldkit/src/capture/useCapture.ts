@@ -64,25 +64,34 @@ export type CapturePreview = {
    * How much sharper the accumulated fix is than the one the tap wrote, in
    * metres.
    *
-   * **Signed on purpose.** A countdown that made the fix *worse* is one of the
-   * more useful things this interaction can report, and a number that only ever
-   * grew would hide it. Zero when the tap found no position at all: there is no
-   * baseline to have improved on, and inventing one would be a claim about a
-   * measurement that was never taken.
+   * **Not presented as signed, because it cannot be** (spec §9.3, corrected).
+   * The delta is structurally incapable of going negative: the tap's own
+   * reading is always sample one of the countdown's buffer, and inverse-variance
+   * weighting is monotonic in the number of samples — adding a reading can only
+   * raise the combined weight (never lower it) and can only lower `best` (never
+   * raise it), so the combined accuracy this preview reports cannot exceed what
+   * the tap alone produced, however poor the readings that follow are (verified
+   * by fuzzing twenty thousand trials against the real `averageReadings`, not
+   * assumed). Zero when the tap found no position at all: there is no baseline
+   * to have improved on, and inventing one would be a claim about a measurement
+   * that was never taken.
    *
-   * **In practice this never goes negative against the current
-   * `averageReadings`.** The tap's own reading is always sample one of the
-   * countdown's buffer, and inverse-variance weighting is monotonic in the
-   * number of samples — adding a reading can only raise the combined weight
-   * (never lower it) and can only lower `best` (never raise it), so the
-   * combined accuracy this preview reports cannot exceed what the tap alone
-   * produced, however poor the readings that follow are (verified directly
-   * against `averageReadings`, not assumed). The field is still signed rather
-   * than clamped: it is the honest shape for a number defined as a
-   * difference, and clamping it would assert a floor that is a property of
-   * today's averaging strategy rather than of what this field means.
+   * A countdown that goes badly is one of the more useful things this
+   * interaction can report, and this field cannot be the one to report it — the
+   * spread beside it is (spec §9.3). Spread genuinely worsens when she moved,
+   * the sky closed in, or the receiver wandered between readings; this field
+   * cannot, by construction, so a capture that went badly and one that went
+   * well produce the same shape of number here.
    */
   improvedByM: number
+  /**
+   * Whether the tap that started this countdown found a position at all — the
+   * baseline `improvedByM` is measured against. False when the tap recorded a
+   * `'none'` fix, in which case the improvement is zero for want of a baseline
+   * rather than for want of progress, and the screen says so rather than
+   * claiming "no sharper than the tap" about a comparison that was never made.
+   */
+  tapHadPosition: boolean
   /**
    * How far apart the readings are — the greatest distance from any collected
    * reading to the averaged position, in metres. Null for a single reading,
@@ -711,6 +720,7 @@ export function useCapture(deps: CaptureDeps): Capture {
         improvedByM:
           countdown.startAccuracyM === null ? 0 : countdown.startAccuracyM - averaged.accuracyM,
         spreadM: averaged.sampleCount === 1 ? null : averaged.spreadM,
+        tapHadPosition: countdown.startAccuracyM !== null,
       }
     } catch {
       preview = null

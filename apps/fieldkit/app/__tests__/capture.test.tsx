@@ -2,9 +2,8 @@ import React from 'react'
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native'
 import { ThemeProvider } from '@corymbia/ui'
 import { type as typeScale } from '@corymbia/tokens'
-import { createFakeLocationSource, type Reading } from '@corymbia/geo'
+import { averageReadings, createFakeLocationSource, type Reading } from '@corymbia/geo'
 import type { Fix, FieldRecord } from '@corymbia/data'
-import type { Capture, CaptureDeps } from '../../src/capture/useCapture'
 
 /**
  * Tests for the capture screen (spec §9.1–§9.4).
@@ -12,11 +11,11 @@ import type { Capture, CaptureDeps } from '../../src/capture/useCapture'
  * WHAT IS AND IS NOT MOCKED, and why. The same division `diagnostics.test.tsx`
  * and `useCapture.test.ts` draw, for the same reasons.
  *
- * Not mocked: `averageReadings`, `holdVerdict`, `gradeAccuracy`, and — the
- * point of this file — `useCapture` itself. The screen's job is to render the
- * state machine's output at the right size, in the right words and in the right
- * place, and a test against a stubbed hook could not tell whether the numbers
- * on screen are the numbers the override would actually store.
+ * Not mocked: `averageReadings`, `holdVerdict`, `gradeAccuracy`, and
+ * `useCapture` itself. The screen's job is to render the state machine's
+ * output at the right size, in the right words and in the right place, and a
+ * test against a stubbed hook could not tell whether the numbers on screen are
+ * the numbers the override would actually store.
  *
  * Mocked: the database, because it is already proved (348 tests in
  * packages/data cover the schema, the CHECK constraints and both repository
@@ -33,7 +32,36 @@ import type { Capture, CaptureDeps } from '../../src/capture/useCapture'
 // would run before it exists.
 // ---------------------------------------------------------------------------
 
+/**
+ * The source the screen is currently holding, and how many times any instance
+ * of it has been asked to `watch`.
+ *
+ * `createExpoLocationSource` is a `jest.fn` that builds a FRESH fake on every
+ * call — matching what the real factory does — rather than a lazy arrow that
+ * hands back the same object every time. `CaptureDeps` requires the screen to
+ * pass a referentially stable `source`: a new identity re-requests permission
+ * and resubscribes, four times a second during a countdown (see its doc
+ * comment). A factory that always returned the same object could not tell a
+ * stable ref pattern apart from an implementation that called the factory
+ * inline on every render — both would end up handing `useCapture` an
+ * identical-looking object. This factory can, because a broken caller now
+ * produces a new source, and a new `watch` subscription, on every render.
+ */
 let mockSource: ReturnType<typeof createFakeLocationSource>
+let watchCallCount = 0
+
+const mockCreateSourceSpy = jest.fn(() => {
+  const fake = createFakeLocationSource({ permission: 'granted', readings: [] })
+  const tracked: ReturnType<typeof createFakeLocationSource> = {
+    ...fake,
+    async watch(onReading) {
+      watchCallCount += 1
+      return fake.watch(onReading)
+    },
+  }
+  mockSource = tracked
+  return tracked
+})
 
 jest.mock('@corymbia/geo', () => {
   const actual = jest.requireActual<typeof import('@corymbia/geo')>('@corymbia/geo')
@@ -41,7 +69,7 @@ jest.mock('@corymbia/geo', () => {
     ...actual,
     // The one thing in this package that talks to a device. The averaging, the
     // grading and the hold verdict are all the real implementation.
-    createExpoLocationSource: () => mockSource,
+    createExpoLocationSource: () => mockCreateSourceSpy(),
   }
 })
 
@@ -56,33 +84,6 @@ jest.mock('@corymbia/data', () => {
     ...actual,
     createRecord: (...args: unknown[]) => mockRepo.createRecord(...args),
     refineRecordFix: (...args: unknown[]) => mockRepo.refineRecordFix(...args),
-  }
-})
-
-/**
- * Fields overlaid onto whatever the REAL `useCapture` returns, for the single
- * test that needs a state the state machine cannot hold still.
- *
- * A plateaued verdict during a countdown is committed for exactly one frame:
- * `useCapture`'s plateau effect ends the countdown in the same flush that
- * renders it, so under `act` — which drains effects before returning — no
- * assertion can ever observe the acquiring screen showing it. The sentence is
- * pinned by spec §9.3 all the same, and it is what the screen must say at the
- * moment the fix stops improving, so the branch is exercised by overlaying the
- * verdict onto the real hook's own state rather than by replacing the hook.
- * Everything else in that render — the phase, the preview, the seconds — is
- * still the genuine state machine's.
- *
- * Empty for every other test, where the mock is a pass-through.
- */
-let mockCaptureOverlay: Partial<Capture> = {}
-
-jest.mock('../../src/capture/useCapture', () => {
-  const actual =
-    jest.requireActual<typeof import('../../src/capture/useCapture')>('../../src/capture/useCapture')
-  return {
-    ...actual,
-    useCapture: (deps: CaptureDeps): Capture => ({ ...actual.useCapture(deps), ...mockCaptureOverlay }),
   }
 })
 
@@ -122,7 +123,18 @@ const mockUseSettings = {
 // equal: `db` is a dependency of the hook's write path, and a fresh object per
 // render is the difference between a screen that settles and one that does not.
 const mockDb = { handle: 'not a real database' }
-const mockStatus = { state: 'ready' as const, error: null, applied: ['001_initial'] }
+
+/**
+ * `let`, not `const`: the ready-guard test below sets this to `opening` for
+ * its one render. Every other test leaves it alone, so it stays `ready` —
+ * reset in `beforeEach` rather than trusted to be put back, so one test
+ * changing it can never leak into the next.
+ */
+type MockStatus =
+  | { state: 'opening'; error: null; applied: string[] }
+  | { state: 'ready'; error: null; applied: string[] }
+  | { state: 'failed'; error: Error; applied: string[] }
+let mockStatus: MockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
 
 jest.mock('../../src/db/provider', () => ({
   // A handle, not a database. Nothing here calls a method on it: the two
@@ -135,7 +147,7 @@ jest.mock('../../src/db/provider', () => ({
 }))
 
 // Imported after the mocks so it picks them up.
-import CaptureScreen from '../capture'
+import CaptureScreen, { VERDICT_SENTENCE } from '../capture'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -194,8 +206,9 @@ beforeEach(() => {
   jest.setSystemTime(START_MS)
 
   mockCaptureNumber = 0
-  mockCaptureOverlay = {}
-  mockSource = createFakeLocationSource({ permission: 'granted', readings: [] })
+  mockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
+  mockCreateSourceSpy.mockClear()
+  watchCallCount = 0
 
   mockRepo.createRecord.mockReset()
   mockRepo.refineRecordFix.mockReset()
@@ -270,19 +283,22 @@ async function emit(accuracyM: number, latitude?: number) {
 /**
  * The traffic-light frame's own subtree.
  *
- * `TrafficLightFrame` takes no `testID` of its own, so the screen wraps it in
- * the capture block — a container whose ONLY child is the frame, and which
- * carries the reach anchoring. Scoping a query to it is therefore the same
- * question as "is this inside the frame, beside the button", which spec §9.1.2
- * makes a requirement rather than a layout preference. The border assertion
- * below is what keeps that equivalence honest: the handle is queried against
- * the frame's own rendering, not merely against a container that happens to be
- * named after it.
+ * `TrafficLightFrame` takes no `testID` of its own, so this scopes to
+ * `traffic-light-border`'s own parent — the frame's actual root — rather than
+ * to `capture-frame`, the screen's wrapper `View` around it. Scoping to the
+ * wrapper was only ever correct while it stayed a single-child container: the
+ * moment a sibling was placed beside the frame in there, "inside
+ * `capture-frame`" would stop meaning "inside the frame with the button", the
+ * very defect §9.1.2 names. Scoping to the border's own parent is immune to
+ * that — it is the frame's rendering, not a container that merely happens to
+ * be named after it, whatever else is later placed beside it.
  */
 function insideTheFrame() {
-  const block = screen.getByTestId('capture-frame')
-  expect(within(block).getByTestId('traffic-light-border')).toBeTruthy()
-  return within(block)
+  const border = screen.getByTestId('traffic-light-border')
+  if (border.parent === null) {
+    throw new Error('Expected traffic-light-border to have a parent to scope queries to.')
+  }
+  return within(border.parent)
 }
 
 /** The single string a readout renders, for assertions about its exact shape. */
@@ -349,12 +365,14 @@ describe('the acquiring state', () => {
     expect(screen.getByTestId('capture-seconds').props.style.fontSize).toBe(typeScale.hero.size)
 
     // And everything else in the state is subordinate to them, which is the
-    // half of §9.4 a size assertion on its own would not catch.
-    for (const testID of ['capture-samples', 'capture-improvement', 'capture-spread', 'capture-verdict']) {
-      const size: unknown = screen.getByTestId(testID).props.style.fontSize
-      expect(typeof size).toBe('number')
-      expect(size).toBeLessThan(typeScale.hero.size)
-    }
+    // half of §9.4 a size assertion on its own would not catch. Swept across
+    // every rendered string rather than enumerated by testID, so an
+    // unlabelled element promoted to hero size is caught too, not only a
+    // regression on the four this screen happens to have today.
+    const heroSized = screen
+      .getAllByText(/./)
+      .filter((node) => node.props.style?.fontSize === typeScale.hero.size)
+    expect(heroSized).toHaveLength(2)
   })
 
   it('says the verdict in the words the spec pins, while the fix is still improving', async () => {
@@ -362,21 +380,20 @@ describe('the acquiring state', () => {
     await tap()
     await emit(7)
 
-    expect(screen.getByTestId('capture-verdict')).toHaveTextContent(
-      'Still improving — keep standing still.',
-    )
+    expect(screen.getByTestId('capture-verdict')).toHaveTextContent(VERDICT_SENTENCE.improving)
   })
 
-  it('says the other pinned sentence once the fix has stopped improving', async () => {
-    // See `mockCaptureOverlay` above for why the verdict is overlaid rather than
-    // driven: the state machine ends the countdown in the same flush that first
-    // reports a plateau, so this render exists on a real device and cannot be
-    // held still under `act`.
-    mockCaptureOverlay = { verdict: 'plateaued' }
-    await arriveWithAFix()
-    await tap()
-
-    expect(screen.getByTestId('capture-verdict')).toHaveTextContent(
+  it('pins both verdict sentences to spec §9.3, word for word', () => {
+    // A `plateaued` verdict during a countdown is committed for exactly one
+    // frame — `useCapture`'s plateau effect ends the countdown in the same
+    // flush that first reports it, so under `act` (which drains effects
+    // before returning) no render can ever be caught showing it live. §9.1.5
+    // has since withdrawn the idea of a live plateau announcement anyway: the
+    // fact reaches her in the `recorded` phase, not here. So this asserts the
+    // sentences directly against the export, which is the same ground a
+    // render would cover without mocking `useCapture` to force one.
+    expect(VERDICT_SENTENCE.improving).toBe('Still improving — keep standing still.')
+    expect(VERDICT_SENTENCE.plateaued).toBe(
       'About as sharp as it gets here — accepting now costs nothing.',
     )
   })
@@ -403,6 +420,7 @@ describe('the acquiring state', () => {
     // One reading has no disagreement to report, which is not a disagreement of
     // zero — so the readout says so rather than printing ±0.0 m.
     expect(screen.getByTestId('capture-spread')).toHaveTextContent(/one reading/)
+    expect(readoutText('capture-samples')).toBe('1 reading averaged')
 
     // A second reading from about 11 m up the paddock. The accuracy improves
     // regardless; only the spread can say the two readings disagree about where
@@ -410,7 +428,16 @@ describe('the acquiring state', () => {
     await emit(8, -37.8137)
 
     expect(readoutText('capture-improvement')).toMatch(/sharper than the tap/)
-    expect(screen.getByTestId('capture-spread')).toHaveTextContent(/±5\.\d m apart/)
+    expect(readoutText('capture-samples')).toBe('2 readings averaged')
+    // Pinned to the exact digit computed through the real `averageReadings`,
+    // as the hook's own test does, rather than `/±5\.\d m apart/`: that
+    // pattern also matches ±5.7 m, this fixture's combined accuracy, so an
+    // implementation printing accuracy where spread belongs would pass it.
+    const { spreadM: expectedSpreadM } = averageReadings([
+      reading(8, START_MS),
+      reading(8, START_MS + 1000, -37.8137),
+    ])
+    expect(readoutText('capture-spread')).toBe(`readings ±${expectedSpreadM.toFixed(1)} m apart`)
   })
 
   it('keeps the override live for every moment of the countdown', async () => {
@@ -435,12 +462,23 @@ describe('the acquiring state', () => {
     await tap()
 
     // Rotation is unlocked and a phone in landscape has roughly 360dp of
-    // height, where centred content in a non-scrolling container clips
-    // symmetrically and takes the control with it. `flexGrow: 1` with
-    // `justifyContent: 'center'` renders identically when the content fits and
-    // keeps §9.1.4's "reachable at every moment" true when it does not.
+    // height, where non-scrolling content taller than the viewport clips and
+    // takes the control off the bottom with it. `flexGrow: 1` fixes that
+    // regardless of `justifyContent`: when the children overflow the
+    // container grows to fit them and there is no free space left to justify.
     const style: unknown = screen.getByTestId('capture-scroll').props.contentContainerStyle
-    expect(style).toMatchObject({ flexGrow: 1, justifyContent: 'center' })
+    expect(style).toMatchObject({ flexGrow: 1 })
+
+    // `justifyContent` is what §5.4 actually cares about, and it is not
+    // ambiguous: controls are bottom-anchored on every screen, not centred.
+    // `center` and `flex-end` have identical overflow behaviour (the comment
+    // above), so this is the assertion that actually tells them apart.
+    expect(style).toMatchObject({ justifyContent: 'flex-end' })
+
+    // And the control the countdown is for has to actually be inside the
+    // thing that scrolls, not merely a sibling of it — a check the style
+    // assertion above cannot make on its own.
+    expect(within(screen.getByTestId('capture-scroll')).getByTestId('capture-button')).toBeTruthy()
   })
 })
 
@@ -472,5 +510,47 @@ describe('the adjacency requirement (spec §9.1.2)', () => {
     ]) {
       expect(frame.getByTestId(testID)).toBeTruthy()
     }
+  })
+})
+
+describe('the location source (spec §9.1, CaptureDeps)', () => {
+  it('is constructed once and kept stable across a countdown re-rendering four times a second', async () => {
+    await arriveWithAFix()
+    await tap()
+
+    // The ticker (`useCapture`'s `TICK_MS`) re-renders the screen four times a
+    // second for the whole of a countdown, and `CaptureDeps` requires `source`
+    // to survive every one of those renders: a new identity re-requests the
+    // permission and resubscribes. Advancing three seconds of fake ticks, on
+    // top of the readings below, is enough re-renders to catch a source
+    // reconstructed inline rather than held in a ref.
+    await act(async () => {
+      jest.advanceTimersByTime(3000)
+    })
+    for (const accuracyM of [7, 6, 5]) {
+      await emit(accuracyM)
+    }
+
+    expect(mockCreateSourceSpy).toHaveBeenCalledTimes(1)
+    expect(watchCallCount).toBe(1)
+  })
+})
+
+describe('the ready guard (status.state !== "ready")', () => {
+  it('renders the fallback instead of the capture UI while the database is not ready', async () => {
+    mockStatus = { state: 'opening', error: null, applied: [] }
+
+    await render(
+      <ThemeProvider>
+        <CaptureScreen />
+      </ThemeProvider>,
+    )
+
+    // `useDatabase`, `useDevice` and `useSettings` all throw before the
+    // database is ready, so this is also proof the guard runs before any of
+    // them are reached: a throwing hook hoisted above it would fail this
+    // render, not merely fail to show the right words.
+    expect(screen.getByText(/Database opening/)).toBeTruthy()
+    expect(screen.queryByTestId('capture-button')).toBeNull()
   })
 })
