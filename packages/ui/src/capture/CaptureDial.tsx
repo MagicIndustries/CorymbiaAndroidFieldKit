@@ -133,8 +133,8 @@ const LOCK_RIPPLE_PEAK_OPACITY = 0.9
  * dependency on `@corymbia/geo`.
  *
  * Layer order is a requirement, not a detail: ring track, ring progress,
- * accuracy circle, the lock's ripple (while it plays), then the crosshair
- * on top. The whole design is the circle arriving *on* the target, so the
+ * accuracy circle, the settled level's companion ring (while it is shown),
+ * the lock's ripple (while it plays), then the crosshair on top. The whole design is the circle arriving *on* the target, so the
  * crosshair must never be obscured by the accuracy circle closing over it,
  * or by the ripple expanding past it — painting it last, on top of every
  * other layer, is what guarantees that regardless of any other layer's
@@ -161,6 +161,7 @@ export function CaptureDial({
   grade,
   accuracyM,
   remaining,
+  settled,
   locked,
   children,
 }: {
@@ -171,6 +172,31 @@ export function CaptureDial({
    * is running: the ring's track still renders, but no progress stroke.
    */
   remaining?: number
+  /**
+   * Whether the capture stopped improving *above* the crosshair — the
+   * settled completion (spec §9.2.1). The weaker of the two completion
+   * levels, and the common one: the crosshair is this hardware's measured
+   * floor and most captures converge somewhere short of it.
+   *
+   * **The circle does not move.** It stays exactly where its accuracy puts
+   * it and firms up — the same fill and outline the lock uses, because
+   * "this is a finished measurement" is one treatment, not two — and a
+   * companion ring is drawn just outside it (`field.dialSettledGap`)
+   * marking where the capture actually got to, with the crosshair still
+   * visible inside it showing what was possible. The gap between the two is
+   * the signal: how far this spot fell short of what the device can do.
+   *
+   * Nothing else of the lock's happens: no snap, no ripple, and the
+   * crosshair stays unlit and thin. Snapping the circle onto the crosshair
+   * on a settled fix was considered and rejected — "the radius always means
+   * metres" (spec §9.2) is the invariant the whole dial rests on, and moving
+   * the circle to a radius its accuracy has not earned would make the
+   * picture lie.
+   *
+   * Ignored while `locked` is true: a capture cannot both have stopped
+   * short of the floor and reached it, and the lock is the stronger claim.
+   */
+  settled?: boolean
   /**
    * Whether the fix has converged onto the crosshair (spec §9.2.1,
    * `isLocked` in dialGeometry.ts, computed by the screen and handed down
@@ -200,6 +226,12 @@ export function CaptureDial({
   const accuracyRadius = radiusForMetres(accuracyM)
   const ring = remaining === undefined ? null : ringDash(OUTER_RADIUS_PX, remaining)
   const lockedNow = locked === true
+  // The lock wins outright where a caller reports both: they are mutually
+  // exclusive by construction (settled means the capture stopped short of
+  // the floor, locked means it reached it) but they are two independent
+  // props this component is simply told, and a circle carrying both
+  // treatments at once is a hybrid this design never intends.
+  const settledNow = settled === true && !lockedNow
 
   // `null` is a third state, distinct from `false`: the accessibility
   // setting has not resolved yet (see TrafficLightFrame.tsx, which this
@@ -254,7 +286,11 @@ export function CaptureDial({
     if (!lockedNow) {
       // Losing lock is not itself an animated moment — spec §9.2.1
       // describes only gaining it — so this settles straight back rather
-      // than easing.
+      // than easing. The settled level runs no animation of its own either
+      // (see `settled`): its circle is already at rest where its accuracy
+      // put it, and the companion ring appearing at that radius is the
+      // whole of the moment — so `firmLevel` below is a constant, and
+      // nothing here has to be driven for it.
       snapProgress.stopAnimation()
       snapProgress.setValue(0)
       lockLevel.stopAnimation()
@@ -376,11 +412,24 @@ export function CaptureDial({
   const snapReachPx = Math.max(0, Math.min(LOCK_SNAP_PX, accuracyRadius - MIN_RADIUS_PX))
   const snapOffsetPx = Animated.multiply(snapProgress, snapReachPx)
 
-  const accuracyOutlineWeight = lockLevel.interpolate({
+  /**
+   * The circle's own firmness, which the lock and the settled level both
+   * reach and only the lock animates into.
+   *
+   * A constant `1` rather than a second driven value: settled is not a
+   * ceremony (see `settled`), so its circle is firm from the first frame it
+   * is drawn. Held in a ref so the instance is stable across the four
+   * renders a second a countdown produces, the same reason the driven
+   * values above are.
+   */
+  const firmLevel = useRef(new Animated.Value(1)).current
+  const circleLevel = settledNow ? firmLevel : lockLevel
+
+  const accuracyOutlineWeight = circleLevel.interpolate({
     inputRange: [0, 1],
     outputRange: [field.dialAccuracyOutline, field.dialAccuracyOutlineLocked],
   })
-  const accuracyFillOpacity = lockLevel.interpolate({
+  const accuracyFillOpacity = circleLevel.interpolate({
     inputRange: [0, 1],
     outputRange: [LOCK_FILL_UNLOCKED, LOCK_FILL_LOCKED],
   })
@@ -409,6 +458,13 @@ export function CaptureDial({
   // intends: "locked" means a definite object, and a definite object's edge
   // is not the uncertain one. The guard costs nothing on the path the app
   // actually exercises and forecloses the strange state on every other path.
+  // Deliberately NOT also guarded on `settledNow`. A settled fix is
+  // frequently a poor one — settled means the capture stopped short of the
+  // floor, which is the very thing a poor fix does — and settled makes no
+  // claim of certainty for a dashed edge to contradict: it says "this is
+  // where it got to", not "this is a definite object on the target". The
+  // lock is the only level that makes that stronger claim, so it stays the
+  // only one that drops the dash.
   const poorFixDashed = grade === 'poor' && !lockedNow
   const accuracyOutlineDash: [number, number] | undefined = poorFixDashed
     ? [field.dialAccuracyOutlineDash, field.dialAccuracyOutlineDashGap]
@@ -417,99 +473,157 @@ export function CaptureDial({
   return (
     <View
       testID="capture-dial"
-      accessibilityValue={{ text: lockedNow ? 'Locked on' : 'Not locked' }}
+      accessibilityValue={{
+        text: lockedNow ? 'Locked on' : settledNow ? 'Settled short of the target' : 'Not locked',
+      }}
     >
-      <Svg viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`} width="100%" height="100%">
-        <Circle
-          testID="dial-ring-track"
-          cx={CENTER}
-          cy={CENTER}
-          r={OUTER_RADIUS_PX}
-          fill="none"
-          stroke={theme.colors.surfaceSunken}
-          strokeWidth={field.dialRing}
-        />
-        {ring === null ? null : (
+      {/*
+        THE DIAL'S OWN BOUND, AND WHY IT IS HERE RATHER THAN ON THE SCREEN.
+
+        The SVG below is `width="100%" height="100%"` against a fixed square
+        viewBox, so it has no intrinsic size at all: it takes whatever its
+        container gives it. In the capture screen's centred, flex-grown
+        column that was the entire viewport, and the screen shipped to a
+        Samsung S25 with the accuracy, the verdict and *the only control*
+        pushed off the bottom — no capture could be started, so nothing
+        counted down and nothing ever locked.
+
+        The bound belongs to the dial, not to each screen that places one:
+        a component whose height is decided by whatever it is dropped into
+        is a trap every future caller has to know about, and the gallery
+        and the capture screen would each have to re-derive the same square.
+        `width: '100%'` with `maxWidth` keeps it responsive downward —
+        full width on anything narrower, capped on anything wider — and
+        `aspectRatio: 1` is what makes it a square without reading a window
+        dimension, which only `useLayout` may do.
+      */}
+      <View
+        testID="dial-canvas"
+        style={{
+          width: '100%',
+          maxWidth: field.dialMax,
+          aspectRatio: 1,
+          alignSelf: 'center',
+        }}
+      >
+        <Svg viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`} width="100%" height="100%">
           <Circle
-            testID="dial-ring-progress"
+            testID="dial-ring-track"
             cx={CENTER}
             cy={CENTER}
             r={OUTER_RADIUS_PX}
             fill="none"
-            stroke={colour}
+            stroke={theme.colors.surfaceSunken}
             strokeWidth={field.dialRing}
-            strokeDasharray={ring.dasharray}
-            strokeDashoffset={ring.dashoffset}
           />
-        )}
-        <AnimatedCircle
-          testID="dial-accuracy"
-          cx={CENTER}
-          cy={CENTER}
-          r={Animated.add(accuracyRadius, snapOffsetPx)}
-          fill={colour}
-          fillOpacity={accuracyFillOpacity}
-          stroke={colour}
-          strokeWidth={accuracyOutlineWeight}
-          strokeDasharray={accuracyOutlineDash}
-        />
-        {rippling ? (
-          <>
-            <AnimatedCircle
-              testID="dial-ripple-1"
+          {ring === null ? null : (
+            <Circle
+              testID="dial-ring-progress"
               cx={CENTER}
               cy={CENTER}
-              r={ripple1.interpolate({
-                inputRange: [0, 1],
-                outputRange: [TARGET_RADIUS_PX, TARGET_RADIUS_PX + LOCK_RIPPLE_REACH_PX],
-              })}
+              r={OUTER_RADIUS_PX}
+              fill="none"
+              stroke={colour}
+              strokeWidth={field.dialRing}
+              strokeDasharray={ring.dasharray}
+              strokeDashoffset={ring.dashoffset}
+            />
+          )}
+          <AnimatedCircle
+            testID="dial-accuracy"
+            cx={CENTER}
+            cy={CENTER}
+            r={Animated.add(accuracyRadius, snapOffsetPx)}
+            fill={colour}
+            fillOpacity={accuracyFillOpacity}
+            stroke={colour}
+            strokeWidth={accuracyOutlineWeight}
+            strokeDasharray={accuracyOutlineDash}
+          />
+          {/*
+            THE SETTLED LEVEL'S COMPANION RING (spec §9.2.1).
+
+            Drawn at the accuracy circle's own radius — `dialSettledGap`
+            outside its outline, because two strokes on one path are one
+            thickened stroke rather than two rings — so it marks where this
+            capture actually got to. It is NOT drawn at the crosshair: the
+            circle never moves to a radius its accuracy has not earned, and
+            the distance between this ring and the crosshair still visible
+            inside it is exactly the thing worth seeing.
+
+            Not animated, and it does not use the ripple's radii: the ripple
+            travels outward from the crosshair and disappears, while this
+            stays for as long as the capture is being looked at.
+          */}
+          {settledNow ? (
+            <Circle
+              testID="dial-settled-ring"
+              cx={CENTER}
+              cy={CENTER}
+              r={accuracyRadius + field.dialSettledGap}
               fill="none"
               stroke={colour}
               strokeWidth={field.countdown}
-              opacity={ripple1.interpolate({
-                inputRange: [0, LOCK_RIPPLE_HOLD_FRACTION, 1],
-                outputRange: [LOCK_RIPPLE_PEAK_OPACITY, LOCK_RIPPLE_PEAK_OPACITY, 0],
-              })}
             />
-            <AnimatedCircle
-              testID="dial-ripple-2"
-              cx={CENTER}
-              cy={CENTER}
-              r={ripple2.interpolate({
-                inputRange: [0, 1],
-                outputRange: [TARGET_RADIUS_PX, TARGET_RADIUS_PX + LOCK_RIPPLE_REACH_PX],
-              })}
-              fill="none"
-              stroke={colour}
-              strokeWidth={field.countdown}
-              opacity={ripple2.interpolate({
-                inputRange: [0, LOCK_RIPPLE_HOLD_FRACTION, 1],
-                outputRange: [LOCK_RIPPLE_PEAK_OPACITY, LOCK_RIPPLE_PEAK_OPACITY, 0],
-              })}
+          ) : null}
+          {rippling ? (
+            <>
+              <AnimatedCircle
+                testID="dial-ripple-1"
+                cx={CENTER}
+                cy={CENTER}
+                r={ripple1.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [TARGET_RADIUS_PX, TARGET_RADIUS_PX + LOCK_RIPPLE_REACH_PX],
+                })}
+                fill="none"
+                stroke={colour}
+                strokeWidth={field.countdown}
+                opacity={ripple1.interpolate({
+                  inputRange: [0, LOCK_RIPPLE_HOLD_FRACTION, 1],
+                  outputRange: [LOCK_RIPPLE_PEAK_OPACITY, LOCK_RIPPLE_PEAK_OPACITY, 0],
+                })}
+              />
+              <AnimatedCircle
+                testID="dial-ripple-2"
+                cx={CENTER}
+                cy={CENTER}
+                r={ripple2.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [TARGET_RADIUS_PX, TARGET_RADIUS_PX + LOCK_RIPPLE_REACH_PX],
+                })}
+                fill="none"
+                stroke={colour}
+                strokeWidth={field.countdown}
+                opacity={ripple2.interpolate({
+                  inputRange: [0, LOCK_RIPPLE_HOLD_FRACTION, 1],
+                  outputRange: [LOCK_RIPPLE_PEAK_OPACITY, LOCK_RIPPLE_PEAK_OPACITY, 0],
+                })}
+              />
+            </>
+          ) : null}
+          <G testID="dial-crosshair">
+            <AnimatedLine
+              testID="dial-crosshair-horizontal"
+              x1={CENTER - TARGET_RADIUS_PX}
+              y1={CENTER}
+              x2={CENTER + TARGET_RADIUS_PX}
+              y2={CENTER}
+              stroke={crosshairColour}
+              strokeWidth={crosshairWeight}
             />
-          </>
-        ) : null}
-        <G testID="dial-crosshair">
-          <AnimatedLine
-            testID="dial-crosshair-horizontal"
-            x1={CENTER - TARGET_RADIUS_PX}
-            y1={CENTER}
-            x2={CENTER + TARGET_RADIUS_PX}
-            y2={CENTER}
-            stroke={crosshairColour}
-            strokeWidth={crosshairWeight}
-          />
-          <AnimatedLine
-            testID="dial-crosshair-vertical"
-            x1={CENTER}
-            y1={CENTER - TARGET_RADIUS_PX}
-            x2={CENTER}
-            y2={CENTER + TARGET_RADIUS_PX}
-            stroke={crosshairColour}
-            strokeWidth={crosshairWeight}
-          />
-        </G>
-      </Svg>
+            <AnimatedLine
+              testID="dial-crosshair-vertical"
+              x1={CENTER}
+              y1={CENTER - TARGET_RADIUS_PX}
+              x2={CENTER}
+              y2={CENTER + TARGET_RADIUS_PX}
+              stroke={crosshairColour}
+              strokeWidth={crosshairWeight}
+            />
+          </G>
+        </Svg>
+      </View>
       <Type variant="label" style={{ color: colour }}>
         {WORD[grade]}
       </Type>

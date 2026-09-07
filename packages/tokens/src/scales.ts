@@ -101,6 +101,30 @@ export const field = {
    */
   dialRing: 10,
   /**
+   * The greatest diameter `CaptureDial` will ever draw itself at, in dp.
+   *
+   * **This is the bound that stops the dial being the whole screen.** Its
+   * SVG is sized `width="100%" height="100%"` against a square viewBox, so
+   * without a cap it grows to whatever its container allows — and in the
+   * capture screen's centred, flex-grown column that is the entire viewport.
+   * That shipped, and on a Samsung S25 it pushed the accuracy readout, the
+   * verdict and *the only control* off the bottom of the screen: no capture
+   * could be started at all, so nothing ever counted down and nothing ever
+   * locked.
+   *
+   * An ergonomic figure rather than a fraction of the window, which is why
+   * it lives here and not in a stylesheet: at roughly 5 cm across on a
+   * phone it is comfortably the largest single element in the acquiring
+   * state — larger than the `hero` accuracy's own ~74dp line — and legible
+   * at arm's length in glare, while leaving room in a 360×780dp portrait
+   * viewport for the accuracy, the verdict and a 72dp control beneath it.
+   * The dial still takes the full width of anything narrower than this
+   * (`width: '100%'` beside the cap), so it shrinks on a small screen and
+   * stops growing on a large one — never branching on a raw width, which
+   * the layout doctrine forbids.
+   */
+  dialMax: 260,
+  /**
    * The accuracy circle's outline weight before a fix locks (spec §9.2.1:
    * unlocked, the circle is "a soft region of uncertainty"). Promoted here
    * from a local constant in `CaptureDial.tsx` for the same reason
@@ -145,6 +169,21 @@ export const field = {
    * deliberately not going for.
    */
   dialAccuracyOutlineDashGap: 5,
+  /**
+   * How far outside the accuracy circle's own outline the *settled*
+   * companion ring is drawn, in px (spec §9.2.1's settled level).
+   *
+   * The ring marks where the capture actually got to, so it belongs at the
+   * accuracy circle's own radius — but two strokes on the same path are one
+   * thickened stroke, not two rings (the exact defect that killed the
+   * rectangular traffic-light frame, spec §9.2). This is the separation that
+   * makes it read as a companion ring around the circle rather than as a
+   * heavier outline on it, and it is deliberately small: the ring must stay
+   * unmistakably *at* the accuracy's radius, because the gap between it and
+   * the crosshair inside it is the whole signal — how far this spot fell
+   * short of what the device can do.
+   */
+  dialSettledGap: 7,
 } as const
 
 /**
