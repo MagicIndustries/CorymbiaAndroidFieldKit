@@ -58,7 +58,16 @@ export function TrafficLightFrame({
     poor: theme.colors.statusPoor,
   }[grade]
 
-  const [reduceMotion, setReduceMotion] = useState(false)
+  // `null` is a third state, distinct from `false`: the accessibility setting
+  // has not resolved yet. `AccessibilityInfo.isReduceMotionEnabled()` answers
+  // asynchronously, so every mount's first effect pass runs before that
+  // promise can settle. Defaulting to `false` would make the pulse start on
+  // every mount, reduced motion or not, and only stop once the real answer
+  // arrives — which is a flicker of motion, not the absence of one. Treating
+  // "unresolved" the same as "reduced motion requested" (anything other than
+  // a resolved `false`) means the frame renders steady until it is positively
+  // known safe to breathe.
+  const [reduceMotion, setReduceMotion] = useState<boolean | null>(null)
   const scale = useRef(new Animated.Value(1)).current
 
   useEffect(() => {
@@ -74,9 +83,10 @@ export function TrafficLightFrame({
   }, [])
 
   useEffect(() => {
-    // A steady frame is the correct rendering when motion is refused, not a
-    // degraded one: the grade is in the colour and the word either way.
-    if (!refining || reduceMotion) {
+    // A steady frame is the correct rendering when motion is refused or still
+    // unknown, not a degraded one: the grade is in the colour and the word
+    // either way, so waiting costs nothing.
+    if (!refining || reduceMotion !== false) {
       scale.setValue(1)
       return
     }
