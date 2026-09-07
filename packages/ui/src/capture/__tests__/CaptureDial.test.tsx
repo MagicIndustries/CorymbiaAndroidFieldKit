@@ -118,8 +118,8 @@ describe('CaptureDial', () => {
   })
 
   // Only 'good' was checked above; a mapping bug on the middle grade would
-  // pass unnoticed without this one (the same gap TrafficLightFrame's own
-  // tests were once caught by).
+  // pass unnoticed without this one (the same gap the deleted
+  // TrafficLightFrame's own tests were once caught by).
   it('carries the status colour for a fair fix too', async () => {
     await renderDial({ grade: 'fair', accuracyM: 3, remaining: 0.5 })
     const progress = screen.getByTestId('dial-ring-progress')
@@ -139,15 +139,16 @@ describe('CaptureDial', () => {
   // to the renderer (extractStroke.js: `strokeDasharray && strokeDashoffset`
   // is falsy whenever strokeDashoffset is 0), so an assertion at a full or
   // empty ring would read nothing back. 0.25 is known to round-trip a
-  // non-zero offset intact (see CaptureFramePerimeter.test.tsx, which hit
-  // this first).
+  // non-zero offset intact — the deleted CaptureFramePerimeter's own tests
+  // hit this first, and the lowering is react-native-svg's, not that
+  // component's, so it still applies here.
   it("wires the ring's strokeDashoffset to ringDash's own value for the fraction given", async () => {
     await renderDial({ grade: 'good', accuracyM: 3, remaining: 0.25 })
     const { dasharray, dashoffset } = ringDash(OUTER_RADIUS_PX, 0.25)
     const progress = screen.getByTestId('dial-ring-progress')
     // A scalar strokeDasharray is lowered to a two-element array (an
     // odd-length dash list duplicated onto itself so it still alternates) —
-    // same lowering CaptureFramePerimeter's own ring goes through.
+    // same lowering the deleted CaptureFramePerimeter's ring went through.
     expect(progress.props.strokeDasharray).toHaveLength(2)
     expect(progress.props.strokeDasharray[0]).toBeCloseTo(dasharray, 5)
     expect(progress.props.strokeDasharray[1]).toBeCloseTo(dasharray, 5)
@@ -185,21 +186,14 @@ describe('CaptureDial', () => {
     expect(ring.props.r).toBeCloseTo(TARGET_RADIUS_PX, 6)
   })
 
-  it('lights the crosshair ring with the rest of the crosshair', async () => {
+  it('renders the whole crosshair, ring included, in textDim while unlit', async () => {
     await renderDial({ grade: 'good', accuracyM: 3 })
-    expect(screen.getByTestId('dial-crosshair-ring').props.stroke).toEqual({
-      type: 0,
-      payload: processColor(darkTheme.colors.textDim),
-    })
-  })
-
-  it('renders the crosshair in textDim while unlit', async () => {
-    await renderDial({ grade: 'good', accuracyM: 3 })
-    const horizontal = screen.getByTestId('dial-crosshair-horizontal')
-    expect(horizontal.props.stroke).toEqual({
-      type: 0,
-      payload: processColor(darkTheme.colors.textDim),
-    })
+    for (const part of ['dial-crosshair-ring', 'dial-crosshair-horizontal', 'dial-crosshair-vertical']) {
+      expect(screen.getByTestId(part).props.stroke).toEqual({
+        type: 0,
+        payload: processColor(darkTheme.colors.textDim),
+      })
+    }
   })
 
   it('renders what it encloses, because the dial can carry a readout inside it', async () => {
@@ -311,18 +305,55 @@ describe('CaptureDial the lock (spec §9.2.1)', () => {
     })
   })
 
-  it('lights the crosshair in the grade colour once locked', async () => {
+  /**
+   * The ring is part of the crosshair, so it lights with it.
+   *
+   * This assertion used to be made on an *unlocked* dial, against `textDim` —
+   * which is the ring's resting colour and would still hold with the ring's
+   * stroke hardcoded to `textDim` and the crosshair never lighting again. The
+   * three parts are checked together here, on the locked render, because
+   * lighting two of the three is the regression a per-part test invites.
+   */
+  it('lights the whole crosshair, ring included, in the grade colour once locked', async () => {
     await renderDial({ grade: 'good', accuracyM: 1, locked: true })
-    const horizontal = screen.getByTestId('dial-crosshair-horizontal')
-    const vertical = screen.getByTestId('dial-crosshair-vertical')
-    expect(horizontal.props.stroke).toEqual({
-      type: 0,
-      payload: processColor(darkTheme.colors.statusGood),
-    })
-    expect(vertical.props.stroke).toEqual({
-      type: 0,
-      payload: processColor(darkTheme.colors.statusGood),
-    })
+    for (const part of ['dial-crosshair-ring', 'dial-crosshair-horizontal', 'dial-crosshair-vertical']) {
+      expect(screen.getByTestId(part).props.stroke).toEqual({
+        type: 0,
+        payload: processColor(darkTheme.colors.statusGood),
+      })
+    }
+  })
+
+  /**
+   * THE CROSSHAIR THICKENS — the fourth of the four parts spec §9.2.1 lists
+   * for the lock, and the only one nothing asserted a `strokeWidth` for.
+   *
+   * 3 and 4 are `field.countdown` and `field.dialAccuracyOutlineLocked`
+   * (packages/tokens/src/scales.ts), written as literals for the same reason
+   * every other number in this file is: a test that imported the constant the
+   * component draws with would pass whatever that constant held — including a
+   * pair that are equal, which is a crosshair that never thickens at all.
+   * Asserted on all three parts, since they share one interpolated value and
+   * a regression that split them apart is exactly what this catches.
+   */
+  it('thickens the crosshair as it lights, which is the fourth part of the lock', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(true)
+    const parts = ['dial-crosshair-ring', 'dial-crosshair-horizontal', 'dial-crosshair-vertical']
+
+    const { rerender } = await renderDial({ grade: 'good', accuracyM: 7, locked: false })
+    await screen.findByTestId('dial-accuracy')
+    for (const part of parts) {
+      expect(screen.getByTestId(part).props.strokeWidth).toBeCloseTo(3, 5)
+    }
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={1} locked />
+      </ThemeProvider>,
+    )
+    for (const part of parts) {
+      expect(screen.getByTestId(part).props.strokeWidth).toBeCloseTo(4, 5)
+    }
   })
 
   it('lights the crosshair for a fair fix too, not just good', async () => {
@@ -365,8 +396,20 @@ describe('CaptureDial the lock (spec §9.2.1)', () => {
     expect(screen.queryByTestId('dial-ripple-2')).toBeNull()
   })
 
+  /**
+   * Motion is explicitly ALLOWED here, and that is the whole point.
+   *
+   * This test used to render with no reduced-motion mock at all, which left
+   * the `reduceMotion !== false` branch — "on, or not yet known: run nothing"
+   * — as the thing keeping the ripple out of the tree. The `wasLocked` guard
+   * this test is named for was never reached, so deleting it left this green.
+   * With motion positively allowed, `wasLocked` is the only thing between a
+   * dial that mounts locked and a ripple it never earned.
+   */
   it('renders no ripple when the dial mounts already locked', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
     await renderDial({ grade: 'good', accuracyM: 1, locked: true })
+    await screen.findByTestId('dial-accuracy')
     expect(screen.queryByTestId('dial-ripple-1')).toBeNull()
     expect(screen.queryByTestId('dial-ripple-2')).toBeNull()
   })
@@ -419,19 +462,31 @@ describe('CaptureDial the lock: reduced motion (spec §9.2.2)', () => {
   })
 
   it('renders the locked state with no ripple while reduced motion is still unresolved', async () => {
-    // No mock: `isReduceMotionEnabled()` never answers in this headless
-    // environment, so `reduceMotion` stays `null` — "not yet known" is
-    // treated the same as "on" (see the component's own doc comment).
+    // A promise that never settles, so `reduceMotion` genuinely stays `null`
+    // — "not yet known", which the component treats the same as "on" (see its
+    // own doc comment). This has to be mocked rather than left to the
+    // environment: `AccessibilityInfo.isReduceMotionEnabled()` resolves
+    // `false` under jest-expo, so an unmocked render exercises the
+    // motion-allowed branch instead, and this test was named for a state it
+    // never reached. (Before `restoreMocks` was turned on in jest.config.js it
+    // was worse still — it inherited a leaked `mockResolvedValue(true)` from
+    // an earlier test and exercised the reduced-motion-ON branch, which the
+    // test directly above already covers.)
+    jest
+      .spyOn(AccessibilityInfo, 'isReduceMotionEnabled')
+      .mockReturnValue(new Promise<boolean>(() => undefined))
     await renderDial({ grade: 'good', accuracyM: 1, locked: true })
     const accuracy = screen.getByTestId('dial-accuracy')
     expect(accuracy.props.fillOpacity).toBeCloseTo(0.45, 5)
     expect(screen.queryByTestId('dial-ripple-1')).toBeNull()
+    expect(screen.queryByTestId('dial-ripple-2')).toBeNull()
   })
 })
 
 describe('CaptureDial the lock: the ripple actually starts (and does not replay)', () => {
-  // Fake timers make "started" provable the same way TrafficLightFrame.tsx
-  // proves its pulse loop starts: `Animated.parallel` is spied on directly,
+  // Fake timers make "started" provable the way the deleted
+  // TrafficLightFrame proved its pulse loop started: `Animated.parallel` is
+  // spied on directly,
   // which records every construction attempt regardless of what later
   // happens to it. This is the fix for the exact trap the task brief warns
   // about — a timer count reaching zero cannot tell "never started" apart
@@ -622,6 +677,67 @@ describe('CaptureDial the lock: the snap never draws a negative radius', () => {
     // behaviour the component's own comment describes, not merely a
     // last-resort floor.
     expect(minR).toBeCloseTo(MIN_RADIUS_PX, 5)
+  })
+
+  /**
+   * AND THE SNAP MUST ACTUALLY HAPPEN WHERE THERE IS ROOM FOR IT.
+   *
+   * The test above proves the clamp at an accuracy chosen so the snap's reach
+   * is zero *by construction* — `radiusForMetres(0.5)` is already
+   * `MIN_RADIUS_PX`, so `snapReachPx` is zero and the circle is expected not
+   * to move. That makes it a proof about the clamp and no proof at all about
+   * the snap: replacing `snapOffsetPx` with a constant zero, or deleting the
+   * `Animated.add` that applies it, passes it unchanged. Spec §9.2.1 lists the
+   * snap first among the four parts of the lock, and calls for it to be
+   * visible from peripheral vision rather than inferred from a radius.
+   *
+   * 4.2 m puts the circle at roughly 86 px, far above the floor, so the full
+   * `LOCK_SNAP_PX` (4.5) of reach is available — and the assertion is that the
+   * drawn radius genuinely dips inside its own resting value during the
+   * settle, then comes back to rest on it.
+   */
+  it('actually snaps inward at an accuracy with room for it, then eases back to rest', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
+    const { rerender } = await renderDial({ grade: 'good', accuracyM: 7 })
+    await screen.findByTestId('capture-dial')
+    await act(async () => {
+      jest.advanceTimersByTime(0)
+    })
+
+    const restingPx = radiusForMetres(4.2)
+    // Real headroom, unlike the floor case above — so a snap that never fires
+    // is distinguishable from one that fired and was clamped to nothing.
+    expect(restingPx - MIN_RADIUS_PX).toBeGreaterThan(4.5)
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={4.2} locked />
+      </ThemeProvider>,
+    )
+
+    let minR = Number.POSITIVE_INFINITY
+    for (let sample = 0; sample < 11; sample++) {
+      await act(async () => {
+        jest.advanceTimersByTime(25)
+      })
+      const r: unknown = screen.getByTestId('dial-accuracy').props.r
+      if (typeof r !== 'number') {
+        throw new Error(`Expected dial-accuracy's r to be a number, got ${typeof r}.`)
+      }
+      minR = Math.min(minR, r)
+    }
+
+    // It went inward, by an amount only the snap can produce...
+    expect(minR).toBeLessThan(restingPx - 3)
+    // ...and no further than the snap's own reach, so this cannot pass on a
+    // radius that simply collapsed.
+    expect(minR).toBeGreaterThanOrEqual(restingPx - 4.5)
+    // And it came back: the snap eases out onto the resting radius rather
+    // than leaving the circle parked inside it (spec §9.2.1).
+    await act(async () => {
+      jest.advanceTimersByTime(500)
+    })
+    expect(screen.getByTestId('dial-accuracy').props.r).toBeCloseTo(restingPx, 5)
   })
 })
 

@@ -234,8 +234,10 @@ export function CaptureDial({
   const settledNow = settled === true && !lockedNow
 
   // `null` is a third state, distinct from `false`: the accessibility
-  // setting has not resolved yet (see TrafficLightFrame.tsx, which this
-  // mirrors). Treating "unresolved" the same as "reduced motion requested"
+  // setting has not resolved yet. (The deleted TrafficLightFrame drew the same
+  // distinction, and this carries it forward rather than mirroring a file that
+  // no longer exists.) Treating "unresolved" the same as "reduced motion
+  // requested"
   // means the lock never plays its animation before it is positively known
   // safe to (spec §9.2.2) — it renders the locked *state* instead, which
   // costs nothing since the state is the information and the animation is

@@ -63,32 +63,23 @@ export const field = {
   /** The traffic-light frame thickness. */
   frame: 5,
   /**
-   * The countdown ring's thickness, drawn concentrically *inside* the frame
-   * (spec §9.2). Deliberately not `frame`: the countdown and the grade border
-   * are two rings that must be visible at the same time, and one drawn at the
-   * other's width, on the other's path, in the other's colour is not a second
-   * ring at all — it is the first one covered up. Thinner rather than thicker
-   * so the grade border stays the dominant edge of the frame, which is what a
-   * survey position is judged by.
+   * The dial's thin secondary stroke, in dp.
    *
-   * Reused as-is, not duplicated under a new name, for two more pieces of
-   * `CaptureDial`'s own thin linework (spec §9.2.1): the crosshair's stroke
-   * while unlocked (it thickens to `dialAccuracyOutlineLocked` once locked),
-   * and the lock's ripple rings, which want the same "thin, secondary
-   * stroke" weight as the countdown ring rather than a weight of their own.
-   * It is *not* reused for the accuracy circle's own outline — that wants a
-   * softer resting weight than a countdown ring calls for, so it has its own
-   * pair of tokens below.
+   * Named for the countdown because that is where it started: it was the
+   * stroke of the deleted traffic-light frame's countdown ring, sized
+   * deliberately thinner than `frame` so the grade border stayed the dominant
+   * edge. That frame and its perimeter are gone (spec §9.2 — the dial
+   * supersedes them), and this weight survived them, on the three pieces of
+   * `CaptureDial`'s linework that want a thin, secondary stroke rather than
+   * a weight of their own (spec §9.2.1): the crosshair while unlocked (it
+   * thickens to `dialAccuracyOutlineLocked` once lit), the lock's ripple
+   * rings, and the settled level's companion ring.
+   *
+   * It is *not* used for the accuracy circle's own outline — that wants a
+   * softer resting weight than this, so it has its own pair of tokens below —
+   * nor for the dial's own ring, which is `dialRing` and much heavier.
    */
   countdown: 3,
-  /**
-   * The unpainted gap between the grade border's inner edge and the countdown
-   * ring's outer edge. It is what makes them read as two concentric rings
-   * rather than one thick one, and it is why the pulse cannot cause a
-   * collision: the border layer scales up from 1.0, so its inner edge only
-   * ever moves further from the (unscaled) countdown ring.
-   */
-  countdownGap: 3,
   /**
    * `CaptureDial`'s own ring stroke (spec §9.2): the track that is always
    * drawn, and — while a countdown is running — the same-width progress

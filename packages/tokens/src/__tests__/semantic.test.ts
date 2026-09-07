@@ -103,14 +103,30 @@ describe('themes', () => {
     expect(field.control).toBe(72)
   })
 
-  it('pins the field stroke-width tokens CaptureDial and TrafficLightFrame share', () => {
+  it('pins the field stroke-width and sizing tokens the capture dial draws with', () => {
+    // `frame` is the diagnostics screen's own bordered capture block; every
+    // other token here belongs to `CaptureDial`. (`countdownGap` was removed
+    // with the traffic-light frame this test used to be named for: it was the
+    // gap between that frame's grade border and its countdown ring, and with
+    // both gone it had no consumer left but this line.)
     expect(field.frame).toBe(5)
     expect(field.countdown).toBe(3)
-    expect(field.countdownGap).toBe(3)
     // CaptureDial's own ring stroke — thicker than `countdown` because it has
     // no separate always-on grade border to lean on (see the doc comment in
     // scales.ts).
     expect(field.dialRing).toBe(10)
+    // The dial's own bound, in dp. Pinned because it is the number that stops
+    // the dial being the whole screen: unbounded, its `width/height="100%"`
+    // SVG took the entire viewport on a Samsung S25 and pushed the accuracy,
+    // the verdict and the only control off the bottom, so no capture could be
+    // started at all. 300 leaves a 360dp-wide phone room for all three.
+    expect(field.dialMax).toBe(300)
+    // How far outside the accuracy circle's outline the settled completion's
+    // companion ring is drawn. Small on purpose — the ring has to read as
+    // being AT the accuracy's own radius, because the gap between it and the
+    // crosshair is the whole signal — but non-zero, since two strokes on one
+    // path are one thickened stroke rather than two rings.
+    expect(field.dialSettledGap).toBe(7)
     // The accuracy circle's own outline weights, unlocked and locked — moved
     // here from local constants in CaptureDial.tsx (review fix, task 3): the
     // same "ergonomic line weight on a field control" argument that already

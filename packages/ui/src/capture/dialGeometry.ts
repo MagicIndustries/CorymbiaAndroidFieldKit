@@ -1,8 +1,18 @@
 /**
  * Pure geometry for the capture dial (spec §9.2). No React, no
  * `react-native-svg`, no rendering — arithmetic only, so the claim the dial
- * design rests on ("a good fix lands exactly on the crosshair; a poor one
- * visibly stops short") is checkable without drawing anything.
+ * design rests on ("a fix that reaches the hardware floor lands exactly on the
+ * crosshair; one that stops short of it draws visibly outside it") is
+ * checkable without drawing anything.
+ *
+ * Note what that claim is and is not. The crosshair is pinned to
+ * `TARGET_METRES` — 1.4 m, this hardware's measured floor — while
+ * `gradeAccuracy` calls anything under 5 m good, so a *good* fix resting well
+ * outside the crosshair is what a normal capture looks like (spec §9.2.1's
+ * two completion levels exist for exactly that gap). An earlier draft of this
+ * comment said "a good fix lands exactly on the crosshair"; §9.2.1 retracted
+ * it, and §9.2 now says the same thing in terms of the floor rather than the
+ * grade.
  *
  * `@corymbia/ui` must not import `@corymbia/geo` — this module receives a
  * metres figure and a countdown fraction as plain numbers, never a `Reading`
@@ -15,8 +25,8 @@
  * rows span ±1.0 m to ±1.4 m; 1.4 m is the worst of that flat tail, so the
  * crosshair is sized to what this hardware reliably reaches, not to its best
  * single run). Every other radius on the dial is scaled against this pair,
- * which is what makes "a good fix lands on the crosshair" a consequence of
- * the arithmetic rather than a decoration drawn on top of it.
+ * which is what makes "a fix that reaches the floor lands on the crosshair" a
+ * consequence of the arithmetic rather than a decoration drawn on top of it.
  */
 export const TARGET_METRES = 1.4
 
@@ -149,27 +159,47 @@ const LOG_INTERCEPT_PX = TARGET_RADIUS_PX - LOG_SLOPE_PX_PER_LN_M * Math.log(TAR
  * never reach the SVG this feeds as a negative, `NaN`, or off-ring radius,
  * which would otherwise render as a silent blank rather than a visible bug.
  *
- * `NaN` and non-positive metres both produce a `NaN` from `Math.log`, and
- * `Math.min`/`Math.max` propagate `NaN` rather than discarding it, so they
- * are handled explicitly: an unusable reading is treated as worst-case
- * (`MAX_RADIUS_PX`) — never as a false "locked" — rather than left to blank
- * the render. `Infinity` needs no special case: `Math.log(Infinity)` is
- * `Infinity`, and `Math.min(MAX_RADIUS_PX, Infinity)` clamps to
- * `MAX_RADIUS_PX` on its own.
+ * `NaN` and non-positive metres are both unusable readings and both take the
+ * worst case (`MAX_RADIUS_PX`) — never a false "locked" — but they arrive
+ * here as two different values and need two different guards. `Math.log(NaN)`
+ * and `Math.log(-1)` are `NaN`, which `Math.min`/`Math.max` propagate rather
+ * than discarding; `Math.log(0)` is `-Infinity`, which they do not propagate —
+ * they clamp it to `MIN_RADIUS_PX`, the smallest radius on the dial, on which
+ * `isLocked` is `true`. An earlier version of this guard tested only for
+ * `NaN` and so answered `radiusForMetres(0)` with a locked radius while this
+ * comment claimed it answered with the worst case. Both non-finite ends are
+ * now refused explicitly.
+ *
+ * `Infinity` still needs no special case, and is the one non-finite input
+ * that must NOT be refused here: `Math.log(Infinity)` is `Infinity`, and
+ * `Math.min(MAX_RADIUS_PX, Infinity)` clamps to `MAX_RADIUS_PX` on its own —
+ * which is the same answer, reached honestly, for the screen's "no reading at
+ * all" accuracy (`capture.tsx`'s `dialAccuracyM`).
  */
 export function radiusForMetres(metres: number): number {
   const raw = LOG_INTERCEPT_PX + LOG_SLOPE_PX_PER_LN_M * Math.log(metres)
-  if (Number.isNaN(raw)) return MAX_RADIUS_PX
+  if (Number.isNaN(raw) || raw === Number.NEGATIVE_INFINITY) return MAX_RADIUS_PX
   return Math.min(MAX_RADIUS_PX, Math.max(MIN_RADIUS_PX, raw))
 }
 
 /**
  * Dash geometry for the countdown ring (spec §9.2: "the ring is the clock…
- * it empties as the seconds run down"). Mirrors `perimeterGeometry` in
- * `CaptureFramePerimeter.tsx` — same clamp, same "offset grows as the stroke
- * withdraws" direction — because the dial replaces that rectangular
- * perimeter with a circular one and must keep the same honest-countdown
- * behaviour that fix was written for.
+ * it empties as the seconds run down").
+ *
+ * The dash pattern is the ring's whole circumference — one dash exactly as
+ * long as the path it is drawn on — and the offset is what withdraws it. That
+ * is the only pattern that empties: any shorter dash repeats around the ring
+ * and the stroke never leaves it, however the offset moves.
+ * `dialGeometry.test.ts` anchors `dasharray` on `2 * Math.PI * r` computed
+ * independently of this function, because every other assertion in the suite
+ * compares `dasharray` to a value this function itself produced and so cannot
+ * tell a circumference from a radius.
+ *
+ * It replaces the rectangular perimeter the deleted `CaptureFramePerimeter`
+ * drew, and keeps the same "offset grows as the stroke withdraws" direction
+ * that component's own fix established — a countdown that fills as the wait
+ * runs out reads as progress toward something rather than as time running
+ * away.
  *
  * `remaining` is the fraction of the wait *left*, clamped to `[0, 1]` rather
  * than wrapped, so a caller passing a stale or out-of-range fraction (a
