@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { ScrollView, View } from 'react-native'
+import { AccessibilityInfo, Animated, ScrollView, View } from 'react-native'
 import {
   createAmbientCache,
   createExpoLocationSource,
@@ -310,6 +310,41 @@ const DEFAULT_COUNTDOWN_S = 20
 
 /** How often the countdown readout re-renders. Four times a second reads as smooth without busying the thread. */
 const TICK_MS = 250
+
+/**
+ * How long one half of the frame's pulse takes — in, then out, so a full
+ * breath is twice this.
+ *
+ * Deliberately slower than anything that could read as urgency. The pulse says
+ * "still working, stand still", and a fast blink says the opposite: it asks for
+ * a decision, which is the one thing this state must not do (§9.1 — the screen
+ * suggests, she decides). At 2.6 s each way the frame breathes about once every
+ * five seconds, slow enough to be legible as "ongoing" out of the corner of an
+ * eye while she is watching the numbers, and far too slow to be read as an
+ * alarm.
+ */
+const PULSE_HALF_MS = 2600
+
+/**
+ * The pulse's opacity range, on an inset ring drawn in the grade colour.
+ *
+ * It never reaches 0 and never reaches 1: the outer frame carries the grade
+ * colour at full strength at every instant regardless (this ring is drawn
+ * *inside* it), and clamping the ring keeps the effect a thickening and
+ * thinning of one colour rather than a second element appearing and vanishing.
+ * The traffic light is therefore readable at every point in the cycle, which is
+ * the frame's actual job — the pulse is only allowed to say "not finished yet".
+ */
+const PULSE_MIN_OPACITY = 0.15
+const PULSE_MAX_OPACITY = 0.9
+
+/**
+ * What the same ring shows when the system asks for reduced motion: the middle
+ * of the range, held still. A user who has told the OS she wants less motion
+ * gets the same "thicker frame while it is still working" signal as everyone
+ * else, and no animation at all.
+ */
+const PULSE_STEADY_OPACITY = 0.6
 
 /**
  * A capture that has already been saved and is now being sharpened.
@@ -695,10 +730,16 @@ function DiagnosticsBody(props: BodyProps) {
   // just stops, and "the countdown ended here" is indistinguishable from "the
   // receiver went quiet".
   const [transcriptEnd, setTranscriptEnd] = useState<string | null>(null)
-  // True from the instant of a tap until the countdown it starts is running.
-  // Only the ref decides — see `captureNow` — but the state has to exist so
-  // the button can show it and refuse the second press.
-  const [capturing, setCapturing] = useState(false)
+  // True from the instant of a tap until the countdown it starts is running,
+  // and for the whole of any other write this screen performs. Only the ref
+  // decides — see `writeInFlightRef` — but the state has to exist so the
+  // controls can show it and refuse the second press.
+  const [writing, setWriting] = useState(false)
+  // True once a countdown has finished — by expiry or by the override — and
+  // until the next tap clears it. It is what tells "the record is settled"
+  // apart from "no capture has happened yet", which the frame otherwise
+  // renders identically. See the capture-state banner below.
+  const [settled, setSettled] = useState(false)
   // Re-render clock. `collected` is a ref, so the readout beside the control
   // would otherwise only move when a new reading happened to arrive; the
   // seconds remaining have to fall whether or not the receiver is talking.
@@ -723,7 +764,13 @@ function DiagnosticsBody(props: BodyProps) {
   }
 
   /**
-   * Whether a tap is already being turned into a record.
+   * Whether this screen is already writing to the database.
+   *
+   * Every write goes through it — the tap, the refinement at the end of a
+   * countdown, and the ambient save — because they all insert or update rows
+   * in the same activity and all end by reloading the same list. Two of them
+   * in flight at once is how the list ends up showing neither's result, and
+   * how a record can be created while another is being refined.
    *
    * `countdownRef` cannot do this job. It is not set until `beginCountdown`,
    * which is three awaits past the tap — `ensureActivity`, `createRecord`,
@@ -737,31 +784,31 @@ function DiagnosticsBody(props: BodyProps) {
    * countdown produced no improvement", which is the exact measurement this
    * screen is being carried outdoors to make.
    *
-   * A ref, claimed synchronously at the top of `captureNow` before anything
-   * can await, is the only thing that closes that window. `capturing` mirrors
-   * it for the button; the ref is what enforces it.
+   * A ref, claimed synchronously at the top of each writer before anything can
+   * await, is the only thing that closes that window. `writing` mirrors it for
+   * the buttons; the ref is what enforces it.
    */
-  const captureInFlightRef = useRef(false)
+  const writeInFlightRef = useRef(false)
 
   /**
-   * Ends a capture's claim on the control, on success and on every failure
+   * Ends a write's claim on the controls, on success and on every failure
    * alike. The ref is cleared unconditionally — it is what the next tap tests,
-   * and leaving it set after a failure would wedge the one control on the
-   * screen for the life of the session — while the state that mirrors it is a
+   * and leaving it set after a failure would wedge every control on the screen
+   * for the life of the session — while the state that mirrors it is a
    * `setState` after an `await` like any other, so it is guarded.
    */
-  function releaseCapture() {
-    captureInFlightRef.current = false
-    if (mountedRef.current) setCapturing(false)
+  function releaseWrite() {
+    writeInFlightRef.current = false
+    if (mountedRef.current) setWriting(false)
   }
 
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      // A capture in flight when the screen goes away must not leave the flag
+      // A write in flight when the screen goes away must not leave the flag
       // set for the remounted body to inherit.
-      captureInFlightRef.current = false
+      writeInFlightRef.current = false
       captureStartMs.current = null
       // The location subscription lives in the parent, which outlives this body
       // whenever the database status flips away from `ready`. Leaving the
@@ -772,6 +819,80 @@ function DiagnosticsBody(props: BodyProps) {
       setCollecting(false)
     }
   }, [captureStartMs, collected, setCollecting])
+
+  /**
+   * Whether the system has been asked for less motion.
+   *
+   * Read once on arrival and then followed, because it is a setting a user can
+   * change while the app is open and the frame below must obey it from that
+   * moment, not from the next launch. The subscription is removed on unmount
+   * like any other; the initial read is guarded, because
+   * `isReduceMotionEnabled()` is a promise and this screen is capable of going
+   * away before it resolves.
+   */
+  const [reduceMotion, setReduceMotion] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    void AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (!cancelled) setReduceMotion(enabled)
+    })
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', (enabled) => {
+      setReduceMotion(enabled)
+    })
+    return () => {
+      cancelled = true
+      subscription.remove()
+    }
+  }, [])
+
+  /**
+   * The frame's slow pulse, as an opacity on the inset ring rendered inside
+   * the traffic-light frame below.
+   *
+   * Opacity rather than the border colour, for two reasons. It is one of the
+   * two properties the native driver can animate at all (the other being
+   * transform), so the loop runs off the JS thread and cannot be stuttered by
+   * a reading arriving or the ticker re-rendering — on a field device that is
+   * the difference between "breathing" and "juddering". And a colour animation
+   * would have to move the grade colour towards something else, which is
+   * precisely what the frame is not allowed to do: the hue has to keep meaning
+   * the grade at every instant. Animating a second ring's opacity leaves the
+   * grade colour alone and varies only how thick the frame looks.
+   */
+  const pulse = useRef(new Animated.Value(PULSE_MIN_OPACITY)).current
+  useEffect(() => {
+    // No countdown, or the user has asked for less motion: nothing runs. The
+    // steady value is applied by the style below rather than by animating to
+    // it, so this path starts no animation at all — including when reduced
+    // motion is switched on part-way through a countdown, which re-runs this
+    // effect and therefore tears the loop down first.
+    if (countdown === null || reduceMotion) return
+
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: PULSE_MAX_OPACITY,
+          duration: PULSE_HALF_MS,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: PULSE_MIN_OPACITY,
+          duration: PULSE_HALF_MS,
+          useNativeDriver: true,
+        }),
+      ]),
+    )
+    loop.start()
+    return () => {
+      // Both calls matter. `stop()` ends the loop — one left running is a
+      // battery drain on a device that spends its day outdoors, and a timer
+      // that never settles under a test runner. `setValue` puts the ring back
+      // where the next countdown expects to find it, so a pulse never resumes
+      // mid-breath at whatever opacity it happened to be interrupted at.
+      loop.stop()
+      pulse.setValue(PULSE_MIN_OPACITY)
+    }
+  }, [countdown, reduceMotion, pulse])
 
   // Every `listRecords`-backed refresh (the on-arrival load below, and the
   // save handlers) takes this token before its awaits and only applies its
@@ -855,13 +976,15 @@ function DiagnosticsBody(props: BodyProps) {
    */
   async function captureNow() {
     // The in-flight ref first, and it is the guard that matters — see
-    // `captureInFlightRef` above for why `countdownRef` alone let a double-tap
+    // `writeInFlightRef` above for why `countdownRef` alone let a double-tap
     // through and what the phantom record it produced looked like. Claimed
     // synchronously, before the first `await` exists, so a second tap anywhere
     // in the window returns here.
-    if (captureInFlightRef.current || countdownRef.current !== null) return
-    captureInFlightRef.current = true
-    setCapturing(true)
+    if (writeInFlightRef.current || countdownRef.current !== null) return
+    writeInFlightRef.current = true
+    setWriting(true)
+    // The previous capture's "settled" banner belongs to the previous capture.
+    setSettled(false)
 
     const startedAtMs = Date.now()
     const endsAtMs = startedAtMs + countdownSeconds * 1000
@@ -952,7 +1075,7 @@ function DiagnosticsBody(props: BodyProps) {
     // unmount cleanup has already cleared the collection state; only the
     // in-flight claim is this function's to give back.
     if (!mountedRef.current) {
-      releaseCapture()
+      releaseWrite()
       return
     }
 
@@ -968,7 +1091,7 @@ function DiagnosticsBody(props: BodyProps) {
       endsAtMs,
     })
     setTickMs(Date.now())
-    releaseCapture()
+    releaseWrite()
 
     const saved =
       unstorable === null
@@ -1011,7 +1134,7 @@ function DiagnosticsBody(props: BodyProps) {
   function abandonCapture(message: string) {
     collected.current = []
     captureStartMs.current = null
-    releaseCapture()
+    releaseWrite()
     if (!mountedRef.current) return
     setCollecting(false)
     props.setMessage(message)
@@ -1039,6 +1162,34 @@ function DiagnosticsBody(props: BodyProps) {
     countdownRef.current = null
     setCountdownState(null)
     setCollecting(false)
+    // The refinement is a write like the other two, so it takes the same claim.
+    // Without it there is a window — from the instant `countdownRef` is
+    // released above until `refineRecordFix` resolves — in which the ambient
+    // control is live again (its own guard only tests for a *running*
+    // countdown) and its insert would run alongside this update. That is the
+    // same two-writes-at-once the tap guard exists to prevent, just later in
+    // the sequence. The visible cost is that the capture control reads
+    // "SAVING…" for the length of the update, which is exactly what is
+    // happening.
+    writeInFlightRef.current = true
+    setWriting(true)
+    // The countdown is over from this instant, whatever the write does next:
+    // nothing after this point will change the record's position again, and
+    // the frame has to stop claiming otherwise even if the refinement fails.
+    setSettled(true)
+    try {
+      await refineCapture(reason, active)
+    } finally {
+      releaseWrite()
+    }
+  }
+
+  /**
+   * The refinement itself, split out only so `finishCountdown` above can hold
+   * the write claim across every one of the exits below with a single
+   * `finally` rather than repeating the release at each `return`.
+   */
+  async function refineCapture(reason: 'countdown' | 'override', active: Countdown) {
     const samples = [...collected.current]
     collected.current = []
     // The transcript's anchor goes, so no further readings are recorded
@@ -1149,7 +1300,48 @@ function DiagnosticsBody(props: BodyProps) {
     }
   }, [countdown])
 
+  /**
+   * The ambient cache's own path to disk, proved separately because it is a
+   * different one (a `'ambient'` fix, from a cached reading of some age,
+   * never averaged).
+   *
+   * Guarded twice.
+   *
+   * By `writeInFlightRef`, for the same reason the tap is: `Button` is a bare
+   * `Pressable` with no debounce, this handler awaits three times before it
+   * writes anything, and two of these running at once inserts two rows and
+   * leaves the list showing whichever `listRecords` happened to finish last.
+   *
+   * And by `countdownRef`, which is a judgement rather than a race fix. An
+   * ambient record written mid-countdown is a legitimate thing to want — it is
+   * a different capture path and the instrument exists to exercise it — but
+   * this screen has one message line and one record list, and both belong to
+   * the countdown while one is running. Concretely: `saveAmbient` takes a
+   * `refreshToken` before its awaits, and `finishCountdown` takes its own
+   * before the refinement, so an ambient save started during a countdown
+   * *cancels the countdown's outcome message* — the improvement claim that is
+   * the entire measurement this screen is carried outdoors to make would
+   * silently never appear. Blocking the control for the seconds a countdown
+   * runs costs a tap that can be repeated; letting it through costs the
+   * reading.
+   */
   async function saveAmbient() {
+    if (writeInFlightRef.current || countdownRef.current !== null) return
+    writeInFlightRef.current = true
+    setWriting(true)
+    try {
+      await writeAmbient()
+    } finally {
+      releaseWrite()
+    }
+  }
+
+  /**
+   * The ambient save itself, split out for the same reason `refineCapture` is:
+   * one `finally` above releases the claim on every exit below, including the
+   * ones that return early and the ones that throw.
+   */
+  async function writeAmbient() {
     const fixNow = ambient.read()
 
     // The cached reading's own answer, not the live one — the cache holds
@@ -1251,6 +1443,22 @@ function DiagnosticsBody(props: BodyProps) {
   // callback has pushed by then.
   const transcriptRows = transcript.current
 
+  /**
+   * What the record on disk is doing, which is NOT the same question as
+   * whether a countdown is running.
+   *
+   * The tap saves immediately, so from that instant there is a real row on
+   * disk — but its position keeps being rewritten until the countdown ends.
+   * The countdown readout implied that and nothing said it, so a sharp number
+   * on a frame that was about to be replaced looked exactly like a stored one,
+   * and walking away at the wrong moment stored a different fix from the one
+   * she read. These three states are said in words next to the control (below)
+   * because doctrine rule 9 forbids leaving it to the frame: the pulse and the
+   * colour may only repeat what the words already say.
+   */
+  const captureState: 'idle' | 'provisional' | 'settled' =
+    countdown !== null ? 'provisional' : settled ? 'settled' : 'idle'
+
   return (
     // Doctrine rule 16: every screen carries a spoken description. This one is
     // a development instrument rather than a designed screen, but it ships in
@@ -1351,7 +1559,48 @@ function DiagnosticsBody(props: BodyProps) {
             // frame rather than as part of it.
             backgroundColor: props.theme.colors.surfaceSunken,
           }}
+          testID="capture-frame"
         >
+          {/*
+            The pulse. A second ring, inset just inside the frame above and
+            drawn in the same grade colour, whose OPACITY breathes while — and
+            only while — a countdown is running. The frame therefore appears to
+            thicken and thin; it never changes hue and never disappears, so the
+            traffic light still answers "how good is this fix" at every instant
+            of the cycle, which is the one thing the pulse is not allowed to
+            cost. It carries no meaning of its own that the words above the
+            button do not already carry (doctrine rule 9).
+
+            `radii.md` rather than `radii.xl`: the ring sits one frame-width
+            inside the outer border, and 16 − 5 is 11, which is exactly
+            `radii.md`. A concentric ring drawn at the outer radius reads as a
+            misprint at the corners.
+          */}
+          {captureState === 'provisional' ? (
+            <Animated.View
+              testID="capture-pulse"
+              pointerEvents="none"
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+              style={{
+                // The ring is laid out against the frame's padding box — the
+                // inner edge of the border above — which is exactly where a
+                // concentric second ring belongs. Written out rather than
+                // spread from `StyleSheet.absoluteFill`, which is a registered
+                // style id and not an object this style can merge.
+                position: 'absolute',
+                top: 0,
+                right: 0,
+                bottom: 0,
+                left: 0,
+                borderWidth: field.frame,
+                borderColor: frameColour,
+                borderRadius: radii.md,
+                opacity: reduceMotion ? PULSE_STEADY_OPACITY : pulse,
+              }}
+            />
+          ) : null}
+
           <View
             style={{
               flexDirection: 'row',
@@ -1364,6 +1613,39 @@ function DiagnosticsBody(props: BodyProps) {
               {shownAccuracyM === null ? '—' : `±${shownAccuracyM.toFixed(1)} m`}
             </Type>
           </View>
+
+          {/*
+            What the row above is a number ABOUT. "±4.0 m" on a screen that has
+            already written a record means one thing while the countdown is
+            still rewriting that record's position and another once it has
+            stopped, and nothing said which — a user reading a sharp figure and
+            walking away stored the fix from the moment she left, not the one
+            she read. Said in words, terse, immediately under the number and
+            immediately above the control, because that is where her eye and her
+            thumb already are.
+          */}
+          {captureState === 'idle' ? null : (
+            <>
+              <View style={{ height: spacing.xs }} />
+              <Type
+                testID="capture-state"
+                variant="label"
+                style={{
+                  color:
+                    captureState === 'provisional'
+                      ? props.theme.colors.statusFair
+                      : props.theme.colors.statusGood,
+                }}
+              >
+                {captureState === 'provisional' ? 'SAVED — STILL SHARPENING' : 'SAVED — SHARPENING DONE'}
+              </Type>
+              <Type variant="small" dim>
+                {captureState === 'provisional'
+                  ? 'Record written; its position is provisional.'
+                  : 'Record written; its position is no longer changing.'}
+              </Type>
+            </>
+          )}
 
           <View style={{ height: spacing.xs }} />
           {countdown === null ? (
@@ -1390,8 +1672,9 @@ function DiagnosticsBody(props: BodyProps) {
 
           <View style={{ height: spacing.sm }} />
           <Button
+            testID="capture-button"
             label={
-              capturing
+              writing
                 ? 'SAVING…'
                 : countdown === null
                   ? 'RECORD FIX'
@@ -1400,7 +1683,7 @@ function DiagnosticsBody(props: BodyProps) {
                     : 'ACCEPT NOW'
             }
             spokenLabel={
-              capturing
+              writing
                 ? 'Saving this capture'
                 : countdown === null
                   ? 'Record the current fix now'
@@ -1411,13 +1694,13 @@ function DiagnosticsBody(props: BodyProps) {
             // once it has — prominence, not a decision.
             kind={countdown === null ? 'fast' : plateaued ? 'primary' : 'accurate'}
             size="field"
-            // Only while the tap is being written. `capturing` is false again
-            // by the time `countdown` is set, so the override is live for every
-            // moment the countdown is running, which §9.1 requires. This is the
-            // visible half of the double-tap guard; `captureInFlightRef` is the
-            // half that actually enforces it, because a `Pressable` can be hit
-            // again before a `setState` has rendered.
-            disabled={capturing}
+            // Only while a write is actually in flight. `writing` is false
+            // again by the time `countdown` is set, so the override is live for
+            // every moment the countdown is running, which §9.1 requires. This
+            // is the visible half of the double-tap guard; `writeInFlightRef`
+            // is the half that actually enforces it, because a `Pressable` can
+            // be hit again before a `setState` has rendered.
+            disabled={writing}
             onPress={() => {
               if (countdown === null) void captureNow()
               else void finishCountdown('override')
@@ -1451,7 +1734,9 @@ function DiagnosticsBody(props: BodyProps) {
             <Type variant="mono" dim>—</Type>
           ) : (
             transcriptRows.map((r) => (
-              <Type key={r.sampleCount} variant="mono">{formatTranscriptRow(r)}</Type>
+              <Type key={r.sampleCount} testID="transcript-row" variant="mono">
+                {formatTranscriptRow(r)}
+              </Type>
             ))
           )}
           <View style={{ height: spacing.xs }} />
@@ -1487,8 +1772,34 @@ function DiagnosticsBody(props: BodyProps) {
         </View>
 
         <View style={{ height: spacing.sm }} />
-        {/* Kept: the ambient cache is a different path and needs its own proof. */}
-        <Button label="Save ambient fix" kind="secondary" onPress={() => void saveAmbient()} />
+        {/*
+          Kept: the ambient cache is a different path and needs its own proof.
+          The control shows both halves of the gate in `saveAmbient` — a write
+          already in flight, and a countdown that owns the message line and the
+          record list until it finishes — because a button that silently does
+          nothing when pressed is indistinguishable, on an instrument with no
+          console attached, from the save having failed.
+        */}
+        <Button
+          testID="ambient-button"
+          label={
+            writing
+              ? 'SAVING…'
+              : countdown === null
+                ? 'Save ambient fix'
+                : 'Save ambient fix — after the countdown'
+          }
+          spokenLabel={
+            writing
+              ? 'Saving; the ambient fix cannot be saved until this finishes'
+              : countdown === null
+                ? 'Save the cached ambient fix'
+                : 'The ambient fix cannot be saved while a countdown is running'
+          }
+          kind="secondary"
+          disabled={writing || countdown !== null}
+          onPress={() => void saveAmbient()}
+        />
 
         {props.message ? (
           <>
