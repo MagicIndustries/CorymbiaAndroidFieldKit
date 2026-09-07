@@ -1,6 +1,3 @@
-export { TrafficLightFrame } from './TrafficLightFrame'
-export { CaptureFramePerimeter, perimeterGeometry } from './CaptureFramePerimeter'
-export type { PerimeterSize } from './CaptureFramePerimeter'
 export { CaptureDial } from './CaptureDial'
 export type { FixGradeName } from './CaptureDial'
 export { isLocked, radiusForMetres } from './dialGeometry'

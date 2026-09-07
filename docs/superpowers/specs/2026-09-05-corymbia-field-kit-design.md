@@ -666,6 +666,17 @@ reaches it.** That falls out of the honest mapping rather than being drawn on to
 it is intended behaviour, not a gap: a capture that never settled looks different from one
 that did, at a glance, with nothing to read. **Do not "fix" this into always locking.**
 
+**The pulse does not carry over, and that is a decision, not an oversight.** The traffic-light
+frame pulsed — breathing slowly in and out while a fix refined — because it had no other way
+to say "still working, stand still": a static rectangle around a changing number is
+indistinguishable from a frozen one. The dial does not have that problem. It is already in
+motion for the whole wait — the ring emptying as the seconds run down, the circle shrinking as
+the fix converges — and both of those motions carry information a glance can read. A pulse on
+top would be a third thing moving, competing with two that mean something, to say what they
+already say. A future reader who finds the dial holding still between those two motions should
+not read that as a missing feature and add a breath back in; the dial was never static to begin
+with, which is exactly the condition the pulse existed to answer.
+
 ### 9.2.1 The lock
 
 When the circle closes onto the crosshair, the fix has converged as far as this receiver
@@ -682,6 +693,27 @@ takes it. The target stops being something aimed at and becomes something hit:
 - **And the words say so.** `GOOD FIX · LOCKED ON`, and the sentence changes. Colour and
   motion never carry the lock alone (doctrine rule 9): in glare, or for a colour-blind
   reader, the word is what survives.
+
+**The numbers, for the record** (`CaptureDial.tsx`'s lock constants and the `field` scale,
+`packages/tokens/src/scales.ts`). These were settled by eye, on the S25 hardware, watching the
+animated mockup — the project owner asked twice for the effect to read as *stronger*, not
+softer, so treat them as measurements this design already made, not as defaults a future pass
+should tune down toward the vaguer language above:
+
+- **The snap** reaches 4.5px inward before easing back onto the crosshair: 100ms in, 150ms
+  out, 250ms end to end (the "roughly a quarter of a second" above) — the figure that survived
+  the mockup review that asked for it to read as stronger than an earlier, too-subtle pass.
+- **The fill and the outline firm together**, over that same 250ms: the accuracy circle's fill
+  opacity rises from 0.15 to 0.45, its outline weight from 1.75px to 4px, and the crosshair's
+  own stroke thickens from 3px to that same 4px as it lights in the grade colour.
+- **The ripple** reaches 84px past the crosshair's own radius — the other figure the owner
+  asked to be made more visible, not softened — with the second ring starting 190ms after the
+  first (the "about a fifth of a second" above). Each ring runs its own 600ms outward, holding
+  near-full opacity (0.9, not literally 1) for the first third of that run before falling away.
+  The 600ms duration of each ring's own run is a judgement call this implementation made to
+  read as an outward ripple rather than a flash; unlike the snap and the ripple's reach, it was
+  not itself a figure the mockup review settled, and a later pass is free to retune it without
+  reopening that review.
 
 ### 9.2.2 Motion, and when to refuse it
 

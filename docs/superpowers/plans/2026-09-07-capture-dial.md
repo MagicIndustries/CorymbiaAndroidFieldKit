@@ -329,6 +329,8 @@ The controller builds and installs. These decide whether the design works and no
 - **The ring empties smoothly** and reaches empty exactly as the countdown ends. *Wrong:* visible once-a-second steps, or a sliver left at zero.
 - **Reduced motion**: with it on, the dial still shows the locked state — filled circle, lit crosshair, the word — and simply does not ripple. *Wrong:* the lock becomes invisible.
 - **Landscape and maximum font scale**: the dial fits, and the button stays reachable.
+- **A capture that starts already at the floor locks on the first frame** the countdown ring appears on, because the collected samples are seeded synchronously with the tap's own reading. *Wrong:* the ripple reads as a glitch on that first frame rather than as a confirmation.
+- **The resting accuracy circle is largest exactly when it is faintest** — 0.15 opacity at big radii, early in a countdown — and the whole design's claim is that the circle makes convergence visible at a glance in outdoor glare. *Wrong:* it is hard to make out early in the wait, which would be a legibility regression the lock work introduced as a side effect.
 
 ## Self-review
 
