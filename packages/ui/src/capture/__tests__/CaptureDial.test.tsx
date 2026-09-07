@@ -5,7 +5,13 @@ import type { ReactTestRendererNode } from 'react-test-renderer'
 import { darkTheme } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
 import { CaptureDial } from '../CaptureDial'
-import { OUTER_RADIUS_PX, TARGET_RADIUS_PX, radiusForMetres, ringDash } from '../dialGeometry'
+import {
+  MIN_RADIUS_PX,
+  OUTER_RADIUS_PX,
+  TARGET_RADIUS_PX,
+  radiusForMetres,
+  ringDash,
+} from '../dialGeometry'
 
 const renderDial = (props: {
   grade: 'good' | 'fair' | 'poor'
@@ -25,9 +31,26 @@ const renderDial = (props: {
 // which is the same order `collectDialLayerOrder` below returns them in.
 const LAYER_TEST_IDS = ['dial-ring-track', 'dial-ring-progress', 'dial-accuracy', 'dial-crosshair']
 
-function collectDialLayerOrder(node: ReactTestRendererNode | ReactTestRendererNode[] | null): string[] {
+// The same layers, but for the span the lock's ripple is actually playing
+// (spec §9.2.1): the ripple's two rings sit between the accuracy circle and
+// the crosshair. This is the order the doc comment on `CaptureDial` claims —
+// "painting it last... is what guarantees" the crosshair is never obscured
+// by the ripple — and which nothing checked before this task.
+const LAYER_TEST_IDS_WITH_RIPPLE = [
+  'dial-ring-track',
+  'dial-ring-progress',
+  'dial-accuracy',
+  'dial-ripple-1',
+  'dial-ripple-2',
+  'dial-crosshair',
+]
+
+function collectDialLayerOrder(
+  node: ReactTestRendererNode | ReactTestRendererNode[] | null,
+  targetIds: string[] = LAYER_TEST_IDS,
+): string[] {
   const order: string[] = []
-  const targets = new Set(LAYER_TEST_IDS)
+  const targets = new Set(targetIds)
 
   function walk(n: ReactTestRendererNode | ReactTestRendererNode[] | null) {
     if (n == null) return
@@ -263,17 +286,24 @@ describe('CaptureDial the lock (spec §9.2.1)', () => {
    * holds `locked` itself — it computed it to pass down as this very prop.
    * What this component still owes doctrine rule 9 on its own is a fact
    * about the lock that survives independently of this component's own
-   * colour and motion: `accessibilityState.selected`, readable off the root
+   * colour and motion: `accessibilityValue.text`, readable off the root
    * view without inspecting a stroke colour or waiting out an animation.
+   * `accessibilityValue` rather than `accessibilityState.selected` (review
+   * fix, task 3): "selected" is a chosen-from-a-group semantic that does not
+   * actually describe a fix converging, where a literal text fact does.
    */
   it('exposes the lock on the dial itself as a plain fact, not only through colour', async () => {
     await renderDial({ grade: 'good', accuracyM: 1, locked: true })
-    expect(screen.getByTestId('capture-dial').props.accessibilityState).toEqual({ selected: true })
+    expect(screen.getByTestId('capture-dial').props.accessibilityValue).toEqual({
+      text: 'Locked on',
+    })
   })
 
   it('exposes not-locked the same way', async () => {
     await renderDial({ grade: 'good', accuracyM: 7 })
-    expect(screen.getByTestId('capture-dial').props.accessibilityState).toEqual({ selected: false })
+    expect(screen.getByTestId('capture-dial').props.accessibilityValue).toEqual({
+      text: 'Not locked',
+    })
   })
 })
 
@@ -343,6 +373,36 @@ describe('CaptureDial the lock: the ripple actually starts (and does not replay)
     expect(parallelSpy).toHaveBeenCalledTimes(1)
   })
 
+  /**
+   * THE RIPPLE MUST NEVER PAINT OVER THE CROSSHAIR EITHER.
+   *
+   * The component's own doc comment claims painting the crosshair last
+   * "guarantees" it survives the ripple expanding past it, but nothing
+   * checked that claim before this task — every layer-order test elsewhere
+   * in this file renders with no ripple in the tree at all. This test
+   * reaches a render where the ripple is actually active (a genuine
+   * unlocked→locked transition, motion allowed, asserted immediately after
+   * the rerender that starts it, while `rippling` is still true) and checks
+   * the full six-layer order including both ripple rings.
+   */
+  it('keeps the ripple beneath the crosshair while the ripple is actually playing', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
+    const { rerender } = await renderDial({ grade: 'good', accuracyM: 7, remaining: 0.5 })
+    await screen.findByTestId('capture-dial')
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={1} remaining={0.5} locked />
+      </ThemeProvider>,
+    )
+
+    expect(screen.getByTestId('dial-ripple-1')).toBeTruthy()
+    expect(screen.getByTestId('dial-ripple-2')).toBeTruthy()
+    expect(collectDialLayerOrder(screen.toJSON(), LAYER_TEST_IDS_WITH_RIPPLE)).toEqual(
+      LAYER_TEST_IDS_WITH_RIPPLE,
+    )
+  })
+
   it('never starts the ripple when the dial mounts already locked', async () => {
     jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
     const parallelSpy = jest.spyOn(Animated, 'parallel')
@@ -401,5 +461,74 @@ describe('CaptureDial the lock: the ripple actually starts (and does not replay)
       </ThemeProvider>,
     )
     expect(parallelSpy).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('CaptureDial the lock: the snap never draws a negative radius', () => {
+  // Same fake-timer setup as the ripple-start block above, for the same
+  // reason: the snap plays out over real animation frames (100ms in, 150ms
+  // out), and only fake timers make sampling mid-flight deterministic under
+  // Jest.
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] })
+  })
+
+  afterEach(() => {
+    jest.clearAllTimers()
+    jest.useRealTimers()
+    jest.restoreAllMocks()
+  })
+
+  /**
+   * THE SNAP MUST NEVER PUSH THE ACCURACY CIRCLE'S RADIUS BELOW MIN_RADIUS_PX.
+   *
+   * `radiusForMetres` clamps at `MIN_RADIUS_PX` so the SVG this feeds is
+   * never handed a negative or NaN radius (dialGeometry.ts's own stated
+   * discipline). The lock's snap adds a further, animated offset on top of
+   * that already-clamped radius — unclamped, `LOCK_SNAP_PX` (4.5) is bigger
+   * than the floor itself (4), so a fix locking at or near that floor used
+   * to be able to swing the drawn radius negative mid-snap.
+   *
+   * 0.5 m is comfortably under the ~0.94 m accuracy at which
+   * `radiusForMetres` itself starts clamping to `MIN_RADIUS_PX` — so
+   * `radiusForMetres(0.5) === MIN_RADIUS_PX` exactly, leaving zero headroom
+   * for the snap. Sampling `dial-accuracy`'s own `r` prop at every 25ms
+   * across the full 250ms settle (rather than only at a single guessed
+   * instant) is what makes this a proof the radius never dips below the
+   * floor at any point during the snap-in *or* the ease-out, not just a
+   * spot check of one frame.
+   */
+  it('clamps the snap so the accuracy circle never draws a negative radius at the measured floor', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
+    const { rerender } = await renderDial({ grade: 'good', accuracyM: 7 })
+    await screen.findByTestId('capture-dial')
+    await act(async () => {
+      jest.advanceTimersByTime(0)
+    })
+
+    expect(radiusForMetres(0.5)).toBe(MIN_RADIUS_PX)
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={0.5} locked />
+      </ThemeProvider>,
+    )
+
+    let minR = Number.POSITIVE_INFINITY
+    for (let sample = 0; sample < 11; sample++) {
+      await act(async () => {
+        jest.advanceTimersByTime(25)
+      })
+      const r = screen.getByTestId('dial-accuracy').props.r
+      minR = Math.min(minR, r)
+    }
+
+    expect(minR).toBeGreaterThanOrEqual(MIN_RADIUS_PX)
+    // Zero headroom at this accuracy means the clamp does not just keep the
+    // radius non-negative, it holds the circle exactly at the floor rather
+    // than letting the snap move it at all — the scaled-by-headroom
+    // behaviour the component's own comment describes, not merely a
+    // last-resort floor.
+    expect(minR).toBeCloseTo(MIN_RADIUS_PX, 5)
   })
 })

@@ -71,11 +71,14 @@ export const field = {
    * so the grade border stays the dominant edge of the frame, which is what a
    * survey position is judged by.
    *
-   * Reused as-is, not duplicated under a new name, for `CaptureDial`'s other
-   * thin linework: the accuracy circle's outline and the crosshair's two
-   * lines (spec §9.2). Neither is a countdown ring, but both want exactly the
-   * "thin, secondary stroke" weight this token already establishes for a
-   * field control, next to `dialRing`'s thicker, standalone edge.
+   * Reused as-is, not duplicated under a new name, for two more pieces of
+   * `CaptureDial`'s own thin linework (spec §9.2.1): the crosshair's stroke
+   * while unlocked (it thickens to `dialAccuracyOutlineLocked` once locked),
+   * and the lock's ripple rings, which want the same "thin, secondary
+   * stroke" weight as the countdown ring rather than a weight of their own.
+   * It is *not* reused for the accuracy circle's own outline — that wants a
+   * softer resting weight than a countdown ring calls for, so it has its own
+   * pair of tokens below.
    */
   countdown: 3,
   /**
@@ -97,6 +100,23 @@ export const field = {
    * `countdown` nests inside `frame`.
    */
   dialRing: 10,
+  /**
+   * The accuracy circle's outline weight before a fix locks (spec §9.2.1:
+   * unlocked, the circle is "a soft region of uncertainty"). Promoted here
+   * from a local constant in `CaptureDial.tsx` for the same reason
+   * `dialRing` was: it is an ergonomic line weight on a field control, which
+   * is exactly what this scale exists to hold, not a rendering detail
+   * private to one SVG.
+   */
+  dialAccuracyOutline: 1.75,
+  /**
+   * The accuracy circle's outline weight once a fix locks, and — reused
+   * as-is, because the two firm together as one beat, not as two
+   * separately-tuned effects (spec §9.2.1) — the crosshair's own thickened
+   * stroke once lit. "A definite object on the target," firm rather than
+   * soft.
+   */
+  dialAccuracyOutlineLocked: 4,
 } as const
 
 /**

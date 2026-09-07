@@ -4,7 +4,13 @@ import Svg, { Circle, G, Line } from 'react-native-svg'
 import { field } from '@corymbia/tokens'
 import { Type } from '../primitives'
 import { useTheme } from '../theme'
-import { OUTER_RADIUS_PX, TARGET_RADIUS_PX, radiusForMetres, ringDash } from './dialGeometry'
+import {
+  MIN_RADIUS_PX,
+  OUTER_RADIUS_PX,
+  TARGET_RADIUS_PX,
+  radiusForMetres,
+  ringDash,
+} from './dialGeometry'
 
 export type FixGradeName = 'good' | 'fair' | 'poor'
 
@@ -68,17 +74,6 @@ const LOCK_SNAP_OUT_MS = 150
  * the lock (spec §9.2.1) land in one beat rather than trickling in.
  */
 const LOCK_SETTLE_MS = LOCK_SNAP_IN_MS + LOCK_SNAP_OUT_MS
-
-/**
- * The accuracy circle's outline weight before a fix locks and once it has
- * (spec §9.2.1: "its interior fills and its outline firms"). Unlocked, the
- * circle is "a soft region of uncertainty"; locked, "a definite object on
- * the target" — and the same locked weight is reused below for the
- * crosshair's own thickened stroke, because the two firm together as one
- * beat, not as two separately-tuned effects.
- */
-const LOCK_OUTLINE_UNLOCKED = 1.75
-const LOCK_OUTLINE_LOCKED = 4
 
 /**
  * The accuracy circle's fill opacity, unlocked and locked (spec §9.2.1).
@@ -147,11 +142,15 @@ const LOCK_RIPPLE_PEAK_OPACITY = 0.9
  *
  * Colour never carries the grade alone (doctrine rule 9): the grade word
  * is always rendered alongside the colour. The lock is held to the same
- * rule (spec §9.2.1): `accessibilityState.selected` on the outer view
- * carries the lock as a plain fact, independent of the colour and motion
- * this component also uses to show it, so a screen (or a screen reader)
- * can render or announce a word from it without inferring anything from a
- * radius or a hue. `GOOD FIX · LOCKED ON` itself is the next task's screen
+ * rule (spec §9.2.1): `accessibilityValue.text` on the outer view carries
+ * the lock as a plain fact, independent of the colour and motion this
+ * component also uses to show it, so a screen (or a screen reader) can
+ * render or announce a word from it without inferring anything from a
+ * radius or a hue. `accessibilityValue` rather than
+ * `accessibilityState.selected` — "selected" is normally a chosen-from-a-
+ * group state (a tab, a list row), which the lock is not; a literal text
+ * fact ("Locked on") says what actually happened without leaning on that
+ * borrowed meaning. `GOOD FIX · LOCKED ON` itself is the next task's screen
  * copy, not drawn by this component — see `locked` below.
  */
 export function CaptureDial({
@@ -180,9 +179,9 @@ export function CaptureDial({
    * instant `locked` turns true. `GOOD FIX · LOCKED ON` — the words that
    * carry the lock where colour and motion cannot (doctrine rule 9) — is
    * the next task's screen-level copy; this component exposes the same
-   * fact as `accessibilityState.selected` on its own root view so that
-   * screen has something to render a word from that does not depend on
-   * this component's colour or motion at all.
+   * fact as `accessibilityValue.text` on its own root view so that screen
+   * has something to render a word from that does not depend on this
+   * component's colour or motion at all.
    */
   locked?: boolean
   children?: React.ReactNode
@@ -219,12 +218,13 @@ export function CaptureDial({
     }
   }, [])
 
-  // `snapOffset` is a transient offset added to the accuracy circle's own
-  // radius, not a replacement for it — it always starts and ends at 0, so
-  // `accuracyM` (and therefore `accuracyRadius`) can keep changing under
-  // the animation without this component having to track a moving target
-  // inside the Animated graph.
-  const snapOffset = useRef(new Animated.Value(0)).current
+  // `snapProgress` drives the snap's shape and timing only — 0 at rest,
+  // -1 at the deepest point of the snap-in, back to 0 as it eases out — not
+  // its size in pixels. Keeping it unit-range is what lets the pixel size be
+  // computed fresh below, every render, from the current accuracy: the
+  // progress animation itself never needs to know how many pixels are
+  // actually available.
+  const snapProgress = useRef(new Animated.Value(0)).current
   // 0 = unlocked (soft, thin); 1 = locked and settled (filled, firm). Drives
   // the accuracy circle's fill opacity and outline weight, and the
   // crosshair's thickened stroke, together.
@@ -251,8 +251,8 @@ export function CaptureDial({
       // Losing lock is not itself an animated moment — spec §9.2.1
       // describes only gaining it — so this settles straight back rather
       // than easing.
-      snapOffset.stopAnimation()
-      snapOffset.setValue(0)
+      snapProgress.stopAnimation()
+      snapProgress.setValue(0)
       lockLevel.stopAnimation()
       lockLevel.setValue(0)
       setRippling(false)
@@ -264,7 +264,7 @@ export function CaptureDial({
       // filled circle, lit crosshair — and run no animation at all (spec
       // §9.2.2). The state is the information; the ripple is only the
       // emphasis, so skipping it here costs nothing.
-      snapOffset.setValue(0)
+      snapProgress.setValue(0)
       lockLevel.setValue(1)
       setRippling(false)
       return
@@ -275,22 +275,25 @@ export function CaptureDial({
       // unchanged, or a mount that starts locked. The moment already
       // played, or never happens here at all; either way it is not
       // replayed.
-      snapOffset.setValue(0)
+      snapProgress.setValue(0)
       lockLevel.setValue(1)
       setRippling(false)
       return
     }
 
     // A genuine transition into lock, with motion allowed: all four parts
-    // of the moment (spec §9.2.1) start together.
+    // of the moment (spec §9.2.1) start together. `snapProgress` runs a full
+    // -1..0..-1..0 unit sweep regardless of accuracy — the pixel scaling
+    // that keeps the accuracy circle's radius off negative territory is
+    // applied afterwards, at render, via `snapReachPx` below, not here.
     Animated.sequence([
-      Animated.timing(snapOffset, {
-        toValue: -LOCK_SNAP_PX,
+      Animated.timing(snapProgress, {
+        toValue: -1,
         duration: LOCK_SNAP_IN_MS,
         easing: Easing.out(Easing.quad),
         useNativeDriver: false,
       }),
-      Animated.timing(snapOffset, {
+      Animated.timing(snapProgress, {
         toValue: 0,
         duration: LOCK_SNAP_OUT_MS,
         easing: Easing.out(Easing.quad),
@@ -308,7 +311,7 @@ export function CaptureDial({
     setRippling(true)
     ripple1.setValue(0)
     ripple2.setValue(0)
-    Animated.parallel([
+    const rippleAnimation = Animated.parallel([
       Animated.timing(ripple1, {
         toValue: 1,
         duration: LOCK_RIPPLE_DURATION_MS,
@@ -324,12 +327,54 @@ export function CaptureDial({
       ]),
       // Once, then nothing (spec §9.2.1): nothing re-arms this effect
       // except `locked` genuinely going false and true again.
-    ]).start(() => setRippling(false))
-  }, [lockedNow, reduceMotion, lockLevel, ripple1, ripple2, snapOffset])
+    ])
+
+    // Guards the completion callback below against firing its `setRippling`
+    // after this run of the effect has been cleaned up — a dial unmounting,
+    // or re-locking, mid-ripple — mirroring the `cancelled` guard the
+    // reduced-motion effect above already uses for the same reason. Calling
+    // `setState` after unmount is harmless in this React version, but a
+    // *cancelled* animation's completion callback still firing is not
+    // "once, then nothing" — it is a value change nobody asked for.
+    let cancelled = false
+    rippleAnimation.start(() => {
+      if (!cancelled) setRippling(false)
+    })
+
+    return () => {
+      cancelled = true
+      snapProgress.stopAnimation()
+      lockLevel.stopAnimation()
+      rippleAnimation.stop()
+    }
+  }, [lockedNow, reduceMotion, lockLevel, ripple1, ripple2, snapProgress])
+
+  // How much of the snap's full reach (`LOCK_SNAP_PX`) can actually play at
+  // this accuracy before the accuracy circle's own radius would run past
+  // `MIN_RADIUS_PX` into negative territory. `radiusForMetres` never returns
+  // less than `MIN_RADIUS_PX` itself, but this snap adds a further offset on
+  // top of that already-clamped radius — and a fix locking at or near the
+  // floor (this hardware's measured floor is 1.0-1.4 m, dialGeometry.ts;
+  // readings jitter around it) can leave less than `LOCK_SNAP_PX` of room,
+  // which is exactly the negative-radius, silent-blank-SVG failure
+  // dialGeometry.ts otherwise guards against on its own arithmetic — this is
+  // that same discipline, applied to an offset added after the fact in a
+  // different file.
+  //
+  // Scaled, not hard-floored: clamping the *summed* radius at the floor
+  // would let `snapProgress` keep moving underneath a radius pinned in
+  // place, which reads as the circle sticking rather than snapping — a
+  // stall, not a snap, and a different bug from a blank. Scaling the snap
+  // itself by the room actually available keeps the motion proportionate at
+  // every accuracy instead: full `LOCK_SNAP_PX` ordinarily, smaller near the
+  // floor, and zero only where there is truly no room left — never a jump to
+  // negative.
+  const snapReachPx = Math.max(0, Math.min(LOCK_SNAP_PX, accuracyRadius - MIN_RADIUS_PX))
+  const snapOffsetPx = Animated.multiply(snapProgress, snapReachPx)
 
   const accuracyOutlineWeight = lockLevel.interpolate({
     inputRange: [0, 1],
-    outputRange: [LOCK_OUTLINE_UNLOCKED, LOCK_OUTLINE_LOCKED],
+    outputRange: [field.dialAccuracyOutline, field.dialAccuracyOutlineLocked],
   })
   const accuracyFillOpacity = lockLevel.interpolate({
     inputRange: [0, 1],
@@ -337,12 +382,15 @@ export function CaptureDial({
   })
   const crosshairWeight = lockLevel.interpolate({
     inputRange: [0, 1],
-    outputRange: [field.countdown, LOCK_OUTLINE_LOCKED],
+    outputRange: [field.countdown, field.dialAccuracyOutlineLocked],
   })
   const crosshairColour = lockedNow ? colour : theme.colors.textDim
 
   return (
-    <View testID="capture-dial" accessibilityState={{ selected: lockedNow }}>
+    <View
+      testID="capture-dial"
+      accessibilityValue={{ text: lockedNow ? 'Locked on' : 'Not locked' }}
+    >
       <Svg viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`} width="100%" height="100%">
         <Circle
           testID="dial-ring-track"
@@ -370,7 +418,7 @@ export function CaptureDial({
           testID="dial-accuracy"
           cx={CENTER}
           cy={CENTER}
-          r={Animated.add(accuracyRadius, snapOffset)}
+          r={Animated.add(accuracyRadius, snapOffsetPx)}
           fill={colour}
           fillOpacity={accuracyFillOpacity}
           stroke={colour}

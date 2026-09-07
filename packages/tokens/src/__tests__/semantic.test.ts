@@ -111,5 +111,12 @@ describe('themes', () => {
     // no separate always-on grade border to lean on (see the doc comment in
     // scales.ts).
     expect(field.dialRing).toBe(10)
+    // The accuracy circle's own outline weights, unlocked and locked — moved
+    // here from local constants in CaptureDial.tsx (review fix, task 3): the
+    // same "ergonomic line weight on a field control" argument that already
+    // justified promoting `dialRing` applies to these two as well. The
+    // locked weight is also reused, unchanged, for the crosshair once lit.
+    expect(field.dialAccuracyOutline).toBe(1.75)
+    expect(field.dialAccuracyOutlineLocked).toBe(4)
   })
 })

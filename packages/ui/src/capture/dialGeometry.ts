@@ -61,8 +61,14 @@ const RING_SLACK_PX = 12
  * is degenerate input — GPS never reports exactly zero metres — but it must
  * still resolve to a real, visible, positive radius rather than blanking the
  * SVG it feeds). Small enough to read as a point well inside the crosshair.
+ *
+ * Exported (unlike the constants above and below it) because `CaptureDial`'s
+ * own lock snap adds a further, animated offset on top of a radius this
+ * module already returns clamped — and that offset needs the same floor to
+ * scale itself against, or the discipline enforced here is defeated one file
+ * away. See the snap's own comment in `CaptureDial.tsx`.
  */
-const MIN_RADIUS_PX = 4
+export const MIN_RADIUS_PX = 4
 
 /**
  * The maximum radius `radiusForMetres` will ever return.
