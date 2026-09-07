@@ -603,6 +603,22 @@ export function CaptureDial({
             </>
           ) : null}
           <G testID="dial-crosshair">
+            {/*
+             * The ring around the cross is what makes this read as a reticule
+             * rather than a plus sign. Judged on the device: a bare cross in the
+             * middle of a screen reads as "add", and people try to tap it — which
+             * it is not, and never becomes. It is the target the accuracy circle
+             * closes onto, and a reticule says that without a word.
+             */}
+            <AnimatedCircle
+              testID="dial-crosshair-ring"
+              cx={CENTER}
+              cy={CENTER}
+              r={TARGET_RADIUS_PX}
+              fill="none"
+              stroke={crosshairColour}
+              strokeWidth={crosshairWeight}
+            />
             <AnimatedLine
               testID="dial-crosshair-horizontal"
               x1={CENTER - TARGET_RADIUS_PX}

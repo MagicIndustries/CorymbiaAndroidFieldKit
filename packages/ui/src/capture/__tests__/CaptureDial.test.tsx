@@ -176,6 +176,23 @@ describe('CaptureDial', () => {
     expect(vertical.props.y2 - vertical.props.y1).toBeCloseTo(2 * TARGET_RADIUS_PX, 6)
   })
 
+  it('rings the crosshair, so it reads as a reticule rather than a tappable plus', async () => {
+    // Judged on the device: a bare cross in the middle of a screen reads as
+    // "add" and invites a tap it will never answer. The ring is what says
+    // target, and it must sit exactly on the radius the circle closes onto.
+    await renderDial({ grade: 'good', accuracyM: 3 })
+    const ring = screen.getByTestId('dial-crosshair-ring')
+    expect(ring.props.r).toBeCloseTo(TARGET_RADIUS_PX, 6)
+  })
+
+  it('lights the crosshair ring with the rest of the crosshair', async () => {
+    await renderDial({ grade: 'good', accuracyM: 3 })
+    expect(screen.getByTestId('dial-crosshair-ring').props.stroke).toEqual({
+      type: 0,
+      payload: processColor(darkTheme.colors.textDim),
+    })
+  })
+
   it('renders the crosshair in textDim while unlit', async () => {
     await renderDial({ grade: 'good', accuracyM: 3 })
     const horizontal = screen.getByTestId('dial-crosshair-horizontal')
