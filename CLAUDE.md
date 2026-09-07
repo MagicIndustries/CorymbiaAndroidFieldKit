@@ -30,8 +30,8 @@ Commands, from the repository root:
 
 ## Native builds
 
-`apps/fieldkit/android/` is generated and git-ignored. Two things about it have
-already cost time once each:
+`apps/fieldkit/android/` is generated and git-ignored. Three things about it have
+already cost time:
 
 - **`expo run:android` never exits.** It keeps the Metro bundler alive by design, so
   waiting for the process to end waits forever. To tell whether an install actually
@@ -42,6 +42,13 @@ already cost time once each:
   --platform android`. Run it after editing `app.json`, then build. Prebuild also
   reports config that needs a package installed to work at all — it is worth reading
   its output rather than skipping past it.
+- **Wireless ADB's port rotates**, so a `host:port` that worked an hour ago gets
+  "connection refused". Rediscover with `adb mdns services` — and note it can
+  advertise more than one entry for the same device, where the first is not
+  necessarily the live one. Try the others before concluding the phone is offline.
+  Building from `apps/fieldkit/android/` also leaves the shell there, so a following
+  `adb install apps/fieldkit/...` resolves against the wrong directory; use an
+  absolute path for the APK.
 
 A release build (`npx expo run:android --variant release`) embeds the JavaScript
 bundle, so the APK runs with no development machine attached. That is the build to
