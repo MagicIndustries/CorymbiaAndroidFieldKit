@@ -17,6 +17,7 @@ import {
   type Device,
   type FieldRecord,
   type Fix,
+  type FixRefinement,
 } from '@corymbia/data'
 
 /**
@@ -191,7 +192,12 @@ export type Capture = {
    * record is kept: its capture number may already be written on a sample
    * tube, and a real measurement is not thrown away for a second attempt that
    * might be no better. Every run appends its own `'edited'` event, so the
-   * chain of custody carries both.
+   * chain of custody carries both — but **only the sharper of the two fixes is
+   * ever actually stored**. `refineRecordFix` (`packages/data`) keeps the
+   * better fix by `accuracyM` alone and reports which one won; a run that
+   * comes back worse leaves the record untouched and this hook says so on
+   * screen (`discardedRunMessage`) rather than showing a change that did not
+   * happen.
    *
    * A no-op unless a finished capture is actually on screen (`recorded`, with
    * a record) and nothing is already being written.
@@ -364,6 +370,45 @@ const FINISH_WORDS: Record<FinishReason, string> = {
   countdown: 'The countdown ran out.',
   override: 'You accepted it early.',
   plateau: 'The fix stopped improving, so the countdown finished itself.',
+}
+
+/** An accuracy as this hook's messages speak of it: `±3.2 m`. */
+function formatAccuracyM(accuracyM: number): string {
+  return `±${accuracyM.toFixed(1)} m`
+}
+
+/**
+ * What the screen says when a run's fix loses to what the record already
+ * held — `refineRecordFix` reports `applied: false` (spec §9.2.1's TRY AGAIN,
+ * "keep the better fix").
+ *
+ * She stood still for the whole wait `reason` describes, and this is what it
+ * bought her: nothing, this time, because the fix already on the record was
+ * sharper. Silence here — reusing `FINISH_WORDS[reason]` alone — would read
+ * as the countdown having done its usual job, which is exactly the untrue
+ * impression the record-layer guard exists to stop the record itself from
+ * giving; the screen owes her the same honesty.
+ *
+ * `keptAccuracyM` is null only in the type system's eyes: `refineRecordFix`
+ * only ever reports `applied: false` when the record already carried a
+ * positioned fix (there is nothing to be worse than otherwise, so the write
+ * always applies), but that fact lives in `packages/data`, not in this
+ * function's signature — so the null case is still handled, honestly, rather
+ * than asserted away.
+ */
+function discardedRunMessage(
+  reason: FinishReason,
+  reachedAccuracyM: number,
+  keptAccuracyM: number | null,
+): string {
+  const kept =
+    keptAccuracyM === null
+      ? 'the fix already on the record'
+      : `the ${formatAccuracyM(keptAccuracyM)} already on the record`
+  return (
+    `${FINISH_WORDS[reason]} This run reached ${formatAccuracyM(reachedAccuracyM)} — no better ` +
+    `than ${kept}, so that fix was kept.`
+  )
 }
 
 export function useCapture(deps: CaptureDeps): Capture {
@@ -767,9 +812,9 @@ export function useCapture(deps: CaptureDeps): Capture {
       return
     }
 
-    let refined: FieldRecord
+    let outcome: FixRefinement
     try {
-      refined = await refineRecordFix(db, {
+      outcome = await refineRecordFix(db, {
         recordId: active.recordId,
         fix: attempt.fix,
         deviceId: device.id,
@@ -783,8 +828,19 @@ export function useCapture(deps: CaptureDeps): Capture {
     }
     if (!mounted.current || generationAtFinish !== generation.current) return
 
-    setRecord(refined)
-    setMessage(FINISH_WORDS[reason])
+    setRecord(outcome.record)
+    // `attempt.fix` is known positioned — `buildDeliberateFix` never returns
+    // `ok: true` with a `'none'` fix — but the type is the general `Fix`
+    // union, so the accuracy is reached the same honest way `outcome.record`'s
+    // is below: a real discriminant check, not an assertion.
+    const reachedAccuracyM = attempt.fix.quality === 'none' ? null : attempt.fix.accuracyM
+    const keptAccuracyM =
+      outcome.record.fix.quality === 'none' ? null : outcome.record.fix.accuracyM
+    setMessage(
+      outcome.applied || reachedAccuracyM === null
+        ? FINISH_WORDS[reason]
+        : discardedRunMessage(reason, reachedAccuracyM, keptAccuracyM),
+    )
   }
 
   // The latest `finishCountdown`, so the timer and the plateau effect below can

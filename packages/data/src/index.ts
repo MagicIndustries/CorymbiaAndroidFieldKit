@@ -40,6 +40,7 @@ export type {
   AltitudeEvidence,
   AccuracyConvention,
   AltitudeReference,
+  FixRefinement,
 } from './repositories/records'
 export { appendEvent, listEvents } from './repositories/events'
 export type { EventAction, EventEntry } from './repositories/events'

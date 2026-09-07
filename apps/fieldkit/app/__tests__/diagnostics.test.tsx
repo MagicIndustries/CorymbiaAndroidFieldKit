@@ -246,11 +246,16 @@ beforeEach(() => {
     mockStored = [created, ...mockStored]
     return Promise.resolve(created)
   })
+  // Mirrors the real `refineRecordFix`'s `{ record, applied }` shape
+  // (`packages/data`). This screen has no retry, so its one refinement per
+  // tap is always an improvement over the tap's own accuracy in practice —
+  // see that function's doc comment — and the fixture always applies for the
+  // same reason.
   mockRepo.refineRecordFix.mockImplementation((_db: unknown, input: { recordId: string; fix: Fix }) => {
     const existing = mockStored.find((r) => r.id === input.recordId)
     const refined: FieldRecord = { ...(existing ?? recordFrom(input.fix)), fix: input.fix }
     mockStored = mockStored.map((r) => (r.id === refined.id ? refined : r))
-    return Promise.resolve(refined)
+    return Promise.resolve({ record: refined, applied: true })
   })
 })
 

@@ -265,10 +265,15 @@ beforeEach(() => {
     Promise.resolve(recordFrom(input.fix)),
   )
   // Amends the row that is already there, rather than minting a new one with
-  // a fresh capture number — see `mockRecords`.
+  // a fresh capture number — see `mockRecords`. Mirrors the real
+  // `refineRecordFix`'s `{ record, applied }` shape (`packages/data`); the
+  // default here always applies, which is what every test not specifically
+  // about the "keep the better fix" guard wants — that guard is proved
+  // against real SQL in `records.test.ts`, and tests below that care about
+  // `applied` override this per-call with `mockImplementationOnce`.
   mockRepo.refineRecordFix.mockImplementation(
     (_db: unknown, input: { recordId: string; fix: Fix }) =>
-      Promise.resolve(amendRecord(input.recordId, { fix: input.fix })),
+      Promise.resolve({ record: amendRecord(input.recordId, { fix: input.fix }), applied: true }),
   )
 })
 
@@ -683,6 +688,43 @@ describe('useCapture', () => {
         6,
       )
       expect(result.current.refining).toBe(true)
+    })
+
+    /**
+     * KEEP THE BETTER FIX. `refineRecordFix` (`packages/data`) is what
+     * actually decides whether a run's fix wins — proved against real SQL in
+     * `records.test.ts` — so this test tells the mock what that function
+     * would report (`applied: false`, the record unchanged) and checks that
+     * the hook relays it honestly rather than treating a discarded write as
+     * an ordinary finish.
+     */
+    it('leaves the record untouched, and says so, when a repeat run comes back worse', async () => {
+      const { result } = await mountCapture()
+      await captureAndFinish(result)
+      const recordAfterFirstRun = result.current.record
+      if (recordAfterFirstRun === null || recordAfterFirstRun.fix.quality === 'none') {
+        throw new Error('the first run should have left a deliberate fix on the record')
+      }
+
+      mockRepo.refineRecordFix.mockImplementationOnce(() =>
+        Promise.resolve({ record: recordAfterFirstRun, applied: false }),
+      )
+
+      await act(async () => {
+        result.current.refineAgain()
+      })
+      await settle()
+      await emitFlat(9, 5)
+      await advanceCaps(1)
+
+      expect(result.current.phase).toBe('recorded')
+      // Not merely equal by value — the very record `refineRecordFix` handed
+      // back, because nothing about it changed.
+      expect(result.current.record).toBe(recordAfterFirstRun)
+      expect(result.current.message).toContain(
+        `no better than the ±${recordAfterFirstRun.fix.accuracyM.toFixed(1)} m already on the record`,
+      )
+      expect(result.current.message).toContain('so that fix was kept')
     })
 
     it('reports refining only for the repeat run', async () => {

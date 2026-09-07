@@ -1069,7 +1069,30 @@ function describeAccuracy(accuracyM: number | null): string {
 }
 
 /**
- * Replaces a record's fix with a better measurement of the same capture.
+ * What a call to `refineRecordFix` settled: the record as it now stands, and
+ * whether this run's fix is the one now stored.
+ *
+ * A caller cannot tell the two apart from `record` alone — a discarded run's
+ * `record` reads identically to the one before the call — which is exactly why
+ * this is a pair rather than the bare `FieldRecord` the function used to
+ * return. A silent no-op was the defect: TRY AGAIN was reported as having
+ * updated the capture whether or not it actually had. `applied` is the one
+ * fact that tells a caller which happened, and it is what `useCapture.ts`
+ * reads to decide which sentence the screen shows.
+ */
+export type FixRefinement = {
+  record: FieldRecord
+  /**
+   * `true` when this run's fix replaced what was stored, `false` when the
+   * record was left exactly as it was because the incoming fix was not an
+   * improvement.
+   */
+  applied: boolean
+}
+
+/**
+ * Replaces a record's fix with a better measurement of the same capture —
+ * but only when it actually is one.
  *
  * This is the second half of the capture interaction (spec §9.1). One tap saves
  * whatever fix exists at that instant — a real row on disk, which survives the
@@ -1079,6 +1102,66 @@ function describeAccuracy(accuracyM: number | null): string {
  * the row that is already there. Nothing waits in memory to be saved, because a
  * capture that exists only in memory is a capture that can be lost by walking
  * away from it.
+ *
+ * ## Keeping the better fix
+ *
+ * A capture can be refined more than once — TRY AGAIN (`useCapture.ts`'s
+ * `refineAgain`) runs a second countdown over a record the first one already
+ * sharpened. That second run is a fresh measurement, independent of the
+ * first's, and nothing about it guarantees it lands closer than the first
+ * one did: she may have moved slightly, the sky may have closed in, the
+ * receiver may simply have wandered. Before this guard, the second run's fix
+ * replaced the first's unconditionally, which is how a retry that the project
+ * owner promised was risk-free was quietly able to make the stored figure
+ * worse — and `accuracy_m` is not a display number: it becomes the Victorian
+ * Biodiversity Atlas's mandatory "Positional accuracy (metres)" field, so a
+ * retry that degrades it degrades what a state agency filters public records
+ * on.
+ *
+ * So this function writes the incoming fix only when it is not worse than
+ * what is already on the record — `fix.accuracyM <= existing accuracy_m` — and
+ * otherwise leaves every fix column untouched and reports `applied: false`.
+ * `accuracy_m` is the sole criterion, because it is the figure that travels
+ * downstream; `fix_spread_m` is deliberately not consulted as a tiebreak.
+ * Spread measures a run's *internal* disagreement — how far its own readings
+ * sit from their own average — not distance from the truth, and two runs'
+ * spreads are not comparable to each other: a tight spread around a
+ * systematically wrong position is not "better" than a wide spread around a
+ * correct one. Weighing it here would let a run's self-consistency override
+ * the one number the VBA extract actually filters on. (`CapturePreview`'s
+ * `spreadM` doc comment in `useCapture.ts` makes the identical argument for
+ * why the screen shows spread beside the improvement rather than folding it
+ * in — this is where that reasoning would be violated if spread crept back in
+ * as a tiebreak.)
+ *
+ * A record with no stored accuracy yet (`existing.accuracy_m` NULL — a
+ * `'none'` quality, or a positionless one) has nothing to lose: any positioned
+ * fix applies. This is what lets refining *from* `'none'` keep working exactly
+ * as before.
+ *
+ * The gate lives here rather than in the hook (`useCapture.ts`) deliberately:
+ * this project puts its other provenance guarantees at this layer — the
+ * immutable capture number, the CHECK constraints migration 003 enforces —
+ * rather than trusting every caller to re-derive them, and a hook-level guard
+ * would only protect callers that remembered to ask the hook first. Putting
+ * it here does not surprise this function's other caller
+ * (`diagnostics.tsx`, which refines once per tap and never retries): its
+ * single call always compares the countdown's accumulated accuracy against
+ * the tap's own, and inverse-variance averaging over a sample set that
+ * includes the tap's own reading cannot produce a worse combined accuracy
+ * than that reading alone (`CapturePreview.improvedByM`'s doc comment proves
+ * this the same way, by fuzzing) — so `applied` is always `true` on that
+ * path, and this guard is a no-op there. It only ever refuses on a genuinely
+ * independent second measurement, which is exactly the TRY AGAIN case it
+ * exists for.
+ *
+ * ## Whichever fix wins, the attempt is on the record
+ *
+ * A discarded run still appends an `'edited'` event, carrying *this run's*
+ * position and accuracy in the event's own columns — not the kept fix's. A
+ * log that only ever wrote an event when the write applied would make a
+ * second run that went badly indistinguishable from a second run that never
+ * happened at all, which is not true of the wait she actually stood through.
  *
  * ## Why the event is `'edited'`
  *
@@ -1114,6 +1197,13 @@ function describeAccuracy(accuracyM: number | null): string {
  * for that reason, so a rewrite here fails there rather than silently making
  * every past refinement indistinguishable from a hand edit.
  *
+ * That contract covers the *applied* detail only. A discarded run — `applied:
+ * false` — writes a differently-worded detail, starting `fix refinement
+ * reached `, precisely so it cannot be mistaken for the applied case by a
+ * reader matching the `fix refined from ` prefix: the record's position did
+ * not change, and a detail line that read the same as an applied one would
+ * claim otherwise.
+ *
  * ## What it does not touch
  *
  * `captured_at` and `capture_number`. The capture happened at the tap, not at
@@ -1142,7 +1232,7 @@ function describeAccuracy(accuracyM: number | null): string {
 export async function refineRecordFix(
   db: Database,
   input: { recordId: string; fix: Fix; deviceId: string },
-): Promise<FieldRecord> {
+): Promise<FixRefinement> {
   // Checked before the transaction opens: it is a fact about the argument, not
   // about the database, so there is nothing to read first and nothing to roll
   // back after.
@@ -1155,6 +1245,10 @@ export async function refineRecordFix(
     )
   }
   const fix = input.fix
+
+  // Set inside the transaction below, from the row actually on disk. Declared
+  // out here so the result can be reported after the transaction commits.
+  let applied = false
 
   await db.transaction(async () => {
     const existing = await db.first<{
@@ -1173,32 +1267,44 @@ export async function refineRecordFix(
       )
     }
 
+    // Keep the better fix (see this function's doc comment). `accuracy_m` is
+    // the sole criterion — smaller is sharper — and NULL means the record has
+    // no accuracy to lose to, so any positioned fix applies.
+    applied = existing.accuracy_m === null || fix.accuracyM <= existing.accuracy_m
+
     const at = nowIso()
-    await db.execute(
-      `UPDATE record SET ${FIX_COLUMNS.map((column) => `${column} = ?`).join(', ')},
-                         updated_at = ?
-       WHERE id = ?`,
-      [...fixColumnValues(fix), at, input.recordId],
-    )
+    if (applied) {
+      await db.execute(
+        `UPDATE record SET ${FIX_COLUMNS.map((column) => `${column} = ?`).join(', ')},
+                           updated_at = ?
+         WHERE id = ?`,
+        [...fixColumnValues(fix), at, input.recordId],
+      )
+    }
     await appendEvent(db, {
       recordId: input.recordId,
       action: 'edited',
       deviceId: input.deviceId,
+      // This run's own fix, whether or not it won — the event is a record of
+      // what was attempted, not of what is now stored. A discarded run's
+      // position and accuracy are exactly as real a fact as an applied one's.
       fix,
       // The activity the record is in now. `createRecord` stamps its event with
       // the context activity because at capture the two can differ; by the time
       // a refinement happens the record is wherever it is, and that is the
       // activity this change happened inside.
       activityId: existing.activity_id,
-      detail:
-        `fix refined from ${describeAccuracy(existing.accuracy_m)} ` +
-        `to ${describeAccuracy(fix.accuracyM)}`,
+      detail: applied
+        ? `fix refined from ${describeAccuracy(existing.accuracy_m)} ` +
+          `to ${describeAccuracy(fix.accuracyM)}`
+        : `fix refinement reached ${describeAccuracy(fix.accuracyM)}, kept the sharper ` +
+          `${describeAccuracy(existing.accuracy_m)} already on the record`,
     })
   })
 
   const record = await getRecord(db, input.recordId)
   if (!record) throw new Error(`Record ${input.recordId} vanished immediately after being refined.`)
-  return record
+  return { record, applied }
 }
 
 /**

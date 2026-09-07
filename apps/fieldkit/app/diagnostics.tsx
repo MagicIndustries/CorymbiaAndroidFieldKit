@@ -1467,13 +1467,22 @@ function DiagnosticsBody(props: BodyProps) {
     // failure of the RELOAD reported "Refinement failed — the record keeps the
     // fix it was saved with", which is a false statement about what is on
     // disk, about the one operation that had actually succeeded.
+    // `refineRecordFix` now keeps the better fix rather than writing whatever
+    // it is handed (`packages/data`'s `refineRecordFix` doc comment) — this
+    // screen has no retry, so its one countdown per tap is always compared
+    // against the tap's own accuracy, and inverse-variance averaging over a
+    // sample set that includes the tap's own reading cannot come back worse
+    // than that reading alone. `applied` is therefore always true here; it is
+    // read from the result only so this call site matches the new contract,
+    // not because this screen has a losing case to report.
     let refined: FieldRecord
     try {
-      refined = await refineRecordFix(db, {
+      const refinement = await refineRecordFix(db, {
         recordId: active.recordId,
         fix: attempt.fix,
         deviceId: device.id,
       })
+      refined = refinement.record
     } catch (error) {
       if (!mountedRef.current || token !== refreshToken.current) return
       props.setMessage(

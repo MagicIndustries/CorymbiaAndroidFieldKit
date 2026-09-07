@@ -278,9 +278,13 @@ beforeEach(() => {
   mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) =>
     Promise.resolve(recordFrom(input.fix)),
   )
+  // Mirrors the real `refineRecordFix`'s `{ record, applied }` shape
+  // (`packages/data`); the guard itself is proved against real SQL in
+  // `records.test.ts`, and the default here always applies, which is what
+  // this screen's own tests want unless one specifically overrides it.
   mockRepo.refineRecordFix.mockImplementation(
     (_db: unknown, input: { recordId: string; fix: Fix }) =>
-      Promise.resolve(amendRecord(input.recordId, { fix: input.fix })),
+      Promise.resolve({ record: amendRecord(input.recordId, { fix: input.fix }), applied: true }),
   )
   mockRepo.renameRecord.mockImplementation(
     (_db: unknown, input: { recordId: string; title: string | null }) =>
