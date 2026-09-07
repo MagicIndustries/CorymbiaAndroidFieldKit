@@ -610,6 +610,144 @@ describe('useCapture', () => {
     expect(result.current.secondsRemaining).toBe(0)
   })
 
+  /**
+   * ANOTHER GO AT A CAPTURE THAT SETTLED SHORT (spec §9.2.1's settled level).
+   *
+   * The record is the thing being protected here: its capture number may
+   * already be written on a sample tube, so a second attempt must sharpen the
+   * row that exists rather than start a new capture beside it. That is the
+   * single assertion these tests are really about — one `createRecord`, two
+   * `refineRecordFix` calls, both naming the same row.
+   */
+  describe('refineAgain', () => {
+    /** Captures, lets the cap end the wait, and leaves a finished capture on screen. */
+    async function captureAndFinish(result: { current: ReturnType<typeof useCapture> }) {
+      await emit(6)
+      await act(async () => {
+        result.current.capture()
+      })
+      await settle()
+      await emitFlat(3, 5)
+      await advanceCaps(1)
+    }
+
+    it('refines the same record a second time rather than creating another one', async () => {
+      const { result } = await mountCapture()
+      await captureAndFinish(result)
+      expect(result.current.phase).toBe('recorded')
+      expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        result.current.refineAgain()
+      })
+      await settle()
+
+      // Back to acquiring, on the same row, with a fresh wait.
+      expect(result.current.phase).toBe('acquiring')
+      expect(result.current.record?.id).toBe('record-1')
+      expect(result.current.secondsRemaining).toBe(CAP_S)
+
+      await emitFlat(3, 3)
+      await advanceCaps(1)
+
+      expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+      expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(2)
+      // Both refinements name the same row — which is what puts both runs in
+      // that record's own event log rather than in two records' logs.
+      for (const call of mockRepo.refineRecordFix.mock.calls) {
+        expect(call[1]).toMatchObject({ recordId: 'record-1' })
+      }
+      // And the capture number never moved.
+      expect(result.current.record?.captureNumber).toBe(1)
+    })
+
+    it('measures the second run against what the first one left on the record', async () => {
+      const { result } = await mountCapture()
+      await captureAndFinish(result)
+      const afterFirstRun = result.current.record?.fix
+      if (afterFirstRun === undefined || afterFirstRun.quality === 'none') {
+        throw new Error('the first run should have left a deliberate fix on the record')
+      }
+
+      await act(async () => {
+        result.current.refineAgain()
+      })
+      await settle()
+      await emit(5)
+
+      // The baseline is the stored accuracy, not the tap's original ±6 m —
+      // the second run is being compared to what she already has.
+      const { accuracyM } = averageReadings([reading(5, START_MS), reading(5, START_MS + 1000)])
+      expect(result.current.preview?.improvedByM).toBeCloseTo(
+        afterFirstRun.accuracyM - accuracyM,
+        6,
+      )
+      expect(result.current.refining).toBe(true)
+    })
+
+    it('reports refining only for the repeat run', async () => {
+      const { result } = await mountCapture()
+      await emit(6)
+      await act(async () => {
+        result.current.capture()
+      })
+      await settle()
+      // The tap's own countdown is not a repeat run.
+      expect(result.current.refining).toBe(false)
+
+      await advanceCaps(1)
+      expect(result.current.refining).toBe(false)
+
+      await act(async () => {
+        result.current.refineAgain()
+      })
+      await settle()
+      expect(result.current.refining).toBe(true)
+
+      await advanceCaps(1)
+      // And the flag goes with the countdown it described.
+      expect(result.current.refining).toBe(false)
+    })
+
+    it('does nothing from the ready state, where there is no capture to refine', async () => {
+      const { result } = await mountCapture()
+      await emit(6)
+
+      await act(async () => {
+        result.current.refineAgain()
+      })
+      await settle()
+
+      expect(result.current.phase).toBe('ready')
+      expect(mockRepo.createRecord).not.toHaveBeenCalled()
+      expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
+    })
+
+    it('does nothing while a countdown is already running', async () => {
+      const { result } = await mountCapture()
+      await emit(6)
+      await act(async () => {
+        result.current.capture()
+      })
+      await settle()
+
+      const endsIn = result.current.secondsRemaining
+      await act(async () => {
+        result.current.refineAgain()
+      })
+      await settle()
+
+      // Not restarted: a countdown in progress is already the refinement this
+      // would ask for, and resetting its clock would silently extend a wait
+      // she is standing through.
+      expect(result.current.phase).toBe('acquiring')
+      expect(result.current.secondsRemaining).toBe(endsIn)
+
+      await advanceCaps(1)
+      expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    })
+  })
+
   it('still records a capture taken before there is any usable reading, with no position', async () => {
     // Doctrine rule 4: nothing blocks capture. A tap with no fix on hand writes
     // a real row at a real time — the countdown that follows can still give it

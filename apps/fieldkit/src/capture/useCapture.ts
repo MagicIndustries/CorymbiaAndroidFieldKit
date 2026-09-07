@@ -76,6 +76,14 @@ export type CapturePreview = {
    * to have improved on, and inventing one would be a claim about a measurement
    * that was never taken.
    *
+   * **The one exception is a repeat run** (`refineAgain`), where the baseline
+   * is the accuracy the previous run left on the record rather than a reading
+   * inside this run's own sample set — so the monotonicity argument above does
+   * not hold and this can come back at or below zero. The screen says so in
+   * the same words it uses for an improvement too small to print ("no sharper
+   * … yet"), and names the right baseline: `Capture.refining` is what tells it
+   * whether the comparison is against the tap or against the last run.
+   *
    * A countdown that goes badly is one of the more useful things this
    * interaction can report, and this field cannot be the one to report it — the
    * spread beside it is (spec §9.3). Spread genuinely worsens when she moved,
@@ -174,6 +182,26 @@ export type Capture = {
   acceptNow(): void
   /** Dismiss a finished capture and go back to ready. */
   again(): void
+  /**
+   * Run the countdown again over the record just finished, in place.
+   *
+   * The completion that offers this is a capture that *settled* — it stopped
+   * improving, but above what the hardware can do (spec §9.2.1) — and the
+   * answer to that is another go at the same point, not another point. The
+   * record is kept: its capture number may already be written on a sample
+   * tube, and a real measurement is not thrown away for a second attempt that
+   * might be no better. Every run appends its own `'edited'` event, so the
+   * chain of custody carries both.
+   *
+   * A no-op unless a finished capture is actually on screen (`recorded`, with
+   * a record) and nothing is already being written.
+   */
+  refineAgain(): void
+  /**
+   * Whether the countdown now running is a repeat run over an
+   * already-refined record (`refineAgain`) rather than the tap's own.
+   */
+  refining: boolean
 }
 
 /**
@@ -311,11 +339,22 @@ function buildDeliberateFix(samples: Reading[]): FixAttempt {
 type Countdown = {
   recordId: string
   /**
-   * The accuracy the tap wrote, or null when it found no position — the
-   * baseline `improvedByM` is measured against.
+   * The accuracy the fix held when this countdown started, or null when there
+   * was none — the baseline `improvedByM` is measured against. The tap's own
+   * accuracy for a first run; the accuracy the previous run left on the
+   * record for a repeat one (`refineAgain`).
    */
   startAccuracyM: number | null
   endsAtMs: number
+  /**
+   * Whether this countdown is a repeat run over a record that has already
+   * been refined once (`refineAgain`), rather than the one the tap started.
+   *
+   * Only the words change: the screen says what the improvement is measured
+   * against, and "sharper than the tap" is the wrong sentence when the
+   * baseline is the previous run's own result.
+   */
+  repeat: boolean
 }
 
 /** Why a countdown ended. All three write the same refinement; only the words differ. */
@@ -587,6 +626,7 @@ export function useCapture(deps: CaptureDeps): Capture {
       recordId: created.id,
       startAccuracyM: created.fix.quality === 'none' ? null : created.fix.accuracyM,
       endsAtMs,
+      repeat: false,
     })
     setRecord(created)
     setTickMs(Date.now())
@@ -608,6 +648,49 @@ export function useCapture(deps: CaptureDeps): Capture {
     if (!mounted.current) return
     setPhase('ready')
     setMessage(reason)
+  }
+
+  /**
+   * Another go at the point just recorded, in place (spec §9.2.1's settled
+   * completion).
+   *
+   * **Deliberately the same countdown, not a new capture.** It reuses
+   * `beginCountdown`, the same expiry timer, the same plateau effect and the
+   * same `finishCountdown`, so the second run refines the row the first one
+   * refined — one record, one capture number, two `'edited'` events. Nothing
+   * here writes; the write happens where it always does, when this countdown
+   * ends.
+   *
+   * The new run's samples start empty but for the reading on screen, exactly
+   * as the tap's do: this is a fresh measurement of the same point, and
+   * carrying the previous run's readings forward would make "another go"
+   * indistinguishable from "wait longer", which §9.1's measurements already
+   * showed buys nothing.
+   *
+   * Refused unless a finished capture is actually on screen. `phase` is read
+   * rather than `countdownRef`, because the states this must not fire from —
+   * `ready`, and the window between a tap and its `beginCountdown` — are
+   * phases, not countdowns; `writeInFlight` covers the refinement that may
+   * still be resolving behind the recorded state.
+   */
+  function refineAgainNow(): void {
+    if (writeInFlight.current || countdownRef.current !== null) return
+    if (phase !== 'recorded' || record === null) return
+
+    const startAccuracyM = record.fix.quality === 'none' ? null : record.fix.accuracyM
+    collected.current = latest ? [latest] : []
+    collecting.current = true
+    // The sentence that said how the last wait ended is about a wait that is
+    // no longer the current one.
+    setMessage(null)
+    setPhase('acquiring')
+    beginCountdown({
+      recordId: record.id,
+      startAccuracyM,
+      endsAtMs: Date.now() + secondsTotal * 1000,
+      repeat: true,
+    })
+    setTickMs(Date.now())
   }
 
   /**
@@ -824,6 +907,8 @@ export function useCapture(deps: CaptureDeps): Capture {
     acceptNow: () => {
       finishRef.current('override')
     },
+    refining: countdown?.repeat ?? false,
+    refineAgain: refineAgainNow,
     again: () => {
       // Refused while a countdown is running: dismissing a capture that is
       // still being sharpened would strand the refinement rather than cancel
