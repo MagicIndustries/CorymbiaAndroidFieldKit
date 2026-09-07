@@ -13,10 +13,10 @@ import {
 import { radii, spacing, touch } from '@corymbia/tokens'
 import {
   Button,
+  CaptureDial,
   HelpAffordance,
   INPUT_AFFORDANCE_ORDER,
   Screen,
-  TrafficLightFrame,
   Type,
   resolveReach,
   useLayout,
@@ -24,6 +24,19 @@ import {
   type FixGradeName,
   type InputAffordanceKind,
 } from '@corymbia/ui'
+// `radiusForMetres` and `isLocked` are `@corymbia/ui`'s own pure geometry
+// (packages/ui/src/capture/dialGeometry.ts) — the same module `CaptureDial`
+// itself is built on — but the package's barrel (`packages/ui/src/index.ts`
+// -> `capture/index.ts`) does not re-export them; only `CaptureDial` and
+// `FixGradeName` are. That is a real gap between this task's brief, which
+// names both as things this screen consumes "from `@corymbia/ui`", and the
+// repository as it stands. `packages/ui` is off limits to this task, so the
+// barrel cannot be widened here — this reaches the same file `CaptureDial`
+// imports from, by its path within the package rather than through the
+// barrel. `@corymbia/ui`'s package.json declares no `exports` map, so this
+// subpath resolves like any other file in the package; nothing here is a
+// private API reached through a back door closed to everyone else.
+import { isLocked, radiusForMetres } from '@corymbia/ui/src/capture/dialGeometry'
 import { renameRecord, type Database, type FieldRecord, type StoredFix } from '@corymbia/data'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
@@ -32,28 +45,40 @@ import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/d
  * The capture screen (spec §9.1–§9.4): the one thing a field ecologist looks at
  * while standing still over a survey point.
  *
- * The state machine is `src/capture/useCapture.ts` and every part of the frame
- * is `@corymbia/ui`; what is decided here is what she sees, how big it is, and
- * where it sits. Three rules govern all of that, and none of them is a
- * preference:
+ * The state machine is `src/capture/useCapture.ts` and every part of the dial
+ * is `@corymbia/ui`'s `CaptureDial`; what is decided here is what she sees, how
+ * big it is, and where it sits. **The screen computes, the dial renders**: the
+ * grade comes from `gradeAccuracy` and the lock from
+ * `isLocked(radiusForMetres(...))`, both handed down as plain values, which is
+ * what keeps `@corymbia/ui` free of any dependency on `@corymbia/geo`. Four
+ * rules govern the rest of it, and none of them is a preference:
  *
- *  - **The accuracy and the seconds remaining are the largest things on the
- *    screen** while a countdown runs (§9.4). They are the two numbers she is
- *    standing still for, and they have to be legible at arm's length, in glare,
- *    without leaning in. Everything else in that state is subordinate to them.
- *    The diagnostics prototype rendered them at the same weight as its other
- *    instrument readouts, which is right for an instrument and wrong for the
- *    field.
- *  - **Everything that responds during a countdown sits inside the frame with
- *    the button** (§9.1.2) — the accuracy, the seconds, the sample count, the
- *    improvement, the spread and the verdict sentence. This is the specific
- *    defect the whole single-control design exists to fix: on the superseded
- *    press-and-hold screen her thumb was on the button while the only part of
- *    the screen that moved was somewhere else entirely. A design that puts the
- *    countdown readout in a panel above the control has not implemented that
- *    section.
- *  - **There is exactly one control** (§9.1.4). `CAPTURE` before the tap,
- *    `ACCEPT NOW` during the countdown, and it is live for every moment of it.
+ *  - **The accuracy is the largest thing on the screen** while a countdown runs
+ *    (§9.4), at `hero`. It is the number she is standing still for, and it has
+ *    to be legible at arm's length, in glare, without leaning in.
+ *  - **The seconds remaining are no longer sized to match it.** §9.2's ring
+ *    now answers "how much longer" without being read, so the numeric seconds
+ *    sits with the sample count and the improvement — present, precise, and
+ *    subordinate, the same size as them. Two numbers at the same size compete;
+ *    one number and a moving ring do not.
+ *  - **Everything that responds during a countdown sits inside the dial's own
+ *    block with the button** (§9.1.2) — the accuracy, the seconds, the sample
+ *    count, the improvement, the spread and the verdict sentence. This is the
+ *    specific defect the whole single-control design exists to fix: on the
+ *    superseded press-and-hold screen her thumb was on the button while the
+ *    only part of the screen that moved was somewhere else entirely. A design
+ *    that puts the countdown readout in a panel above the control has not
+ *    implemented that section.
+ *  - **The lock gets a word** (§9.2.1, doctrine rule 9). `CaptureDial` carries
+ *    the lock in colour and motion, and exposes the same fact as plain text
+ *    for a screen reader; this screen is what turns it into the word a sighted
+ *    reader sees, `· LOCKED ON` beside the grade chip, so colour and motion are
+ *    never the only channel carrying it — in glare, or for a colour-blind
+ *    reader, the word is what survives.
+ *
+ * **There is exactly one control** (§9.1.4) throughout: `CAPTURE` before the
+ * tap, `ACCEPT NOW` during the countdown, and it is live for every moment of
+ * it.
  */
 
 /**
@@ -335,6 +360,29 @@ function CaptureBody() {
   const grade: FixGradeName = shownAccuracyM === null ? 'poor' : gradeAccuracy(shownAccuracyM)
 
   /**
+   * The accuracy `CaptureDial` draws its circle from. Unlike the readout
+   * above, its `accuracyM` prop is required — there is no third "no reading"
+   * state for the dial to render, only a radius — so the absent case needs an
+   * honest real number rather than null. `Infinity` is that number: no
+   * reading is not a fix that happens to be bad, it is the complete absence of
+   * one, and `radiusForMetres`/`isLocked` already reduce `Infinity` to the
+   * worst case on their own (dialGeometry.ts), the same answer `grade` above
+   * gives it via its own null check. Nothing here invents a fallback accuracy
+   * that was never measured.
+   */
+  const dialAccuracyM = shownAccuracyM ?? Number.POSITIVE_INFINITY
+
+  /**
+   * Whether the fix has converged onto the crosshair (spec §9.2.1). Computed
+   * here, not by `CaptureDial` — the dial takes `locked` as a plain boolean
+   * and computes no lock of its own, which is what keeps `@corymbia/ui` free
+   * of any dependency on `@corymbia/geo`. `radiusForMetres`/`isLocked` are
+   * `@corymbia/ui`'s own pure geometry, not `@corymbia/geo`'s, so this line is
+   * the one place the screen's grading and the dial's geometry meet.
+   */
+  const locked = isLocked(radiusForMetres(dialAccuracyM))
+
+  /**
    * Where the capture block sits, from the reach zone (spec §5.4, §9.1) and
    * never from a raw width. `bottomBand` is the phone ergonomic — a band across
    * the bottom, under the thumb of whichever hand is holding it — and
@@ -353,12 +401,12 @@ function CaptureBody() {
       : { alignSelf: 'stretch' }
 
   /**
-   * The live position, in monospace.
+   * The live position, in monospace, above the dial (spec §9.2, §9.4).
    *
-   * Deliberately OUTSIDE the frame (spec §9.4): these are context about the
+   * Deliberately OUTSIDE the dial's own block: these are context about the
    * receiver rather than about the convergence in hand, and they are the
    * receiver's current reading rather than the fix under construction. Nothing
-   * subordinate belongs inside the frame during a countdown — that space is for
+   * subordinate belongs inside the dial during a countdown — that space is for
    * the numbers that answer *how good is it* and *how much longer*.
    */
   const coordinates = (
@@ -397,33 +445,51 @@ function CaptureBody() {
    * the whole of its job. It carried a second one — being the handle a test
    * scoped its §9.1.2 containment assertions to — and with it an instruction
    * to keep this a single-child container. Both are gone: those assertions
-   * now scope to `traffic-light-border`'s own parent, which is the frame's
-   * actual rendering rather than a container named after it, and is immune to
-   * whatever is later placed beside it. `capture-frame` stays only as an
-   * inspection handle, and nothing depends on what sits inside it.
+   * now scope to `CaptureDial`'s own `capture-dial` testID, which is the
+   * dial's actual rendering rather than a container named after it, and is
+   * immune to whatever is later placed beside it. `capture-frame` stays only
+   * as an inspection handle, and nothing depends on what sits inside it.
    */
   const block = (
     <View testID="capture-frame" style={blockStyle}>
-      <TrafficLightFrame
+      <CaptureDial
         grade={grade}
-        refining={acquiring}
+        accuracyM={dialAccuracyM}
         // The ring is the countdown's honest progress, so it is drawn only
         // while there is a countdown to be honest about — and it is fed the
         // hook's continuous fraction rather than the whole-seconds readout
-        // beside it, which only moves once a second (see
+        // beside it, which only moves once a second and would otherwise step
+        // the ring in fifteen discrete jumps that never reach empty (see
         // `Capture.remainingFraction`).
-        countdownRemaining={acquiring ? capture.remainingFraction : undefined}
+        remaining={acquiring ? capture.remainingFraction : undefined}
+        locked={locked}
       >
+        {/*
+          THE LOCK'S WORD (spec §9.2.1, doctrine rule 9). `CaptureDial` draws
+          the grade word itself (`GOOD FIX` etc.) but knows nothing about the
+          lock beyond the boolean it was handed and the colour/motion it
+          already carries — the words that survive in glare or for a
+          colour-blind reader are this screen's to add. Rendered once, ahead
+          of the phase-specific content below, because a fix can be locked in
+          either phase: the dial is live at all times, and a live reading can
+          already sit on the crosshair before she has tapped anything.
+        */}
+        {locked ? (
+          <Type variant="label" testID="capture-lock-label">
+            {'· LOCKED ON'}
+          </Type>
+        ) : null}
+
         {acquiring ? (
           <>
             {/*
-              THE TWO NUMBERS (spec §9.4). Stacked rather than set side by side:
-              at 62px a pair of them does not fit across a phone in portrait,
-              and shrinking either to make it fit is the defect this sizing
-              exists to correct. The labels above them are at the smallest size
-              in the scale — she is not reading the words, she is reading the
-              numbers, and the words are there so a screen reader and a first
-              use know which is which.
+              THE ACCURACY (spec §9.4): the largest thing on the screen while a
+              countdown runs, at `hero`. The seconds remaining are no longer
+              sized to match it — §9.2's ring answers "how much longer" without
+              being read, so the numeric seconds moves down to sit with the
+              sample count and the improvement below, all at the same
+              subordinate size. Two numbers at the same size compete; one
+              number and a moving ring do not.
             */}
             <Type variant="label" dim>
               ACCURACY
@@ -431,18 +497,18 @@ function CaptureBody() {
             <Type variant="hero" testID="capture-accuracy">
               {formatAccuracy(shownAccuracyM)}
             </Type>
+
+            {/*
+              Everything below here is subordinate to the accuracy above, and
+              all of it is inside the dial's own block with the button
+              (§9.1.2) because all of it responds while she stands still.
+            */}
             <Type variant="label" dim>
               TIME LEFT
             </Type>
-            <Type variant="hero" testID="capture-seconds">
+            <Type variant="small" dim testID="capture-seconds">
               {`${String(capture.secondsRemaining)}s`}
             </Type>
-
-            {/*
-              Everything below here is subordinate to those two, and all of it
-              is inside the frame with the button (§9.1.2) because all of it
-              responds while she stands still.
-            */}
             <Type variant="small" dim testID="capture-samples">
               {describeSamples(capture.preview)}
             </Type>
@@ -512,7 +578,7 @@ function CaptureBody() {
             />
           </>
         )}
-      </TrafficLightFrame>
+      </CaptureDial>
     </View>
   )
 
@@ -570,8 +636,14 @@ function CaptureBody() {
           contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
         >
           <View style={{ gap: spacing.md }}>
-            {block}
+            {/*
+              Coordinates above the dial (spec §9.2, §9.4) — the same order
+              the ready state below already uses — so the receiver's context
+              sits where she reads it first and the dial, with the button,
+              stays closest to the bottom of a bottom-anchored layout.
+            */}
             {coordinates}
+            {block}
             {message}
           </View>
         </ScrollView>

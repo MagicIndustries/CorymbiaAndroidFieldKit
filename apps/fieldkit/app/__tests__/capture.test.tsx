@@ -1,4 +1,5 @@
 import React from 'react'
+import { processColor } from 'react-native'
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native'
 import { INPUT_AFFORDANCE_ORDER, ThemeProvider } from '@corymbia/ui'
 import { darkTheme, type as typeScale } from '@corymbia/tokens'
@@ -395,24 +396,20 @@ async function standStillUntilItSettles() {
 }
 
 /**
- * The traffic-light frame's own subtree.
+ * The dial's own subtree.
  *
- * `TrafficLightFrame` takes no `testID` of its own, so this scopes to
- * `traffic-light-border`'s own parent — the frame's actual root — rather than
- * to `capture-frame`, the screen's wrapper `View` around it. Scoping to the
- * wrapper was only ever correct while it stayed a single-child container: the
- * moment a sibling was placed beside the frame in there, "inside
- * `capture-frame`" would stop meaning "inside the frame with the button", the
- * very defect §9.1.2 names. Scoping to the border's own parent is immune to
- * that — it is the frame's rendering, not a container that merely happens to
- * be named after it, whatever else is later placed beside it.
+ * `CaptureDial` carries its own `capture-dial` testID on its root view, so
+ * this scopes directly to it rather than to `capture-frame`, the screen's
+ * wrapper `View` around it. Scoping to the wrapper was only ever correct
+ * while it stayed a single-child container: the moment a sibling was placed
+ * beside the dial in there, "inside `capture-frame`" would stop meaning
+ * "inside the dial with the button", the very defect §9.1.2 names. Scoping to
+ * the dial's own testID is immune to that — it is the dial's rendering, not a
+ * container that merely happens to be named after it, whatever else is later
+ * placed beside it.
  */
-function insideTheFrame() {
-  const border = screen.getByTestId('traffic-light-border')
-  if (border.parent === null) {
-    throw new Error('Expected traffic-light-border to have a parent to scope queries to.')
-  }
-  return within(border.parent)
+function insideTheDial() {
+  return within(screen.getByTestId('capture-dial'))
 }
 
 /** The single string a readout renders, for assertions about its exact shape. */
@@ -500,28 +497,45 @@ describe('the acquiring state', () => {
     expect(screen.queryByText('CAPTURE')).toBeNull()
   })
 
-  it('renders the accuracy and the seconds remaining larger than anything else on the screen', async () => {
+  it('renders the dial, which replaced the rectangular frame', async () => {
     await arriveWithAFix()
     await tap()
 
-    // Spec §9.4: these are the two numbers she is standing still for, and in
-    // this state they are the largest things on the screen — legible at arm's
-    // length, in glare, without leaning in. The size is asserted, not the mere
-    // presence of the text: the diagnostics prototype showed both numbers and
-    // still got this wrong, rendering them at the same weight as its other
-    // instrument readouts.
-    expect(screen.getByTestId('capture-accuracy').props.style.fontSize).toBe(typeScale.hero.size)
-    expect(screen.getByTestId('capture-seconds').props.style.fontSize).toBe(typeScale.hero.size)
+    // `CaptureDial` (spec §9.2) is the whole reason this screen changed: the
+    // rectangular traffic-light frame and its `TrafficLightFrame`/
+    // `CaptureFramePerimeter` are gone from here, replaced by the one
+    // circular control that draws the clock, the accuracy and the crosshair
+    // together.
+    expect(screen.getByTestId('capture-dial')).toBeTruthy()
+    expect(screen.queryByTestId('traffic-light-border')).toBeNull()
+    expect(screen.queryByTestId('perimeter')).toBeNull()
+  })
 
-    // And everything else in the state is subordinate to them, which is the
-    // half of §9.4 a size assertion on its own would not catch. Swept across
-    // every rendered string rather than enumerated by testID, so an
+  it('renders the accuracy larger than anything else on the screen, and the seconds no longer compete with it', async () => {
+    await arriveWithAFix()
+    await tap()
+
+    // Spec §9.4, as the dial changed it: the accuracy is the number she is
+    // standing still for, and it is the largest thing on the screen — legible
+    // at arm's length, in glare, without leaning in. The seconds are no
+    // longer sized to match it, because §9.2's ring now answers "how much
+    // longer" without being read — two numbers at the same size compete, one
+    // number and a moving ring do not. The size is asserted, not the mere
+    // presence of the text: the diagnostics prototype showed both numbers at
+    // the same weight as its other instrument readouts and still got this
+    // wrong.
+    expect(screen.getByTestId('capture-accuracy').props.style.fontSize).toBe(typeScale.hero.size)
+    expect(screen.getByTestId('capture-seconds').props.style.fontSize).not.toBe(typeScale.hero.size)
+
+    // And everything else in the state is subordinate to the accuracy, which
+    // is the half of §9.4 a size assertion on its own would not catch. Swept
+    // across every rendered string rather than enumerated by testID, so an
     // unlabelled element promoted to hero size is caught too, not only a
-    // regression on the four this screen happens to have today.
+    // regression on the one this screen happens to have today.
     const heroSized = screen
       .getAllByText(/./)
       .filter((node) => node.props.style?.fontSize === typeScale.hero.size)
-    expect(heroSized).toHaveLength(2)
+    expect(heroSized).toHaveLength(1)
   })
 
   /**
@@ -569,12 +583,14 @@ describe('the acquiring state', () => {
       expect(`±${accuracyM.toFixed(1)} m`).not.toBe('±6.0 m')
     })
 
-    it('grades that same number, in the word and in the border colour', async () => {
+    it('grades that same number, in the word and in the dial colour', async () => {
       await standStillBriefly()
 
       // The grade derives from the accuracy above, so a readout showing the
       // wrong number grades the wrong number too. Both channels of doctrine
-      // rule 9 are asserted: the word, and the colour behind it.
+      // rule 9 are asserted: the word, and the colour behind it — the dial's
+      // accuracy circle, which is drawn stroked and filled in the grade
+      // colour (CaptureDial.tsx).
       const { accuracyM } = averageReadings(COLLECTED)
       expect(gradeAccuracy(accuracyM)).toBe('good')
       // The latest single reading grades differently, so this cannot pass
@@ -583,9 +599,13 @@ describe('the acquiring state', () => {
 
       expect(screen.getByText('GOOD FIX')).toBeTruthy()
       expect(screen.queryByText('FAIR FIX')).toBeNull()
-      expect(screen.getByTestId('traffic-light-border').props.style.borderColor).toBe(
-        darkTheme.colors.statusGood,
-      )
+      // react-native-svg lowers a colour prop to its processed native form
+      // (`{ type, payload }`) rather than leaving the token string intact —
+      // the same shape `CaptureDial.test.tsx` itself asserts against.
+      expect(screen.getByTestId('dial-accuracy').props.stroke).toEqual({
+        type: 0,
+        payload: processColor(darkTheme.colors.statusGood),
+      })
     })
 
     it('counts the seconds down from the cap, in whole seconds', async () => {
@@ -600,15 +620,77 @@ describe('the acquiring state', () => {
 
     it('draws the countdown ring while the wait runs, and at no other time', async () => {
       await arriveWithAFix(8)
-      // The frame is live at all times; a countdown is not, so there is no
-      // resting track before the tap.
-      expect(screen.queryByTestId('perimeter')).toBeNull()
+      // The dial is live at all times (its track, `dial-ring-track`, is
+      // always there) but a countdown is not, so there is no progress stroke
+      // resting on it before the tap.
+      expect(screen.queryByTestId('dial-ring-progress')).toBeNull()
 
       await tap()
-      expect(screen.getByTestId('perimeter')).toBeTruthy()
+      expect(screen.getByTestId('dial-ring-progress')).toBeTruthy()
 
       await acceptNow()
-      expect(screen.queryByTestId('perimeter')).toBeNull()
+      expect(screen.queryByTestId('dial-ring-progress')).toBeNull()
+    })
+
+    /**
+     * FEEDS THE RING THE CONTINUOUS FRACTION, NOT THE CEIL-ED SECONDS.
+     *
+     * `useCapture`'s own doc comment on `remainingFraction` names the exact
+     * defect this guards against: a ring fed `secondsRemaining / secondsTotal`
+     * — a rounded-up integer over a constant — changes at 1 Hz while the
+     * ticker underneath it runs at 4 Hz, so it would advance in fifteen
+     * discrete jumps on the fifteen-second cap and never reach empty, because
+     * the smallest value it would ever take is one fifteenth before the phase
+     * flips and the ring unmounts. That defect already shipped once on this
+     * branch and was found on hardware.
+     *
+     * So this asserts the ring actually moves inside a single whole second,
+     * where a build fed the ceil-ed seconds would show no change at all: two
+     * samples 250 ms apart, neither crossing a whole-second boundary from a
+     * tap started exactly on one (`START_MS`), so `secondsRemaining` reports
+     * 15 at both. The dial's own `strokeDashoffset` (dialGeometry.ts's
+     * `ringDash`) is what encodes `remaining`, so a difference there is a
+     * difference in what the screen fed the dial.
+     *
+     * The first sample is taken 250 ms after the tap rather than at the tap
+     * itself: at the instant of the tap `remaining` is exactly 1, where
+     * `ringDash`'s `dashoffset` is exactly 0 — and react-native-svg folds a
+     * `strokeDashoffset` of exactly 0 away on the native host props it hands
+     * to the test renderer (documented on `CaptureDial.test.tsx`'s own
+     * `strokeDashoffset` test, which hits the same edge for the same reason).
+     * Reading at that instant would be asserting about the fold, not about
+     * `remaining`.
+     */
+    it('feeds the ring the continuous fraction, not the whole seconds beside it', async () => {
+      await arriveWithAFix(8)
+      await tap()
+
+      function ringDashoffset(): number {
+        const value: unknown = screen.getByTestId('dial-ring-progress').props.strokeDashoffset
+        if (typeof value !== 'number') {
+          throw new Error(
+            `Expected dial-ring-progress's strokeDashoffset to be a number, got ${typeof value}.`,
+          )
+        }
+        return value
+      }
+
+      // A quarter of a second in, well inside the same whole second the tap
+      // started in — `secondsRemaining` cannot have moved.
+      await act(async () => {
+        jest.advanceTimersByTime(250)
+      })
+      const atFirstTick = ringDashoffset()
+      expect(readoutText('capture-seconds')).toBe('15s')
+
+      // A second quarter-second tick, still inside the same whole second.
+      await act(async () => {
+        jest.advanceTimersByTime(250)
+      })
+      expect(readoutText('capture-seconds')).toBe('15s')
+
+      // The ring, fed the continuous fraction, has moved anyway.
+      expect(ringDashoffset()).not.toBe(atFirstTick)
     })
   })
 
@@ -749,8 +831,49 @@ describe('the acquiring state', () => {
   })
 })
 
+describe('the lock (spec §9.2.1)', () => {
+  // TARGET_METRES (dialGeometry.ts) is 1.4 m — the measured floor this
+  // hardware reaches — so a reading at or below it is `isLocked`'s own
+  // definition of locked, computed by the screen exactly as the brief
+  // requires: `isLocked(radiusForMetres(accuracyM))`.
+  const LOCKED_M = 1.0
+  // Comfortably outside it — the ordinary "still converging" case every
+  // other test in this file already exercises via `arriveWithAFix()`'s
+  // default of 8 m.
+  const NOT_LOCKED_M = 8
+
+  it('adds the word to the grade chip once the fix has converged onto the crosshair', async () => {
+    await arriveWithAFix(LOCKED_M)
+    await tap()
+
+    // Doctrine rule 9: colour and motion never carry the lock alone. This is
+    // the one channel that survives in glare or for a colour-blind reader.
+    expect(screen.getByText('GOOD FIX')).toBeTruthy()
+    expect(readoutText('capture-lock-label')).toBe('· LOCKED ON')
+  })
+
+  it('says nothing of the kind before the fix has converged', async () => {
+    await arriveWithAFix(NOT_LOCKED_M)
+    await tap()
+
+    expect(screen.queryByTestId('capture-lock-label')).toBeNull()
+  })
+
+  it('is computed by the screen, not the dial, from the same accuracy the readout prints', async () => {
+    // The independent check that this is really `isLocked(radiusForMetres(...))`
+    // rather than a threshold reinvented at the call site: 1.4 m is
+    // `TARGET_METRES` exactly, and `isLocked` includes its own boundary
+    // (`radiusPx <= TARGET_RADIUS_PX`), so a tap landing exactly on the
+    // measured floor locks.
+    await arriveWithAFix(1.4)
+    await tap()
+
+    expect(readoutText('capture-lock-label')).toBe('· LOCKED ON')
+  })
+})
+
 describe('the adjacency requirement (spec §9.1.2)', () => {
-  it('keeps every readout that responds to the countdown inside the frame with the button', async () => {
+  it('keeps every readout that responds to the countdown inside the dial with the button', async () => {
     await arriveWithAFix()
     await tap()
     await emit(7)
@@ -760,12 +883,12 @@ describe('the adjacency requirement (spec §9.1.2)', () => {
     // the screen that moved was somewhere else entirely, and §9.1.2 makes the
     // fix a requirement rather than a layout preference: a design that puts the
     // countdown readout in a panel above the control has not implemented that
-    // section.
+    // section. It survived the dial's own redesign unchanged.
     //
     // So this asserts descendancy, not presence. Every one of these readouts
-    // responds during a countdown, and each must be inside the traffic-light
-    // frame that also holds the control.
-    const frame = insideTheFrame()
+    // responds during a countdown, and each must be inside the dial's own
+    // block that also holds the control.
+    const dial = insideTheDial()
     for (const testID of [
       'capture-accuracy',
       'capture-seconds',
@@ -775,8 +898,21 @@ describe('the adjacency requirement (spec §9.1.2)', () => {
       'capture-verdict',
       'capture-button',
     ]) {
-      expect(frame.getByTestId(testID)).toBeTruthy()
+      expect(dial.getByTestId(testID)).toBeTruthy()
     }
+  })
+
+  it('keeps the lock label inside the dial too, when the fix has converged onto it', async () => {
+    // TARGET_METRES (dialGeometry.ts) is 1.4 m — a tap this sharp is already
+    // locked from the moment the reading arrives, with no averaging needed:
+    // one reading through `averageReadings` is a no-op on the numbers.
+    await arriveWithAFix(1.0)
+    await tap()
+
+    // The lock label responds to the same accuracy the rest of the countdown
+    // readout does — it can appear or disappear as the fix moves — so §9.1.2
+    // reaches it exactly as it reaches the others.
+    expect(insideTheDial().getByTestId('capture-lock-label')).toBeTruthy()
   })
 
   it('keeps the coordinates outside it, because they are context and not the wait', async () => {
@@ -784,15 +920,15 @@ describe('the adjacency requirement (spec §9.1.2)', () => {
     await tap()
     await emit(7)
 
-    // The other half of §9.1.2, and the half nothing asserted: the frame is
+    // The other half of §9.1.2, and the half nothing asserted: the dial is
     // for what answers *how good is it* and *how much longer*. The
     // coordinates are context about the receiver — its current reading, not
     // the fix under construction — and §9.4 puts them outside deliberately.
     // Moving them in passed every test in this file.
     expect(screen.getByTestId('capture-latitude')).toBeTruthy()
-    const frame = insideTheFrame()
-    expect(frame.queryByTestId('capture-latitude')).toBeNull()
-    expect(frame.queryByTestId('capture-longitude')).toBeNull()
+    const dial = insideTheDial()
+    expect(dial.queryByTestId('capture-latitude')).toBeNull()
+    expect(dial.queryByTestId('capture-longitude')).toBeNull()
   })
 })
 
