@@ -3,6 +3,7 @@ import { AccessibilityInfo, Animated, View } from 'react-native'
 import { field, radii, spacing } from '@corymbia/tokens'
 import { Type } from '../primitives'
 import { useTheme } from '../theme'
+import { CaptureFramePerimeter } from './CaptureFramePerimeter'
 
 export type FixGradeName = 'good' | 'fair' | 'poor'
 
@@ -41,14 +42,27 @@ const PULSE_SCALE = 1.012
  * that colour. A user who has asked the system for less motion gets a
  * perfectly steady frame instead, not a degraded animation: the grade is
  * carried by the colour and the word either way, so stillness costs nothing.
+ *
+ * `secondsRemaining`/`secondsTotal` draw the countdown around the frame's own
+ * perimeter (spec §9.2): the honest progress of the wait, so it empties as
+ * the seconds run down rather than filling as if toward something. The frame
+ * itself is live at all times, but a countdown is not, so the perimeter only
+ * renders while both props are present and `secondsTotal` is positive —
+ * there is no resting empty or full track to fall back to.
  */
 export function TrafficLightFrame({
   grade,
   refining,
+  secondsRemaining,
+  secondsTotal,
   children,
 }: {
   grade: FixGradeName
   refining?: boolean
+  /** Seconds left in the current countdown. Omit when no countdown is running. */
+  secondsRemaining?: number
+  /** The countdown's total duration in seconds. Omit when no countdown is running. */
+  secondsTotal?: number
   children: React.ReactNode
 }) {
   const { theme } = useTheme()
@@ -125,6 +139,9 @@ export function TrafficLightFrame({
           transform: [{ scale }],
         }}
       />
+      {secondsRemaining !== undefined && secondsTotal !== undefined && secondsTotal > 0 ? (
+        <CaptureFramePerimeter progress={secondsRemaining / secondsTotal} colour={colour} />
+      ) : null}
       <View style={{ padding: spacing.lg, gap: spacing.sm }}>
         <Type variant="label" style={{ color: colour }}>
           {WORD[grade]}

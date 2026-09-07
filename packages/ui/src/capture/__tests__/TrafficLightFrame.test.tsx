@@ -78,6 +78,44 @@ describe('TrafficLightFrame', () => {
   })
 })
 
+describe('TrafficLightFrame countdown perimeter', () => {
+  // The frame is live at all times, but a countdown is not: without both
+  // `secondsRemaining` and `secondsTotal`, there is nothing to draw a
+  // perimeter around, so no resting empty or full track should appear.
+  it('renders no perimeter when no countdown is running', async () => {
+    await render(
+      <ThemeProvider>
+        <TrafficLightFrame grade="good">
+          <Text>contents</Text>
+        </TrafficLightFrame>
+      </ThemeProvider>,
+    )
+    expect(screen.queryByTestId('perimeter')).toBeNull()
+  })
+
+  it('renders no perimeter when only one of the two props is given', async () => {
+    await render(
+      <ThemeProvider>
+        <TrafficLightFrame grade="good" secondsRemaining={5}>
+          <Text>contents</Text>
+        </TrafficLightFrame>
+      </ThemeProvider>,
+    )
+    expect(screen.queryByTestId('perimeter')).toBeNull()
+  })
+
+  it('renders the perimeter once a countdown is running', async () => {
+    await render(
+      <ThemeProvider>
+        <TrafficLightFrame grade="good" secondsRemaining={5} secondsTotal={10}>
+          <Text>contents</Text>
+        </TrafficLightFrame>
+      </ThemeProvider>,
+    )
+    expect(screen.getByTestId('perimeter')).toBeTruthy()
+  })
+})
+
 describe('TrafficLightFrame while refining', () => {
   // Both tests below exercise the pulse effect, which schedules an
   // `Animated.loop`. Fake timers make that loop's teardown provable: the
