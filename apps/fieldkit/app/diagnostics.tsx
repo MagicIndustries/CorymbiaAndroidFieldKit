@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, ScrollView, View } from 'react-native'
+import { useRouter } from 'expo-router'
 import {
   createAmbientCache,
   createExpoLocationSource,
@@ -272,12 +273,24 @@ function buildDeliberateFix(samples: Reading[]): FixAttempt {
  * reports absence rather than raising; the save path calls
  * `buildDeliberateFix` and gets the sentence.
  */
-type CapturePreview = { accuracyM: number; sampleCount: number; grade: FixGrade }
+type CapturePreview = {
+  latitude: number
+  longitude: number
+  accuracyM: number
+  sampleCount: number
+  grade: FixGrade
+}
 function previewOf(samples: Reading[]): CapturePreview | null {
   if (samples.length === 0) return null
   try {
     const averaged = averageReadings(samples)
     return {
+      // The averaged coordinates, not the latest reading's: this is the
+      // position the override would store, and it is what the live readout
+      // beside the control has to show while a countdown is running, or the
+      // operator would be watching one number and saving another.
+      latitude: averaged.latitude,
+      longitude: averaged.longitude,
       accuracyM: averaged.accuracyM,
       sampleCount: averaged.sampleCount,
       grade: gradeAccuracy(averaged.accuracyM),
@@ -285,6 +298,17 @@ function previewOf(samples: Reading[]): CapturePreview | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Six decimal places, which is about 0.1 m at this latitude — one order finer
+ * than the best fix this hardware produces, so the last digit moving is real
+ * movement in the estimate rather than rounding noise. Fixed width and
+ * monospaced (see `Type`'s `mono` variant) so the digits do not jitter sideways
+ * while she is watching them settle.
+ */
+function formatDegrees(value: number): string {
+  return value.toFixed(6)
 }
 
 /**
@@ -347,6 +371,20 @@ const PULSE_MAX_OPACITY = 0.9
 const PULSE_STEADY_OPACITY = 0.6
 
 /**
+ * A position as it is shown on screen — the three numbers the operator watches.
+ *
+ * Deliberately not `Fix`: this is a readout, and it carries only what a readout
+ * can honestly display. `null` wherever there is no position at all.
+ */
+type ShownPosition = { latitude: number; longitude: number; accuracyM: number }
+
+function positionOfStoredFix(fix: StoredFix): ShownPosition | null {
+  return fix.quality === 'none'
+    ? null
+    : { latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM }
+}
+
+/**
  * A capture that has already been saved and is now being sharpened.
  *
  * `recordId` is the row on disk. That is the whole point of the model: the
@@ -355,9 +393,56 @@ const PULSE_STEADY_OPACITY = 0.6
  */
 type Countdown = {
   recordId: string
+  /**
+   * How the record is named on screen, captured at the tap.
+   *
+   * Held here rather than looked up later because the Recorded state has to
+   * name the point even when the refinement fails — at which moment the only
+   * thing known about the row is what the insert returned.
+   */
+  name: string
   /** How the record reads on disk right now — null when the tap found no fix at all. */
-  startAccuracyM: number | null
+  start: ShownPosition | null
   endsAtMs: number
+}
+
+/** Why a countdown ended. All three write the same refinement; only the words differ. */
+type FinishReason = 'countdown' | 'override' | 'plateau'
+
+/**
+ * A capture that is finished: the row on disk will not change again.
+ *
+ * This is what the Recorded state renders, and it is deliberately a snapshot
+ * rather than a pointer into `records`. A refinement that fails still ends the
+ * countdown, and the screen still has to say what is on disk — which at that
+ * moment is the fix the tap wrote, not whatever the averaging would have made
+ * of it.
+ */
+type Recorded = {
+  reason: FinishReason
+  name: string
+  /** The position on disk. Null when the capture never got one. */
+  position: ShownPosition | null
+  /** How many readings went into it, or null when the refinement did not land. */
+  sampleCount: number | null
+}
+
+const FINISH_WORDS: Record<FinishReason, string> = {
+  countdown: 'The countdown ran out.',
+  override: 'You accepted it early.',
+  plateau: 'The fix stopped improving, so the countdown finished itself.',
+}
+
+const FINISH_TRANSCRIPT_WORDS: Record<FinishReason, string> = {
+  countdown: 'the countdown',
+  override: 'the override',
+  plateau: 'auto-finish, on the plateau signal',
+}
+
+const FINISH_HEADLINES: Record<FinishReason, string> = {
+  countdown: 'Countdown complete',
+  override: 'Accepted',
+  plateau: 'Finished on the plateau signal',
 }
 
 const GRADE_WORDS: Record<FixGrade, string> = {
@@ -711,6 +796,9 @@ function DiagnosticsBody(props: BodyProps) {
   const db = useDatabase()
   const device = useDevice()
   const { settings, updateSetting } = useSettings()
+  // The only way out of this screen. `/` is the component gallery, which is the
+  // only route that exists — there is no launcher, activity list or map yet.
+  const router = useRouter()
   const {
     latest,
     readings,
@@ -735,11 +823,37 @@ function DiagnosticsBody(props: BodyProps) {
   // decides — see `writeInFlightRef` — but the state has to exist so the
   // controls can show it and refuse the second press.
   const [writing, setWriting] = useState(false)
-  // True once a countdown has finished — by expiry or by the override — and
-  // until the next tap clears it. It is what tells "the record is settled"
-  // apart from "no capture has happened yet", which the frame otherwise
-  // renders identically. See the capture-state banner below.
-  const [settled, setSettled] = useState(false)
+  // The finished capture, or null before the first one and from the next tap
+  // onward. Non-null is what puts the screen in its Recorded state — it is what
+  // tells "this point is on disk and done" apart from "no capture has happened
+  // yet", which the frame would otherwise render identically.
+  const [recorded, setRecorded] = useState<Recorded | null>(null)
+  /**
+   * True from the tap until the countdown it starts has finished. It is what
+   * puts the screen in its Acquiring state.
+   *
+   * Separate from `countdown` on purpose: the countdown is not set until three
+   * awaits after the tap, and the screen has to collapse to the single-focus
+   * view on the tap itself, not once the insert happens to come back. Separate
+   * from `writing` too — that flag is claimed by the ambient save and the
+   * refinement as well, neither of which is an acquisition.
+   */
+  const [acquiring, setAcquiring] = useState(false)
+  /**
+   * Whether the countdown may end itself when the fix stops improving.
+   *
+   * Off by default, and the control below says why: `holdVerdict` has been
+   * observed reading `plateaued` for a full minute while accuracy fell from
+   * 6.4 m to 4.0 m, so auto-finish would end most countdowns within seconds of
+   * a tap and the trip that is about to measure exactly that would come home
+   * with nothing. On is the behaviour the product wants once the signal is
+   * trustworthy, and the toggle is here so it can be felt on hardware.
+   *
+   * Deliberately screen state rather than a stored setting: it is a property of
+   * a diagnostic session, not a preference, and persisting it would let a
+   * session that switched it on silently spoil the next day's measurements.
+   */
+  const [autoFinish, setAutoFinish] = useState(false)
   // Re-render clock. `collected` is a ref, so the readout beside the control
   // would otherwise only move when a new reading happened to arrive; the
   // seconds remaining have to fall whether or not the receiver is talking.
@@ -861,12 +975,16 @@ function DiagnosticsBody(props: BodyProps) {
    */
   const pulse = useRef(new Animated.Value(PULSE_MIN_OPACITY)).current
   useEffect(() => {
-    // No countdown, or the user has asked for less motion: nothing runs. The
+    // Not acquiring, or the user has asked for less motion: nothing runs. The
     // steady value is applied by the style below rather than by animating to
     // it, so this path starts no animation at all — including when reduced
-    // motion is switched on part-way through a countdown, which re-runs this
+    // motion is switched on part-way through a capture, which re-runs this
     // effect and therefore tears the loop down first.
-    if (countdown === null || reduceMotion) return
+    //
+    // Keyed to `acquiring` rather than to `countdown`, so the frame is already
+    // breathing during the tap's own write — the seconds before `countdown` is
+    // set are exactly when she is looking at it hardest.
+    if (!acquiring || reduceMotion) return
 
     const loop = Animated.loop(
       Animated.sequence([
@@ -892,7 +1010,7 @@ function DiagnosticsBody(props: BodyProps) {
       loop.stop()
       pulse.setValue(PULSE_MIN_OPACITY)
     }
-  }, [countdown, reduceMotion, pulse])
+  }, [acquiring, reduceMotion, pulse])
 
   // Every `listRecords`-backed refresh (the on-arrival load below, and the
   // save handlers) takes this token before its awaits and only applies its
@@ -983,8 +1101,11 @@ function DiagnosticsBody(props: BodyProps) {
     if (writeInFlightRef.current || countdownRef.current !== null) return
     writeInFlightRef.current = true
     setWriting(true)
-    // The previous capture's "settled" banner belongs to the previous capture.
-    setSettled(false)
+    // The previous capture's Recorded panel belongs to the previous capture,
+    // and the screen collapses to its single-focus Acquiring view from the tap
+    // itself rather than from whenever the insert comes back.
+    setRecorded(null)
+    setAcquiring(true)
 
     const startedAtMs = Date.now()
     const endsAtMs = startedAtMs + countdownSeconds * 1000
@@ -1087,7 +1208,11 @@ function DiagnosticsBody(props: BodyProps) {
     // would ever refine.
     beginCountdown({
       recordId: record.id,
-      startAccuracyM: fix.quality === 'none' ? null : fix.accuracyM,
+      name: describeRecord(record),
+      start:
+        fix.quality === 'none'
+          ? null
+          : { latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM },
       endsAtMs,
     })
     setTickMs(Date.now())
@@ -1137,24 +1262,28 @@ function DiagnosticsBody(props: BodyProps) {
     releaseWrite()
     if (!mountedRef.current) return
     setCollecting(false)
+    // Back to Ready, not to Recorded: nothing was recorded. The single-focus
+    // view would otherwise sit there showing a countdown that will never run,
+    // with the reason for the failure hidden behind it.
+    setAcquiring(false)
     props.setMessage(message)
   }
 
   /**
    * Ends the wait and writes the averaged fix over the record that is already
-   * there — either because the countdown ran out, or because she accepted what
-   * had accumulated.
+   * there — because the countdown ran out, because she accepted what had
+   * accumulated, or because auto-finish saw the fix stop improving.
    *
-   * The two are the same operation and differ only in the sentence reported,
-   * which is the point: the override is not an escape hatch from the model, it
-   * is the model finishing early.
+   * All three are the same operation and differ only in the sentence reported,
+   * which is the point: neither the override nor auto-finish is an escape hatch
+   * from the model, each is the model finishing early.
    *
    * A failure here leaves the record exactly as the tap saved it, and says so.
    * Averaging genuinely can fail — `averageReadings` throws when no sample
    * carries a usable accuracy — and "the capture is still there, just not
    * sharpened" is a materially different message from "the capture was lost".
    */
-  async function finishCountdown(reason: 'countdown' | 'override') {
+  async function finishCountdown(reason: FinishReason) {
     const active = countdownRef.current
     if (active === null) return
     // Claimed synchronously, so the timer and the override cannot both refine
@@ -1174,9 +1303,12 @@ function DiagnosticsBody(props: BodyProps) {
     writeInFlightRef.current = true
     setWriting(true)
     // The countdown is over from this instant, whatever the write does next:
-    // nothing after this point will change the record's position again, and
-    // the frame has to stop claiming otherwise even if the refinement fails.
-    setSettled(true)
+    // nothing after this point will change the record's position again, and the
+    // screen has to stop claiming otherwise even if the refinement fails. The
+    // position recorded here is the one the tap wrote, which is what is on disk
+    // right now; `refineCapture` replaces it if and only if the update lands.
+    setAcquiring(false)
+    setRecorded({ reason, name: active.name, position: active.start, sampleCount: null })
     try {
       await refineCapture(reason, active)
     } finally {
@@ -1189,7 +1321,7 @@ function DiagnosticsBody(props: BodyProps) {
    * the write claim across every one of the exits below with a single
    * `finally` rather than repeating the release at each `return`.
    */
-  async function refineCapture(reason: 'countdown' | 'override', active: Countdown) {
+  async function refineCapture(reason: FinishReason, active: Countdown) {
     const samples = [...collected.current]
     collected.current = []
     // The transcript's anchor goes, so no further readings are recorded
@@ -1198,7 +1330,7 @@ function DiagnosticsBody(props: BodyProps) {
     // until the next tap clears them.
     captureStartMs.current = null
     setTranscriptEnd(
-      `ended by ${reason === 'override' ? 'the override' : 'the countdown'}, ` +
+      `ended by ${FINISH_TRANSCRIPT_WORDS[reason]}, ` +
         `${String(samples.length)} reading${samples.length === 1 ? '' : 's'} averaged`,
     )
 
@@ -1245,12 +1377,24 @@ function DiagnosticsBody(props: BodyProps) {
     // because the previous `(now ?? 0).toFixed(1)` would have reported a
     // fabricated "±0.0 m" if it ever were reached, and a made-up accuracy is
     // the one thing this instrument must never put on screen.
-    const now = refined.fix.quality === 'none' ? null : refined.fix.accuracyM
+    const position = positionOfStoredFix(refined.fix)
+    const now = position?.accuracyM ?? null
     const outcome =
-      `${reason === 'override' ? 'Accepted' : 'Countdown complete'} — ` +
+      `${FINISH_HEADLINES[reason]} — ` +
       `${describeRecord(refined)} refined to ${now === null ? 'no position' : `±${now.toFixed(1)} m`} ` +
       `from ${String(samples.length)} reading${samples.length === 1 ? '' : 's'} ` +
-      `(${describeImprovement(active.startAccuracyM, now)}).`
+      `(${describeImprovement(active.start?.accuracyM ?? null, now)}).`
+
+    // The Recorded panel now describes what actually landed rather than what
+    // the tap wrote. Set before the reload for the same reason `outcome` is
+    // composed before it: this is a statement about disk, and a failure to
+    // refresh a list cannot change it.
+    setRecorded({
+      reason,
+      name: describeRecord(refined),
+      position,
+      sampleCount: samples.length,
+    })
 
     let loaded: FieldRecord[]
     try {
@@ -1275,7 +1419,7 @@ function DiagnosticsBody(props: BodyProps) {
   // over `db`, `device` and the setters), and a timer that restarted whenever
   // that happened would never fire: a reading arrives roughly every second,
   // and each one re-renders this screen.
-  const finishRef = useRef<(reason: 'countdown' | 'override') => void>(() => undefined)
+  const finishRef = useRef<(reason: FinishReason) => void>(() => undefined)
   useEffect(() => {
     finishRef.current = (reason) => {
       void finishCountdown(reason)
@@ -1416,11 +1560,28 @@ function DiagnosticsBody(props: BodyProps) {
   // well as on screen.
 
   const preview = countdown === null ? null : previewOf(collected.current)
-  // During a countdown the frame grades the fix that would actually be stored;
-  // idle, it grades the live reading. Those are different questions and the
-  // frame answers whichever one the screen is currently asking.
-  const shownAccuracyM =
-    countdown === null ? (latest?.accuracyM ?? null) : (preview?.accuracyM ?? null)
+
+  /**
+   * The three numbers the readout shows, and the fix the frame grades.
+   *
+   * Whichever question the screen is currently asking:
+   *
+   *  - Acquiring — the running average, which is the position the override
+   *    would store. Watching a single reading bounce between 4 m and 9 m says
+   *    nothing about whether the accumulated fix is getting better.
+   *  - Recorded — what is on disk. Live coordinates after a point is recorded
+   *    would be describing somewhere the record is not.
+   *  - Ready — the live reading, because there is nothing else to describe.
+   */
+  const shownPosition: ShownPosition | null =
+    countdown !== null
+      ? (preview ?? null)
+      : recorded !== null
+        ? recorded.position
+        : latest !== null
+          ? { latitude: latest.latitude, longitude: latest.longitude, accuracyM: latest.accuracyM }
+          : null
+  const shownAccuracyM = shownPosition?.accuracyM ?? null
   const grade: FixGrade | null = shownAccuracyM === null ? null : gradeAccuracy(shownAccuracyM)
   const frameColour =
     grade === 'good'
@@ -1432,11 +1593,16 @@ function DiagnosticsBody(props: BodyProps) {
           : props.theme.colors.border
   const secondsLeft =
     countdown === null ? 0 : Math.max(0, Math.ceil((countdown.endsAtMs - tickMs) / 1000))
-  // The plateau signal SUGGESTS and never decides (spec §9.1). It has been
-  // observed reading `plateaued` while accuracy fell from 6.4 m to 4.0 m, so
-  // acting on it would end countdowns in the middle of genuine improvement.
-  // It moves the override to a solid fill and adds a sentence; the countdown
-  // runs on regardless until it expires or she ends it.
+  /**
+   * Whether the fix has stopped getting better, according to `holdVerdict`.
+   *
+   * What is done about it is `autoFinish`'s decision, not this value's. Off —
+   * the default — it only moves the override to a solid fill and changes a
+   * sentence, and the countdown runs on until it expires or she ends it. On, it
+   * ends the countdown, which is the behaviour the product wants and the reason
+   * the toggle exists; see `autoFinish` above for why that is not yet the
+   * default.
+   */
   const plateaued = countdown !== null && holdVerdict(collected.current) === 'plateaued'
   // Read at render time, like `collected.current` above: the ticker and the
   // message updates are what re-render, and this reads whatever the location
@@ -1444,28 +1610,330 @@ function DiagnosticsBody(props: BodyProps) {
   const transcriptRows = transcript.current
 
   /**
-   * What the record on disk is doing, which is NOT the same question as
-   * whether a countdown is running.
+   * Auto-finish. Declared here rather than beside the other effects because it
+   * reads `plateaued`, which is computed from a ref at render time and has no
+   * meaning further up the function.
    *
-   * The tap saves immediately, so from that instant there is a real row on
-   * disk — but its position keeps being rewritten until the countdown ends.
-   * The countdown readout implied that and nothing said it, so a sharp number
-   * on a frame that was about to be replaced looked exactly like a stored one,
-   * and walking away at the wrong moment stored a different fix from the one
-   * she read. These three states are said in words next to the control (below)
-   * because doctrine rule 9 forbids leaving it to the frame: the pulse and the
-   * colour may only repeat what the words already say.
+   * It runs after the effect that refreshes `finishRef` (effects fire in
+   * declaration order), so the function it calls is this render's, not a stale
+   * one. `finishCountdown` claims `countdownRef` synchronously, so this cannot
+   * race the expiry timer or the override into a second refinement — whichever
+   * arrives first wins and the others return at the top.
+   *
+   * The verdict is only re-evaluated when the screen re-renders, which the
+   * countdown ticker does four times a second, so the longest this can lag a
+   * plateau is 250 ms.
    */
-  const captureState: 'idle' | 'provisional' | 'settled' =
-    countdown !== null ? 'provisional' : settled ? 'settled' : 'idle'
+  useEffect(() => {
+    if (!autoFinish || countdown === null || !plateaued) return
+    finishRef.current('plateau')
+  }, [autoFinish, countdown, plateaued])
+
+  /**
+   * Which of the three screen states this is (doctrine rule 1: one job per
+   * screen, one obvious primary action, everything else subordinate or
+   * off-screen — and rule 2: entering capture is visually unmistakable).
+   *
+   *  - `ready` — the instrument: every panel, the logs, the choosers, the
+   *    record list, and a control that says RECORD FIX.
+   *  - `acquiring` — from the tap until the countdown ends. The screen
+   *    collapses to the position, the grade, the time left, the pulsing frame,
+   *    the words saying the fix is saved and still sharpening, and the
+   *    accept-now control. Nothing else: she is standing still in a paddock
+   *    holding a phone, and the screen shows her one thing.
+   *  - `recorded` — the point is on disk and final. The fuller view comes back
+   *    (the transcript is the artefact this trip exists to produce and must be
+   *    reachable the moment the countdown ends), with the frame saying what was
+   *    recorded and offering the two ways onward.
+   */
+  const phase: 'ready' | 'acquiring' | 'recorded' = acquiring
+    ? 'acquiring'
+    : recorded !== null
+      ? 'recorded'
+      : 'ready'
+
+  /**
+   * The capture frame: the traffic light, the live readout, the words for
+   * whichever of the three states this is, and the one control.
+   *
+   * Built once here and rendered by both layouts below, so the Acquiring view
+   * and the fuller view cannot drift into two different controls. Everything
+   * that responds to a capture lives INSIDE the frame, directly above the
+   * button that starts and ends it — the defect this arrangement exists to fix
+   * was feedback sitting in a panel most of a screen away from the thumb
+   * pressing the control, so on a tablet nothing she could see was anywhere
+   * near what she was touching.
+   */
+  const captureFrame = (
+    <View
+      style={{
+        borderWidth: field.frame,
+        // Colour never carries meaning alone (doctrine rule 9): the grade word
+        // below says the same thing, and a fix too poor to grade — or none at
+        // all — additionally dashes the frame.
+        borderColor: frameColour,
+        borderStyle: grade === null || grade === 'poor' ? 'dashed' : 'solid',
+        borderRadius: radii.xl,
+        padding: spacing.md,
+        // Sunken, not raised. `captureAccurate` — the button's kind for most of
+        // every countdown, which is the state the one control on this screen
+        // occupies longest — resolves to exactly the same value as
+        // `surfaceRaised` in both themes, so the control was painted its own
+        // background and separated from it by a 2 px border alone. The one
+        // thing that has to be findable under a thumb in glare was at its least
+        // visible precisely when it mattered most. `surfaceSunken` is a step
+        // away from the button in both themes, so the control reads as an
+        // object sitting in the frame rather than as part of it.
+        backgroundColor: props.theme.colors.surfaceSunken,
+      }}
+      testID="capture-frame"
+    >
+      {/*
+        The pulse. A second ring, inset just inside the frame above and drawn in
+        the same grade colour, whose OPACITY breathes while — and only while — a
+        capture is being acquired. The frame therefore appears to thicken and
+        thin; it never changes hue and never disappears, so the traffic light
+        still answers "how good is this fix" at every instant of the cycle,
+        which is the one thing the pulse is not allowed to cost. It carries no
+        meaning of its own that the words below do not already carry (doctrine
+        rule 9).
+
+        `radii.md` rather than `radii.xl`: the ring sits one frame-width inside
+        the outer border, and 16 − 5 is 11, which is exactly `radii.md`. A
+        concentric ring drawn at the outer radius reads as a misprint at the
+        corners.
+      */}
+      {phase === 'acquiring' ? (
+        <Animated.View
+          testID="capture-pulse"
+          pointerEvents="none"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          style={{
+            // The ring is laid out against the frame's padding box — the inner
+            // edge of the border above — which is exactly where a concentric
+            // second ring belongs. Written out rather than spread from
+            // `StyleSheet.absoluteFill`, which is a registered style id and not
+            // an object this style can merge.
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            bottom: 0,
+            left: 0,
+            borderWidth: field.frame,
+            borderColor: frameColour,
+            borderRadius: radii.md,
+            opacity: reduceMotion ? PULSE_STEADY_OPACITY : pulse,
+          }}
+        />
+      ) : null}
+
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <Type variant="heading">{grade === null ? 'NO FIX YET' : GRADE_WORDS[grade]}</Type>
+        <Type variant="heading" testID="capture-accuracy">
+          {shownAccuracyM === null ? '—' : `±${shownAccuracyM.toFixed(1)} m`}
+        </Type>
+      </View>
+
+      {/*
+        The position itself, beside the control rather than in the GPS panel
+        half a screen away, because the whole point is to watch it move while
+        the fix is being refined. It is the position the frame is describing —
+        the running average during a capture, which is what the override would
+        store; what is on disk once a point is recorded; the live reading
+        otherwise — so the numbers and the accuracy above them can never be
+        about two different things.
+      */}
+      <View style={{ height: spacing.xs }} />
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+        <Type variant="mono" dim>lat</Type>
+        <Type variant="mono" testID="capture-latitude">
+          {shownPosition === null ? '—' : formatDegrees(shownPosition.latitude)}
+        </Type>
+      </View>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+        <Type variant="mono" dim>lon</Type>
+        <Type variant="mono" testID="capture-longitude">
+          {shownPosition === null ? '—' : formatDegrees(shownPosition.longitude)}
+        </Type>
+      </View>
+
+      {phase === 'acquiring' ? (
+        <>
+          {/*
+            Three things said in words, because doctrine rule 9 forbids leaving
+            any of them to the frame's colour or its pulse: that the reading is
+            already saved, that it is being refined and she may wait, and that
+            she can skip and take what has been measured so far.
+          */}
+          <View style={{ height: spacing.xs }} />
+          <Type
+            testID="capture-state"
+            variant="label"
+            style={{ color: props.theme.colors.statusFair }}
+          >
+            {countdown === null ? 'SAVING — WRITING THIS FIX' : 'SAVED — REFINING'}
+          </Type>
+          {countdown === null ? (
+            <Type variant="small">The reading is being written to the record list.</Type>
+          ) : (
+            <>
+              <Type variant="small">
+                This reading is already saved. It is being refined now — stand still and wait for a
+                sharper fix if you want one.
+              </Type>
+              <Type variant="small" dim>
+                Or skip the wait: ACCEPT NOW keeps the fix exactly as measured so far.
+              </Type>
+
+              <View style={{ height: spacing.xs }} />
+              <Type variant="mono" testID="capture-countdown">
+                {`${String(secondsLeft)}s left  n=${String(preview?.sampleCount ?? collected.current.length)}`}
+              </Type>
+              <Type variant="mono" dim>
+                {describeImprovement(countdown.start?.accuracyM ?? null, preview?.accuracyM ?? null)}
+              </Type>
+              <View style={{ height: spacing.xs }} />
+              <Type variant="small" dim={!plateaued}>
+                {plateaued
+                  ? 'About as sharp as it gets here — accepting now costs nothing.'
+                  : 'Still improving — keep standing still.'}
+              </Type>
+            </>
+          )}
+
+          <View style={{ height: spacing.sm }} />
+          <Button
+            testID="capture-button"
+            label={
+              writing
+                ? 'SAVING…'
+                : plateaued
+                  ? 'ACCEPT NOW — NOT IMPROVING'
+                  : 'ACCEPT NOW'
+            }
+            spokenLabel={
+              writing
+                ? 'Saving this capture'
+                : 'Accept the fix accumulated so far and end the refinement'
+            }
+            // During a capture the override is outlined until the fix stops
+            // improving, and solid once it has — prominence, not a decision.
+            kind={plateaued ? 'primary' : 'accurate'}
+            size="field"
+            // Only while a write is actually in flight. `writing` is false again
+            // by the time `countdown` is set, so the override is live for every
+            // moment the refinement is running, which §9.1 requires. This is the
+            // visible half of the double-tap guard; `writeInFlightRef` is the
+            // half that actually enforces it, because a `Pressable` can be hit
+            // again before a `setState` has rendered.
+            disabled={writing}
+            onPress={() => void finishCountdown('override')}
+          />
+        </>
+      ) : recorded !== null ? (
+        <>
+          <View style={{ height: spacing.xs }} />
+          <Type
+            testID="capture-state"
+            variant="heading"
+            style={{ color: props.theme.colors.statusGood }}
+          >
+            {`POINT ${recorded.name} RECORDED`}
+          </Type>
+          <Type variant="small">{describeRecorded(recorded)}</Type>
+          <Type variant="small" dim>{FINISH_WORDS[recorded.reason]}</Type>
+
+          {/*
+            NEXT PLAN — the "optionally add things" affordance goes here.
+            Attaching a title, a description, photos and voice notes to the point
+            that has just been recorded (doctrine rule 3: progressive disclosure
+            with a floor of zero, and rule 5: one visual signature per input
+            affordance, in a fixed order — `InputAffordanceRow` in
+            `packages/ui/src/inputs/` already renders exactly that row and is
+            what belongs in this gap). Deliberately not built now: none of it has
+            a storage path yet, and a control that looks like it attaches a photo
+            and does not would be worse than its absence.
+          */}
+
+          <View style={{ height: spacing.sm }} />
+          <Button
+            testID="capture-button"
+            label={writing ? 'SAVING…' : 'TAKE ANOTHER READING'}
+            spokenLabel={
+              writing ? 'Saving' : 'Record another fix, starting a new point from where you are now'
+            }
+            kind="fast"
+            size="field"
+            disabled={writing}
+            onPress={() => void captureNow()}
+          />
+          <View style={{ height: spacing.sm }} />
+          {/*
+            The way out. The gallery is the only destination that exists — there
+            is no launcher or activity list yet — so this says where it actually
+            goes rather than pretending to be a general "done".
+          */}
+          <Button
+            testID="leave-button"
+            label="DONE — BACK TO THE GALLERY"
+            spokenLabel="Finish here and go back to the component gallery"
+            kind="secondary"
+            onPress={() => {
+              router.push('/')
+            }}
+          />
+        </>
+      ) : (
+        <>
+          <View style={{ height: spacing.xs }} />
+          <Type variant="small" dim>
+            One tap saves this fix immediately, then the screen counts down for{' '}
+            {String(countdownSeconds)}s while you stand still and sharpens the saved record.
+          </Type>
+
+          <View style={{ height: spacing.sm }} />
+          <Button
+            testID="capture-button"
+            label={writing ? 'SAVING…' : 'RECORD FIX'}
+            spokenLabel={writing ? 'Saving' : 'Record the current fix now'}
+            // Lime for the one-tap record, the fast action.
+            kind="fast"
+            size="field"
+            disabled={writing}
+            onPress={() => void captureNow()}
+          />
+        </>
+      )}
+    </View>
+  )
+
+  // Doctrine rule 16: every screen carries a spoken description — and it has to
+  // describe the state the screen is actually in, or the one thing a person
+  // using it without sight is told is the one thing that is no longer true.
+  const spokenDescription =
+    phase === 'acquiring'
+      ? 'Acquiring a fix. The reading is already saved; the screen is refining its position while you stand still. Live latitude, longitude, accuracy and time remaining, and a control that accepts the fix as it stands.'
+      : phase === 'recorded'
+        ? 'A survey point has been recorded and its position is final. Its accuracy and coordinates, the countdown transcript, and controls to take another reading or leave for the component gallery.'
+        : 'Diagnostics. A development instrument for proving the GPS and database engine on real hardware. Live GPS readings, device facts, and a single capture control that records the current fix immediately and then sharpens it while you stand still.'
+
+  // The Acquiring state (doctrine rules 1 and 2): the capture frame and nothing
+  // else. Every panel, log, chooser and list is off-screen for the duration —
+  // she is standing still in a paddock holding a phone, and this is the one
+  // moment where the screen has exactly one job. The transcript those panels
+  // contain is not lost: it is on screen again the instant the countdown ends,
+  // which is the earliest moment it can be read anyway.
+  if (phase === 'acquiring') {
+    return (
+      <Screen spokenDescription={spokenDescription}>
+        <View style={{ flex: 1, justifyContent: 'center' }}>{captureFrame}</View>
+      </Screen>
+    )
+  }
 
   return (
-    // Doctrine rule 16: every screen carries a spoken description. This one is
-    // a development instrument rather than a designed screen, but it ships in
-    // the release APK and is reachable from the launcher, so it is a screen
-    // like any other — and a one-line prop is cheaper than an exemption the
-    // next instrument would inherit.
-    <Screen spokenDescription="Diagnostics. A development instrument for proving the GPS and database engine on real hardware. Live GPS readings, device facts, and a single capture control that records the current fix immediately and then sharpens it while you stand still.">
+    <Screen spokenDescription={spokenDescription}>
       <ScrollView showsVerticalScrollIndicator={false}>
         <Type variant="title">Diagnostics</Type>
         <Type dim>Not a design. An instrument for proving the engine on hardware.</Type>
@@ -1528,185 +1996,7 @@ function DiagnosticsBody(props: BodyProps) {
           {row('collected samples', String(collected.current.length))}
         </Card>
 
-        {/*
-          The capture block. Everything that responds to the countdown lives
-          INSIDE the traffic-light frame, directly above the button that starts
-          and ends it — the defect this change exists to fix was that the
-          feedback sat in a panel most of a screen away from the thumb pressing
-          the control, so on a tablet nothing she could see was anywhere near
-          what she was touching.
-        */}
-        <View style={{ height: spacing.lg }} />
-        <View
-          style={{
-            borderWidth: field.frame,
-            // Colour never carries meaning alone (doctrine rule 9): the grade
-            // word below says the same thing, and a fix too poor to grade —
-            // or none at all — additionally dashes the frame.
-            borderColor: frameColour,
-            borderStyle: grade === null || grade === 'poor' ? 'dashed' : 'solid',
-            borderRadius: radii.xl,
-            padding: spacing.md,
-            // Sunken, not raised. `captureAccurate` — the button's kind for
-            // most of every countdown, which is the state the one control on
-            // this screen occupies longest — resolves to exactly the same
-            // value as `surfaceRaised` in both themes, so the control was
-            // painted its own background and separated from it by a 2 px
-            // border alone. The one thing that has to be findable under a
-            // thumb in glare was at its least visible precisely when it
-            // mattered most. `surfaceSunken` is a step away from the button in
-            // both themes, so the control reads as an object sitting in the
-            // frame rather than as part of it.
-            backgroundColor: props.theme.colors.surfaceSunken,
-          }}
-          testID="capture-frame"
-        >
-          {/*
-            The pulse. A second ring, inset just inside the frame above and
-            drawn in the same grade colour, whose OPACITY breathes while — and
-            only while — a countdown is running. The frame therefore appears to
-            thicken and thin; it never changes hue and never disappears, so the
-            traffic light still answers "how good is this fix" at every instant
-            of the cycle, which is the one thing the pulse is not allowed to
-            cost. It carries no meaning of its own that the words above the
-            button do not already carry (doctrine rule 9).
-
-            `radii.md` rather than `radii.xl`: the ring sits one frame-width
-            inside the outer border, and 16 − 5 is 11, which is exactly
-            `radii.md`. A concentric ring drawn at the outer radius reads as a
-            misprint at the corners.
-          */}
-          {captureState === 'provisional' ? (
-            <Animated.View
-              testID="capture-pulse"
-              pointerEvents="none"
-              accessibilityElementsHidden
-              importantForAccessibility="no-hide-descendants"
-              style={{
-                // The ring is laid out against the frame's padding box — the
-                // inner edge of the border above — which is exactly where a
-                // concentric second ring belongs. Written out rather than
-                // spread from `StyleSheet.absoluteFill`, which is a registered
-                // style id and not an object this style can merge.
-                position: 'absolute',
-                top: 0,
-                right: 0,
-                bottom: 0,
-                left: 0,
-                borderWidth: field.frame,
-                borderColor: frameColour,
-                borderRadius: radii.md,
-                opacity: reduceMotion ? PULSE_STEADY_OPACITY : pulse,
-              }}
-            />
-          ) : null}
-
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              alignItems: 'baseline',
-            }}
-          >
-            <Type variant="heading">{grade === null ? 'NO FIX YET' : GRADE_WORDS[grade]}</Type>
-            <Type variant="heading">
-              {shownAccuracyM === null ? '—' : `±${shownAccuracyM.toFixed(1)} m`}
-            </Type>
-          </View>
-
-          {/*
-            What the row above is a number ABOUT. "±4.0 m" on a screen that has
-            already written a record means one thing while the countdown is
-            still rewriting that record's position and another once it has
-            stopped, and nothing said which — a user reading a sharp figure and
-            walking away stored the fix from the moment she left, not the one
-            she read. Said in words, terse, immediately under the number and
-            immediately above the control, because that is where her eye and her
-            thumb already are.
-          */}
-          {captureState === 'idle' ? null : (
-            <>
-              <View style={{ height: spacing.xs }} />
-              <Type
-                testID="capture-state"
-                variant="label"
-                style={{
-                  color:
-                    captureState === 'provisional'
-                      ? props.theme.colors.statusFair
-                      : props.theme.colors.statusGood,
-                }}
-              >
-                {captureState === 'provisional' ? 'SAVED — STILL SHARPENING' : 'SAVED — SHARPENING DONE'}
-              </Type>
-              <Type variant="small" dim>
-                {captureState === 'provisional'
-                  ? 'Record written; its position is provisional.'
-                  : 'Record written; its position is no longer changing.'}
-              </Type>
-            </>
-          )}
-
-          <View style={{ height: spacing.xs }} />
-          {countdown === null ? (
-            <Type variant="small" dim>
-              One tap saves this fix immediately, then the screen counts down for{' '}
-              {String(countdownSeconds)}s while you stand still and sharpens the saved record.
-            </Type>
-          ) : (
-            <>
-              <Type variant="mono">
-                {`${String(secondsLeft)}s left  n=${String(preview?.sampleCount ?? collected.current.length)}`}
-              </Type>
-              <Type variant="mono" dim>
-                {describeImprovement(countdown.startAccuracyM, preview?.accuracyM ?? null)}
-              </Type>
-              <View style={{ height: spacing.xs }} />
-              <Type variant="small" dim={!plateaued}>
-                {plateaued
-                  ? 'About as sharp as it gets here — accepting now costs nothing.'
-                  : 'Still improving — keep standing still.'}
-              </Type>
-            </>
-          )}
-
-          <View style={{ height: spacing.sm }} />
-          <Button
-            testID="capture-button"
-            label={
-              writing
-                ? 'SAVING…'
-                : countdown === null
-                  ? 'RECORD FIX'
-                  : plateaued
-                    ? 'ACCEPT NOW — NOT IMPROVING'
-                    : 'ACCEPT NOW'
-            }
-            spokenLabel={
-              writing
-                ? 'Saving this capture'
-                : countdown === null
-                  ? 'Record the current fix now'
-                  : 'Accept the fix accumulated so far and end the countdown'
-            }
-            // Lime for the one-tap record, the fast action. During a countdown
-            // the override is outlined until the fix stops improving, and solid
-            // once it has — prominence, not a decision.
-            kind={countdown === null ? 'fast' : plateaued ? 'primary' : 'accurate'}
-            size="field"
-            // Only while a write is actually in flight. `writing` is false
-            // again by the time `countdown` is set, so the override is live for
-            // every moment the countdown is running, which §9.1 requires. This
-            // is the visible half of the double-tap guard; `writeInFlightRef`
-            // is the half that actually enforces it, because a `Pressable` can
-            // be hit again before a `setState` has rendered.
-            disabled={writing}
-            onPress={() => {
-              if (countdown === null) void captureNow()
-              else void finishCountdown('override')
-            }}
-          />
-        </View>
+        {captureFrame}
 
         {/*
           The countdown transcript, immediately below the frame it corroborates
@@ -1740,12 +2030,13 @@ function DiagnosticsBody(props: BodyProps) {
             ))
           )}
           <View style={{ height: spacing.xs }} />
-          {/* Where the countdown began is row 1; this is where it ended. */}
-          <Type variant="small" dim>
-            {countdown !== null
-              ? `collecting — ${String(secondsLeft)}s left`
-              : (transcriptEnd ?? 'no countdown run yet')}
-          </Type>
+          {/*
+            Where the countdown began is row 1; this is where it ended. There is
+            no "collecting" case any more: this card only exists in the Ready and
+            Recorded states, and a capture that is still collecting has the
+            screen to itself.
+          */}
+          <Type variant="small" dim>{transcriptEnd ?? 'no countdown run yet'}</Type>
         </Card>
 
         <View style={{ height: spacing.sm }} />
@@ -1770,6 +2061,55 @@ function DiagnosticsBody(props: BodyProps) {
             </View>
           ))}
         </View>
+
+        <View style={{ height: spacing.sm }} />
+        <Type variant="label" dim>AUTO-FINISH</Type>
+        <View style={{ height: spacing.xs }} />
+        {/*
+          The plateau rule, on a switch, because the product wants one behaviour
+          and the evidence currently supports the other.
+
+          What the product wants: if the fix is as good as it is going to get,
+          the countdown should finish on its own rather than make her stand in a
+          paddock waiting out a timer for nothing.
+
+          Why it is off by default: `holdVerdict` has been watched on real
+          hardware reading `plateaued` for a full minute while accuracy fell
+          from 6.4 m to 4.0 m. With auto-finish on, that countdown would have
+          ended within seconds of the tap, in the middle of genuine improvement
+          — and this screen is about to be carried outdoors specifically to
+          measure how often that happens. Defaulting it on would destroy the
+          evidence the trip exists to collect.
+
+          So it ships as real, working behaviour that a tester switches on
+          deliberately, feels, and switches off again before taking a
+          measurement. Locked while a capture is running for the same reason the
+          length chooser is: changing the terms of a wait already underway has
+          no honest meaning.
+        */}
+        <Type variant="small" dim>
+          The refinement can end itself the moment the fix stops improving. Off by default: the
+          plateau signal has been seen reading &quot;plateaued&quot; for a full minute while
+          accuracy improved from 6.4 m to 4.0 m, so it would cut countdowns short in the middle of
+          real improvement. Switch it on to feel the intended behaviour.
+        </Type>
+        <View style={{ height: spacing.xs }} />
+        <Button
+          testID="auto-finish-toggle"
+          label={
+            autoFinish
+              ? 'AUTO-FINISH ON — ends as soon as the fix stops improving'
+              : 'AUTO-FINISH OFF — the countdown always runs out'
+          }
+          spokenLabel={
+            autoFinish
+              ? 'Auto-finish is on. The refinement ends as soon as the fix stops improving. Activate to turn it off.'
+              : 'Auto-finish is off. The countdown always runs to the end. Activate to turn it on.'
+          }
+          kind={autoFinish ? 'primary' : 'secondary'}
+          disabled={countdown !== null}
+          onPress={() => setAutoFinish((on) => !on)}
+        />
 
         <View style={{ height: spacing.sm }} />
         {/*
@@ -1842,6 +2182,27 @@ function DiagnosticsBody(props: BodyProps) {
       </ScrollView>
     </Screen>
   )
+}
+
+/**
+ * What the Recorded state says about the point on disk, in one sentence.
+ *
+ * Two facts it must never get wrong: the accuracy is the one that is stored,
+ * not the one that was on screen; and the sample count is absent rather than
+ * invented when the refinement did not land, because "averaged from 21
+ * readings" about a row that still holds the tap's single reading is exactly
+ * the false claim this instrument exists to catch elsewhere.
+ */
+function describeRecorded(recorded: Recorded): string {
+  const accuracy =
+    recorded.position === null
+      ? 'It has no position — the receiver never gave one that could be stored'
+      : `Final accuracy ±${recorded.position.accuracyM.toFixed(1)} m`
+  const samples =
+    recorded.sampleCount === null
+      ? ', from the reading the tap recorded'
+      : `, averaged from ${String(recorded.sampleCount)} reading${recorded.sampleCount === 1 ? '' : 's'}`
+  return `${accuracy}${samples}. This position is final — it will not change again.`
 }
 
 /**

@@ -118,6 +118,12 @@ const mockUseSettings = {
 const mockDb = { handle: 'not a real database' }
 const mockStatus = { state: 'ready' as const, error: null, applied: ['001_initial'] }
 
+// The only navigation this screen does: the way out of the Recorded state.
+const mockPush = jest.fn()
+jest.mock('expo-router', () => ({
+  useRouter: () => ({ push: (href: string) => mockPush(href) }),
+}))
+
 jest.mock('../../src/db/provider', () => ({
   // A handle, not a database. Nothing in this file calls a method on it: every
   // repository function that would has been replaced above, and the screen only
@@ -370,8 +376,8 @@ describe('the capture control', () => {
 
     expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
     expect(mockStored).toHaveLength(1)
-    // And exactly one countdown came out of it.
-    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — STILL SHARPENING')
+    // And exactly one acquisition came out of it.
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — REFINING')
   })
 
   it('refines the record exactly once when the countdown runs to completion', async () => {
@@ -410,12 +416,12 @@ describe('the capture control', () => {
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
   })
 
-  it('does not end the countdown when the plateau signal fires', async () => {
-    // A deliberate rule, not an oversight (spec §9.1). On real hardware the
-    // verdict read `plateaued` for a full minute while accuracy fell from 6.4 m
-    // to 4.0 m, so a countdown that ended on the signal would end in the middle
-    // of genuine improvement — and the trip that is about to measure how often
-    // that happens needs the countdown to run regardless.
+  it('does not end the countdown on a plateau while auto-finish is off', async () => {
+    // Off is the default, and it is the setting the outdoor trip has to run
+    // under: `holdVerdict` has been watched reading `plateaued` for a full
+    // minute while accuracy fell from 6.4 m to 4.0 m, so a countdown that ended
+    // on the signal would end in the middle of genuine improvement and the
+    // measurement would never be made.
     await arriveWithAFix(6)
 
     await fireEvent.press(captureButton())
@@ -429,11 +435,36 @@ describe('the capture control', () => {
     expect(screen.getByText('ACCEPT NOW — NOT IMPROVING')).toBeTruthy()
     expect(screen.getByText(/About as sharp as it gets here/)).toBeTruthy()
 
-    // And does not act on it: no refinement, and the countdown is still
-    // collecting.
+    // And does not act on it: still acquiring, still no refinement.
     expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
-    expect(screen.getByText(/^collecting — /)).toBeTruthy()
-    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — STILL SHARPENING')
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — REFINING')
+
+    // Only the timer running out ends it, and it refines exactly once.
+    await runOutTheCountdown()
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+  })
+
+  it('ends the countdown on a plateau when auto-finish is on, refining exactly once', async () => {
+    await arriveWithAFix(6)
+
+    await fireEvent.press(screen.getByTestId('auto-finish-toggle'))
+    await settle()
+    expect(screen.getByText(/^AUTO-FINISH ON/)).toBeTruthy()
+
+    await fireEvent.press(captureButton())
+    await settle()
+    await emitReadings([6, 6, 6, 6])
+    await settle()
+
+    // Finished by itself, well inside the 20 s countdown, and exactly once.
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('POINT #1 RECORDED')
+    expect(screen.getByText(/The fix stopped improving, so the countdown finished itself\./)).toBeTruthy()
+    expect(screen.getByText(/ended by auto-finish, on the plateau signal/)).toBeTruthy()
+
+    // The countdown's own timeout was still pending. It must not refine again.
+    await runOutTheCountdown()
+    expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
   })
 
   it('leaves no timer running and updates no state when the screen unmounts mid-countdown', async () => {
@@ -472,16 +503,20 @@ describe('the capture control', () => {
     await fireEvent.press(captureButton())
     await settle()
 
-    // Row one is the reading the tap recorded; three more arrive during the
-    // countdown.
-    expect(screen.getAllByTestId('transcript-row')).toHaveLength(1)
-    await emitReadings([7, 6, 5])
-    expect(screen.getAllByTestId('transcript-row')).toHaveLength(4)
+    // Nothing but the capture frame is on screen during an acquisition, the
+    // transcript included — this asserts that deliberately rather than working
+    // around it, because a transcript she cannot read while standing still is
+    // the whole reason the screen collapses.
+    expect(screen.queryAllByTestId('transcript-row')).toHaveLength(0)
 
+    await emitReadings([7, 6, 5])
     await runOutTheCountdown()
 
-    // The rows are the evidence the trip exists to collect. They survive the
-    // countdown that produced them and are cleared only by the next tap.
+    // And it is all there the instant the point is recorded: one row per
+    // collected reading — the tap's own, plus the three that arrived during the
+    // countdown — with the closing marker saying how it ended. These rows are
+    // the artefact the trip exists to produce; they survive the countdown that
+    // made them and are cleared only by the next tap.
     expect(screen.getAllByTestId('transcript-row')).toHaveLength(4)
     expect(screen.getByText(/ended by the countdown, 4 readings averaged/)).toBeTruthy()
   })
@@ -510,31 +545,174 @@ describe('the ambient save', () => {
 
     // Only the capture's own insert.
     expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
-    // And once React catches up, the control says why rather than silently
-    // doing nothing.
-    expect(screen.getByTestId('ambient-button')).toBeDisabled()
+    // And once React catches up the control is not merely refusing, it is not
+    // on the screen at all: a tap puts the screen into its single-focus
+    // Acquiring state. `writeInFlightRef` is what turned the press away in the
+    // instant before that; this is what stops a second one being possible.
+    expect(screen.queryByTestId('ambient-button')).toBeNull()
 
     created.resolve(recordFrom({ quality: 'none' }))
     await settle()
   })
 
-  it('cannot run while a countdown is running', async () => {
+  it('cannot run twice at once, and says so on the control', async () => {
+    // The same guard, on the path where the control stays on screen: an ambient
+    // save does not collapse the screen, so this is where the mirrored
+    // `disabled` state is actually visible.
+    const created = deferred<FieldRecord>()
+    mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) => {
+      const record = recordFrom(input.fix)
+      mockStored = [record, ...mockStored]
+      return created.promise.then(() => record)
+    })
+
+    await arriveWithAFix()
+
+    await act(async () => {
+      void fireEvent.press(screen.getByTestId('ambient-button'))
+      void fireEvent.press(screen.getByTestId('ambient-button'))
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
+    // Both controls say the same thing, because both are refusing for the same
+    // reason: one write is already in flight.
+    expect(screen.getByTestId('ambient-button')).toBeDisabled()
+    expect(screen.getByTestId('capture-button')).toBeDisabled()
+    expect(screen.getAllByText('SAVING…')).toHaveLength(2)
+
+    created.resolve(recordFrom({ quality: 'none' }))
+    await settle()
+    expect(screen.getByTestId('ambient-button')).not.toBeDisabled()
+  })
+
+  it('is not even reachable while a countdown is running', async () => {
     await arriveWithAFix()
 
     await fireEvent.press(captureButton())
     await settle()
     expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
 
-    await fireEvent.press(screen.getByTestId('ambient-button'))
+    // The Acquiring state takes the whole screen, so the control is not on it.
+    // The guard inside `saveAmbient` still exists and still refuses — this
+    // asserts the stronger fact that there is nothing to press.
+    expect(screen.queryByTestId('ambient-button')).toBeNull()
+
+    // And it is back, enabled, the moment the point is recorded.
+    await runOutTheCountdown()
+    expect(screen.getByTestId('ambient-button')).not.toBeDisabled()
+    expect(screen.getByText('Save ambient fix')).toBeTruthy()
+  })
+})
+
+describe('the three screen states', () => {
+  it('collapses to the capture frame when a reading is taken, and comes back when it is recorded', async () => {
+    await arriveWithAFix()
+
+    // Ready: the instrument, in full.
+    expect(screen.getByText('DEVICE')).toBeTruthy()
+    expect(screen.getByText('COUNTDOWN TRANSCRIPT')).toBeTruthy()
+    expect(screen.getByText('READING LOG')).toBeTruthy()
+    expect(screen.getByText('STORED RECORDS')).toBeTruthy()
+    expect(screen.getByTestId('auto-finish-toggle')).toBeTruthy()
+    expect(screen.getByTestId('ambient-button')).toBeTruthy()
+
+    await fireEvent.press(captureButton())
     await settle()
 
-    expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
-    expect(screen.getByText('Save ambient fix — after the countdown')).toBeTruthy()
+    // Acquiring: one job on screen. Every panel, log, chooser and list is gone,
+    // and what is left is the frame, the position, the time left and the one
+    // control (doctrine rules 1 and 2).
+    expect(screen.queryByText('DEVICE')).toBeNull()
+    expect(screen.queryByText('COUNTDOWN TRANSCRIPT')).toBeNull()
+    expect(screen.queryByText('READING LOG')).toBeNull()
+    expect(screen.queryByText('STORED RECORDS')).toBeNull()
+    expect(screen.queryByTestId('auto-finish-toggle')).toBeNull()
+    expect(screen.queryByTestId('ambient-button')).toBeNull()
+    expect(screen.getByTestId('capture-frame')).toBeTruthy()
+    expect(screen.getByTestId('capture-latitude')).toBeTruthy()
+    expect(screen.getByTestId('capture-countdown')).toBeTruthy()
+    expect(screen.getByTestId('capture-button')).toBeTruthy()
+
+    await runOutTheCountdown()
+
+    // Recorded: the fuller view is back, so the transcript this trip exists to
+    // produce is readable again the moment it is complete.
+    expect(screen.getByText('DEVICE')).toBeTruthy()
+    expect(screen.getByText('COUNTDOWN TRANSCRIPT')).toBeTruthy()
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('POINT #1 RECORDED')
+  })
+
+  it('goes back to acquiring when another reading is taken from the recorded state', async () => {
+    await arriveWithAFix()
+    await fireEvent.press(captureButton())
+    await settle()
+    await emitReadings([7, 6])
+    await runOutTheCountdown()
+    expect(screen.getByText('TAKE ANOTHER READING')).toBeTruthy()
+
+    await fireEvent.press(captureButton())
+    await settle()
+
+    // A second acquisition, a second record, and the panels are hidden again.
+    expect(mockRepo.createRecord).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — REFINING')
+    expect(screen.queryByText('STORED RECORDS')).toBeNull()
+
+    await runOutTheCountdown()
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('POINT #2 RECORDED')
+  })
+
+  it('offers a way out of the recorded state, to the only destination there is', async () => {
+    await arriveWithAFix()
+    await fireEvent.press(captureButton())
+    await settle()
+    await runOutTheCountdown()
+
+    await fireEvent.press(screen.getByTestId('leave-button'))
+    expect(mockPush).toHaveBeenCalledWith('/')
+  })
+})
+
+describe('the live position readout', () => {
+  it('shows the position beside the control and moves it as readings arrive', async () => {
+    await arriveWithAFix()
+
+    // Ready: the live reading.
+    expect(screen.getByTestId('capture-latitude')).toHaveTextContent('-37.813600')
+    expect(screen.getByTestId('capture-accuracy')).toHaveTextContent('±8.0 m')
+
+    await fireEvent.press(captureButton())
+    await settle()
+
+    const beforeLat = screen.getByTestId('capture-latitude').props.children
+    const beforeAccuracy = screen.getByTestId('capture-accuracy').props.children
+
+    // A sharper reading, from a slightly different place. The readout shows the
+    // running average — the position the override would actually store — so
+    // both numbers have to move.
+    await act(async () => {
+      jest.advanceTimersByTime(1000)
+      mockSource.emit({ ...reading(2, Date.now()), latitude: -37.8137, longitude: 144.9632 })
+    })
+
+    expect(screen.getByTestId('capture-latitude').props.children).not.toBe(beforeLat)
+    expect(screen.getByTestId('capture-accuracy').props.children).not.toBe(beforeAccuracy)
+
+    await runOutTheCountdown()
+
+    // Recorded: what is on disk, not wherever the receiver has wandered since.
+    const recordedLat = screen.getByTestId('capture-latitude').props.children
+    await act(async () => {
+      jest.advanceTimersByTime(1000)
+      mockSource.emit({ ...reading(9, Date.now()), latitude: -37.9, longitude: 145.1 })
+    })
+    expect(screen.getByTestId('capture-latitude').props.children).toBe(recordedLat)
   })
 })
 
 describe('the capture frame', () => {
-  it('says the record is saved but provisional while the countdown runs, and settled once it ends', async () => {
+  it('says in words that the fix is saved, that it is being refined, and that the wait can be skipped', async () => {
     await arriveWithAFix()
 
     // Nothing captured yet: no claim either way.
@@ -542,14 +720,19 @@ describe('the capture frame', () => {
 
     await fireEvent.press(captureButton())
     await settle()
-    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — STILL SHARPENING')
-    expect(screen.getByText('Record written; its position is provisional.')).toBeTruthy()
+
+    // All three, in words rather than by colour or motion (doctrine rule 9).
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — REFINING')
+    expect(screen.getByText(/This reading is already saved\./)).toBeTruthy()
+    expect(screen.getByText(/It is being refined now — stand still/)).toBeTruthy()
+    expect(screen.getByText(/Or skip the wait: ACCEPT NOW keeps the fix exactly as measured so far\./)).toBeTruthy()
 
     await emitReadings([7, 6])
     await runOutTheCountdown()
 
-    expect(screen.getByTestId('capture-state')).toHaveTextContent('SAVED — SHARPENING DONE')
-    expect(screen.getByText('Record written; its position is no longer changing.')).toBeTruthy()
+    // And the finished point reads as finished, not as a stopped countdown.
+    expect(screen.getByTestId('capture-state')).toHaveTextContent('POINT #1 RECORDED')
+    expect(screen.getByText(/This position is final — it will not change again\./)).toBeTruthy()
   })
 
   it('pulses only while a countdown is running, and holds steady under reduced motion', async () => {
