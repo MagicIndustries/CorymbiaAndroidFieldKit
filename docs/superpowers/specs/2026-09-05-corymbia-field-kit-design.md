@@ -197,9 +197,11 @@ corners are easiest. This inverts phone thinking.
   exactly where they are rather than migrated away: removing a settings column costs a
   migration, and the underlying question — what the dominant thumb should be given on the
   real capture screen — is still open, merely no longer answerable by swapping two boxes.
-  Plan 3 decides whether it acquires a new meaning or is retired. Until then it is stored,
-  displayed on the diagnostics screen as the persistence proof it has always doubled as, and
-  read by nothing.
+  **Plan 3 considered it and declined**, which is a decision rather than an omission: with one
+  control there is no side to trade, so there is nothing for the setting to mean on the capture
+  screen and nothing the screen could honestly do with it. Plan 5 decides, once the launcher has
+  shown whether it wants the setting. Until then it is stored, displayed on the diagnostics
+  screen as the persistence proof it has always doubled as, and read by nothing.
 - Readouts occupy the centre — looked at, not touched.
 - **Reach zones are user-configurable.** A handedness and anchor setting determines which
   corner the working column occupies and which side primary actions sit on. Changing it
@@ -453,8 +455,10 @@ It also still holds **`capturePrimary`**, which is no longer live settings conte
 which of two capture boxes took the dominant side, and §9.1 replaced the pair with a single
 control, so there is nothing left for it to choose. The key and its column stay exactly where
 they are rather than being migrated away (§5.4): it is stored, shown on the diagnostics
-screen as the persistence proof it has always doubled as, and read by nothing. Plan 3 decides
-whether it acquires a new meaning or is retired.
+screen as the persistence proof it has always doubled as, and read by nothing. Plan 3
+considered whether to give it a new meaning or retire it and declined to do either — with one
+control there is no side to trade — and Plan 5 decides, once the launcher has shown whether it
+wants the setting.
 
 The reason it exists at all is that an override which resets at every launch is not an
 override — and the field conditions these settings exist for do not change between launches.
@@ -638,7 +642,10 @@ A coloured frame, live at all times, doing two jobs:
 
 - **Fix quality**, continuously — green, amber, red. Readable from peripheral vision in
   glare, with gloves, while moving.
-- **Countdown progress**, charging around the perimeter as the wait runs down.
+- **Countdown progress**, emptying around the perimeter as the wait runs down. ("Charging" is
+  what an earlier draft said, and it is a leftover from the superseded accumulated-readings
+  model, where the only measure of progress was how many readings a hold had gathered. It
+  contradicted the paragraph below, and the implementation empties.)
 
 Two things changed with §9.1 and are stated here rather than left to be inferred:
 
@@ -680,6 +687,14 @@ grade with a status word.
 accuracy is still falling across recent readings: "Still improving — keep standing still."
 Once it plateaus: "About as sharp as it gets here — accepting now costs nothing." This is
 honest, computable, and answers the only question she actually has.
+
+**Only the first of those is displayed live.** Both sentences stay pinned here as copy — the
+wording is the answer to the question she has, and it is not to be re-composed at a call site
+— but §9.1.5 was corrected so that a plateau *finishes* the wait rather than announcing one
+first, and calls the announcement "an invitation to press nothing". The render that first
+reports a plateau is the same one that ends the countdown, so on a device the plateau sentence
+would exist for about a frame. Where it actually reaches her is the *recorded* state's "how the
+wait ended" line, which names the plateau among the three ways a countdown can finish (§9.6).
 
 **The trend is the averaged accuracy, not each reading's own estimate**, and the rule is
 calibrated against measured hardware rather than reasoned out. This replaces the earlier
