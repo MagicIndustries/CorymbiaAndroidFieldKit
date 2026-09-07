@@ -1201,9 +1201,26 @@ function DiagnosticsBody(props: BodyProps) {
     // sentence for each way a fix can fail to exist, and going through it means
     // EVERY `'none'` row leaves here with a reason attached rather than only
     // the ones that had a reading to reject.
-    const attempt = buildDeliberateFix(latest ? [latest] : [])
-    const fix: Fix = attempt.ok ? attempt.fix : { quality: 'none' }
-    const unstorable = attempt.ok ? null : attempt.message
+    //
+    // Wrapped in its own try, not left to run bare: `buildDeliberateFix` can
+    // itself throw synchronously (`sampleEvidence`'s preconditions, `nowIso`
+    // on an out-of-range timestamp from a misbehaving provider), and
+    // `writeInFlightRef` is claimed above with no other release path on this
+    // line. Left unguarded, that throw stuck the claim for the rest of the
+    // session — every later tap silently refused, with no message, and no way
+    // out short of leaving the screen. Lifted verbatim from `useCapture.ts`,
+    // which this screen was lifted to in the first place — see that file's
+    // `writeInFlight` comment for the full account.
+    let fix: Fix
+    let unstorable: string | null
+    try {
+      const attempt = buildDeliberateFix(latest ? [latest] : [])
+      fix = attempt.ok ? attempt.fix : { quality: 'none' }
+      unstorable = attempt.ok ? null : attempt.message
+    } catch (error) {
+      abandonCapture(describeFailure('Could not build the fix', error))
+      return
+    }
 
     // Taken before the first await so a slower refresh in flight elsewhere
     // (the on-arrival load, or an earlier save) can never win a race against
