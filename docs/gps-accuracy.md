@@ -289,6 +289,39 @@ a blunt instrument, but it is on the right side: it lets averaging deliver the
 real improvement it can (up to a factor of three) and then stops it claiming
 what the hardware never earned.
 
+### In practice the floor binds after about ten seconds
+
+This is not a rare edge case reserved for very long holds. It is what normally
+happens, and it is the reason the countdown is short.
+
+Measured on a Samsung S25 outdoors, readings arriving once a second: the
+combined figure fell below a third of the best single reading at the
+**thirteenth** reading and stayed there. From that moment the reported accuracy
+was **exactly** the best single reading divided by three, and every further
+reading was inert — it added weight to a total that was no longer being used.
+Only a *better individual reading* moved the number after that.
+
+Two consequences a reader has to carry with them, because both are
+counter-intuitive:
+
+- **Waiting longer stops buying accuracy.** Stored captures from that session:
+  ±1.6 m at 5 readings, ±1.5 m at 7, ±1.2 m at 12, ±1.3 m at 16, ±1.0 to ±1.4 m
+  at 21 across several runs, and ±1.1 m at 61. A full minute of standing still
+  was no better than twenty seconds, and worse than the best twenty. The curve
+  is flat from about ten seconds.
+- **Waiting longer makes the honesty check worse.** Spread was ±0.3 m on a
+  twenty-second hold and ±1.3 m on a sixty-second one. Nothing went wrong: the
+  longer you stand in one place, the more positional scatter the receiver
+  produces, and the spread is the greatest distance between any reading and the
+  fix (§4), so it can only grow. A long hold therefore reports the same
+  accuracy with a wider disagreement behind it, which is exactly the pattern
+  §4 says to be suspicious of.
+
+So a longer hold is not a safer hold. Once the floor binds, holding on buys a
+number that does not improve and provenance that gets worse. That measurement
+is what sets the capture screen's twelve-second default and what lets the
+countdown end itself when the fix stops improving — see `packages/geo/src/trend.ts`.
+
 ---
 
 ## 6. Readings with impossible accuracy figures

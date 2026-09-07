@@ -550,23 +550,55 @@ It is not forgotten and it is not deferred: it is replaced. There is now **one c
 4. **An override accepts whatever has accumulated and ends the wait.** It is the same
    control: during a countdown the button reads `ACCEPT NOW`. So exactly one action is ever
    live, and the override is reachable at every moment the countdown is running.
-5. **A plateau suggests; it never decides.** When the fix appears to have stopped improving,
-   the screen says so and makes the override prominent — and the countdown carries on until
-   it expires or she ends it. This is deliberate. `holdVerdict` has been observed reading
-   `plateaued` continuously through a stretch in which accuracy fell from 6.4 m to 4.0 m, so
-   a signal allowed to end a capture on its own would end it in the middle of genuine
-   improvement. **Nothing auto-completes on a trend.**
+5. **A plateau ends the countdown, and the override is live throughout.** When the fix has
+   stopped improving, the screen says so, makes the override prominent, and finishes the
+   wait. This reverses an earlier position — "nothing auto-completes on a trend" — which was
+   held because `holdVerdict` was not yet trustworthy: it judged each reading's own accuracy
+   estimate, which jitters half a metre between consecutive samples, and had no minimum
+   sample count, so on the measured Samsung S25 run it declared `plateaued` at the second
+   reading, 0.6 s after the tap, when the averaged fix was ±5.2 m and waiting reaches
+   ±1.4 m. A signal like that allowed to end a capture would have ended it four times worse
+   than the fix she was standing there for.
+
+   That defect is fixed rather than tolerated (§9.3), and the signal now fires at 12 samples
+   — about 11 s — on the same run. So the countdown ending itself is the intended behaviour:
+   she waits as long as the fix needs and no longer. What has *not* changed is that she can
+   always end it herself; the override is reachable at every moment a countdown is running,
+   and a plateau never blocks anything.
 
 **A tap before the receiver has a lock still records.** Doctrine rule 4: nothing blocks
 capture. The row is written with an honest `'none'` position, and the countdown that follows
 is what gives it one — `refineRecordFix` accepts a refinement *from* no position for exactly
 this case, while refusing one *to* no position.
 
-**The countdown length is not yet settled**, and this section deliberately does not fix one.
-It is a choice on the diagnostics screen — 5, 10, 20, 30 and 60 seconds — because the
-tolerable wait is a fact about a survey day and the useful wait is a fact about the
-receiver, and neither is knowable at a desk. Plan 3 sets a default from what the field
-measurements say.
+**The countdown default is twelve seconds**, from field measurement rather than from a desk.
+This section previously left it open for Plan 3 to set; the measurements have been taken and
+they set it.
+
+Stored captures on a Samsung S25 outdoors, readings at 1 Hz, each row a real capture:
+
+| wait | readings | accuracy |
+|------|----------|----------|
+| ~4 s | 5 | ±1.6 m |
+| ~6 s | 7 | ±1.5 m |
+| ~11 s | 12 | ±1.2 m |
+| ~15 s | 16 | ±1.3 m |
+| 20 s | 21 | ±1.0 to ±1.4 m across several runs |
+| 60 s | 61 | ±1.1 m, spread ±1.3 m |
+
+The curve is flat from about ten seconds. A full minute was no better than twenty seconds
+and worse than the best twenty. The mechanism is the floor in `averageReadings`: once enough
+samples accumulate the reported accuracy is exactly a third of the best single reading, so
+further samples are inert and only a better individual reading helps (`docs/gps-accuracy.md`
+§5). And a longer wait actively degrades the honesty check — spread was ±0.3 m at twenty
+seconds and ±1.3 m at sixty, because standing still for longer accumulates more positional
+scatter.
+
+So twelve seconds is not a compromise between what she will tolerate and what the receiver
+needs. It is where the receiver stops improving, and the two constraints turned out to agree.
+The diagnostics screen keeps the chooser — 5, 12, 20, 30 and 60 seconds — so the comparison
+can be run again on other hardware, in other sky, before the number is fixed for the field
+app.
 
 Placement follows the reach zone setting: a bottom band by default, and the bottom corner
 under the dominant thumb on a tablet in landscape. Handedness still drives that. Which
@@ -621,10 +653,34 @@ accuracy is still falling across recent readings: "Still improving — keep stan
 Once it plateaus: "About as sharp as it gets here — accepting now costs nothing." This is
 honest, computable, and answers the only question she actually has.
 
-That sentence **suggests and never decides** (§9.1.5). `holdVerdict` has been observed
-reading `plateaued` continuously through a stretch in which accuracy fell from 6.4 m to
-4.0 m. So the plateau line changes the wording and makes the override prominent, and the
-countdown carries on until it expires or she ends it.
+**The trend is the averaged accuracy, not each reading's own estimate**, and the rule is
+calibrated against measured hardware rather than reasoned out. This replaces the earlier
+position that the sentence "suggests and never decides", which existed because the signal
+misfired; it does not misfire now, and §9.1.5 says what changed.
+
+On a measured Samsung S25 run at 1 Hz the raw per-reading accuracy jitters — 7.5, 7.2, 6.8,
+6.7, 6.3 m — while the averaged accuracy the frame prints and the record stores falls
+smoothly and monotonically — 7.5, 5.2, 4.1, 3.5, 3.1 m, reaching 1.4 m by the twenty-first
+reading. Judging the raw column produced a `plateaued` at the second reading and then
+alternated verdicts through ten seconds of fast, monotonic improvement. Judging the averaged
+column does neither.
+
+Three constants, each derived from that data and documented in `packages/geo/src/trend.ts`
+against the figure it came from:
+
+- **Ten samples minimum before a plateau can be claimed at all.** The measured curve is flat
+  from about ten seconds (§9.1) and measurably improving below it, so a plateau claim before
+  then is false by construction. This is the guard that makes the n=2 misfire impossible.
+- **A trailing window of four readings**, so the verdict is about the last four seconds and
+  an improvement from ten seconds ago cannot claim to be happening now.
+- **0.6 m of improvement across that window** to count as still improving. The measured
+  window improvements fall through 0.640 m at the eleventh reading and 0.549 m at the
+  twelfth, and the stored captures put the flattening at the twelfth, so any threshold in
+  that open bracket flips the verdict where the hardware flattens; 0.6 m is its midpoint.
+
+**The verdict latches.** Once it has said `plateaued` it is never taken back, because with
+the countdown ending on the signal a withdrawable verdict would be a statement about a
+capture that no longer exists.
 
 Beside it, in words rather than a bar: **how much sharper the fix is than it was at the
 tap**, signed. A countdown that made the fix *worse* is the single most useful thing this
@@ -668,8 +724,10 @@ It is a distinct thing from a live reading tail, and both exist because neither 
 other's job: a tail is trimmed, shows raw per-reading accuracy, and has no marker of where a
 countdown began or ended, so it cannot corroborate the averaged number the operator was
 watching or the improvement claimed about it. Establishing when the plateau signal actually
-fires on real hardware is the whole reason for the field measurements §9.1 defers to Plan 3,
-and the transcript is the only record of it that survives the trip.
+fires on real hardware was the whole reason for the field measurements that set §9.1's
+default and §9.3's constants, and the transcript is what carried that evidence home. It
+stays for the same reason the chooser does — the numbers hold for one device under one sky
+and want re-measuring under another.
 
 ### 9.5 Duplicate guard
 
