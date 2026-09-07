@@ -1,7 +1,5 @@
 import {
-  OUTER_METRES,
   OUTER_RADIUS_PX,
-  TARGET_METRES,
   TARGET_RADIUS_PX,
   isLocked,
   radiusForMetres,
@@ -9,12 +7,25 @@ import {
 } from '../dialGeometry'
 
 describe('radiusForMetres', () => {
+  // These two anchor tests are written entirely in literals (1.4/26,
+  // 7.5/118) rather than against TARGET_METRES/TARGET_RADIUS_PX or
+  // OUTER_METRES/OUTER_RADIUS_PX. Calling radiusForMetres(TARGET_METRES) and
+  // comparing to any value that still equals TARGET_RADIUS_PX would be a
+  // tautology regardless of what expression supplies that value: a fit
+  // solved exactly through (TARGET_METRES, TARGET_RADIUS_PX) returns
+  // TARGET_RADIUS_PX at TARGET_METRES by construction, for whatever number
+  // TARGET_METRES currently holds — so that call can never fail from
+  // TARGET_METRES drifting away from what it's meant to measure. Fixing
+  // both the call and the expectation to spec's own numbers makes this a
+  // real check of the mapping against the specification, independent of
+  // whatever the constants currently say — the same convention the
+  // monotonicity test below already uses for this series.
   it('puts the measured floor exactly on the crosshair, which is what makes a good fix land on it', () => {
-    expect(radiusForMetres(TARGET_METRES)).toBeCloseTo(TARGET_RADIUS_PX, 5)
+    expect(radiusForMetres(1.4)).toBeCloseTo(26, 5)
   })
 
   it("puts the run's opening accuracy at the outer radius", () => {
-    expect(radiusForMetres(OUTER_METRES)).toBeCloseTo(OUTER_RADIUS_PX, 5)
+    expect(radiusForMetres(7.5)).toBeCloseTo(118, 5)
   })
 
   it('is monotonic, because a worse fix must never draw smaller than a better one', () => {

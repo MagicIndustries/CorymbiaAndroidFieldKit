@@ -28,8 +28,11 @@ export const TARGET_RADIUS_PX = 26
 
 /**
  * The accuracy the same measured run opened at, in metres — the first
- * reading's own estimate before any averaging (spec §9.1's table, n=1). This
- * is the wait's starting point, not an arbitrary "worst case".
+ * reading's own estimate before any averaging (spec §9.3's prose, which
+ * narrates the run descending from this opening figure to `TARGET_METRES`;
+ * §9.1's table only carries aggregated wait/readings/accuracy rows and has
+ * no per-reading entry to cite). This is the wait's starting point, not an
+ * arbitrary "worst case".
  */
 export const OUTER_METRES = 7.5
 
@@ -69,52 +72,68 @@ const MAX_RADIUS_PX = OUTER_RADIUS_PX + RING_SLACK_PX
 /**
  * `radiusForMetres` fits a straight line to `ln(metres)` —
  * `radius = LOG_INTERCEPT_PX + LOG_SLOPE_PX_PER_LN_M * ln(metres)` — solved
- * by hand from the two measured anchors above, and then written here as
- * fixed literals rather than recomputed from `TARGET_METRES`/`OUTER_METRES`
- * at load time.
+ * from the two measured anchors above (`TARGET_METRES` → `TARGET_RADIUS_PX`,
+ * `OUTER_METRES` → `OUTER_RADIUS_PX`) and computed here, at load time, from
+ * those four exported constants rather than pasted in as fitted literals.
+ * That is what keeps the mapping retunable: replacing a constant above — a
+ * different device's measured floor, say — moves the line automatically,
+ * with no hand algebra to redo and transcribe.
  *
- * That is a deliberate choice, not a shortcut: if the slope and intercept
- * were instead derived live from those two exported constants, then
- * `radiusForMetres(TARGET_METRES)` would equal `TARGET_RADIUS_PX` for *any*
- * value `TARGET_METRES` happened to hold — `ln(x / x)` is `0` for every `x`
- * — which would make the crosshair test in `dialGeometry.test.ts` a
- * tautology, true regardless of whether `TARGET_METRES` still means what its
- * own comment claims. Freezing the fitted numbers means an edit to
- * `TARGET_METRES` alone genuinely decouples the formula from its anchor, so
- * that test is actually checking the two are still in agreement (see Step 5
- * of the task brief, which breaks exactly this).
+ * The earlier draft of this module framed that as unsafe, because
+ * `radiusForMetres(TARGET_METRES)` reduces to
+ * `TARGET_RADIUS_PX + B·ln(TARGET_METRES / TARGET_METRES)`, and `ln(x / x)`
+ * is `0` for every `x` — so a crosshair test asserting
+ * `radiusForMetres(TARGET_METRES) === TARGET_RADIUS_PX` would pass no matter
+ * what `TARGET_METRES` held, which is a tautology. That diagnosis was
+ * correct; freezing the fitted numbers as literals was one fix for it, but
+ * the weaker of two, because it also froze the mapping itself against the
+ * constants it claims to be anchored on — an edit to `TARGET_METRES` no
+ * longer moved anything, it only made a test fail until someone re-solved
+ * the algebra by hand.
  *
- * The hand solution, from `radius = A + B·ln(m)` at the two anchor points:
+ * The other fix — used here — is to keep the derivation live and instead
+ * make the *tests* independent of these constants on both sides of the
+ * assertion: `dialGeometry.test.ts` calls `radiusForMetres(1.4)` and
+ * `radiusForMetres(7.5)` — the spec's own numbers, written as literals, not
+ * `TARGET_METRES`/`OUTER_METRES` — and compares the result to the literals
+ * `26`/`118`, not `TARGET_RADIUS_PX`/`OUTER_RADIUS_PX`. Asserting the
+ * expected pixel value as a literal is not sufficient on its own:
+ * `radiusForMetres(TARGET_METRES)` reduces to `TARGET_RADIUS_PX` by
+ * construction of `A`/`B` below, for *whatever* `TARGET_METRES` currently
+ * holds, so a test that still calls with the live constant would remain a
+ * tautology no matter what its expectation was written as. Fixing the call
+ * to the literal `1.4` is what makes the test actually about the
+ * specification's claim ("1.4 m measured ⇒ 26 px drawn") rather than about
+ * the mapping's self-consistency — so it fails the moment the mapping and
+ * the constants disagree, however that disagreement happens: change
+ * `TARGET_METRES` and the derived line moves off `(1.4, 26)`, so
+ * `radiusForMetres(1.4)` stops returning `26`; break the derivation's
+ * arithmetic and it stops matching even with the constants untouched. Both
+ * are exercised in `dialGeometry.test.ts`.
+ *
+ * The algebra being solved, from `radius = A + B·ln(m)` at the two anchor
+ * points, for reference (this is what the two lines below compute, not a
+ * value pasted from it):
  *
  * ```
- * 26  = A + B·ln(1.4)     ln(1.4) = 0.3364722366212128
- * 118 = A + B·ln(7.5)     ln(7.5) = 2.0149030205422647
+ * TARGET_RADIUS_PX = A + B·ln(TARGET_METRES)
+ * OUTER_RADIUS_PX  = A + B·ln(OUTER_METRES)
  *
- * B = (118 − 26) / (ln(7.5) − ln(1.4))
- *   = 92 / 1.6784307839210519
- *   = 54.813103335172983
- *
- * A = 26 − B·ln(1.4)
- *   = 26 − 54.813103335172983 × 0.3364722366212128
- *   = 7.5569125246646855
+ * B = (OUTER_RADIUS_PX − TARGET_RADIUS_PX) / ln(OUTER_METRES / TARGET_METRES)
+ * A = TARGET_RADIUS_PX − B·ln(TARGET_METRES)
  * ```
- *
- * Checked against both anchors: `A + B·ln(1.4) = 26.000000000000004` and
- * `A + B·ln(7.5) = 118.00000000000001` — exact to floating-point precision
- * (the trailing digits are `Math.log`/IEEE-754 rounding, well inside the
- * tests' `toBeCloseTo(…, 5)`), which is what "hits both anchors exactly"
- * means here: solved algebra, not a curve fit chosen to look right.
  *
  * A log mapping (rather than linear) is deliberate on top of that: accuracy
- * improves fast early in a hold and slowly thereafter (spec §9.1 — the
- * averaged figure runs 7.5 → 1.4 m over the measured series, most of that
+ * improves fast early in a hold and slowly thereafter (spec §9.3's prose —
+ * the run's accuracy runs `OUTER_METRES` → `TARGET_METRES`, most of that
  * drop in the first few readings), and a log radius makes that same shape
  * visible — the circle collapses quickly at first and eases into the
  * crosshair, rather than crawling there at a constant rate that never looks
  * like it is arriving.
  */
-const LOG_SLOPE_PX_PER_LN_M = 54.813103335172983
-const LOG_INTERCEPT_PX = 7.5569125246646855
+const LOG_SLOPE_PX_PER_LN_M =
+  (OUTER_RADIUS_PX - TARGET_RADIUS_PX) / Math.log(OUTER_METRES / TARGET_METRES)
+const LOG_INTERCEPT_PX = TARGET_RADIUS_PX - LOG_SLOPE_PX_PER_LN_M * Math.log(TARGET_METRES)
 
 /**
  * The accuracy circle's radius for a given accuracy, in metres (spec §9.2:
