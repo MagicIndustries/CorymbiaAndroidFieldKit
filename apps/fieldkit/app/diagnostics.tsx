@@ -278,7 +278,6 @@ type CapturePreview = {
   longitude: number
   accuracyM: number
   sampleCount: number
-  grade: FixGrade
 }
 function previewOf(samples: Reading[]): CapturePreview | null {
   if (samples.length === 0) return null
@@ -293,7 +292,6 @@ function previewOf(samples: Reading[]): CapturePreview | null {
       longitude: averaged.longitude,
       accuracyM: averaged.accuracyM,
       sampleCount: averaged.sampleCount,
-      grade: gradeAccuracy(averaged.accuracyM),
     }
   } catch {
     return null
@@ -547,15 +545,27 @@ function formatLogRow(row: LogRow): string {
 
 /**
  * The last `LOG_ROWS` readings, newest first, each carrying the verdict as it
- * stood *at that reading* — not today's verdict replayed over old data.
+ * stood *at that reading* — not today's verdict replayed over old data. This
+ * is a live development view, not the authoritative record of a countdown;
+ * see the caveat below and prefer `TranscriptRow` for anything that has to be
+ * trusted.
  *
  * `holdVerdict` is a pure function of the readings it is handed, so calling it
- * on `readings.slice(0, i + 1)` for each `i` reproduces exactly what the screen
- * would have said at that point in the stream: readings after position `i`
- * cannot influence it, because `holdVerdict` never sees them. It reads all of
- * them and not merely a trailing window — the verdict latches once it has said
- * `plateaued` — which is precisely why the prefix has to be passed rather than
- * the tail.
+ * on `readings.slice(0, i + 1)` for each `i` reproduces exactly what the
+ * screen would have said at that point in the stream — *provided* `readings`
+ * itself is the whole session. It is not: the caller keeps only the most
+ * recent 20 (`setReadings((previous) => [...previous.slice(-19), reading])`),
+ * so once a countdown has run past twenty samples, `readings` is already a
+ * tail and `readings.slice(0, i + 1)` is a prefix of that tail — starting at
+ * whatever reading happened to be twentieth-from-the-end, not at the start of
+ * the hold. `holdVerdict` sees fewer samples than the screen itself had at
+ * that moment, so the verdicts here can undercount `MIN_SAMPLES` and read
+ * `improving` for a row that was genuinely `plateaued` at the time; the
+ * latching property (`trend.ts`) is not preserved across the boundary either.
+ * The oldest rows this log can show are the ones most likely to be wrong. The
+ * countdown transcript below is unaffected by any of this — it records each
+ * verdict once, as it happened, rather than recomputing it from a buffer that
+ * has since been trimmed — which is why it is the artefact to trust.
  *
  * Newest first: this log exists to catch a verdict that lags what the accuracy
  * is actually doing — the defect that produced the current rule was the
@@ -1391,11 +1401,13 @@ function DiagnosticsBody(props: BodyProps) {
     }
 
     // Every message below is guarded by this token as well as by the mount
-    // flag. A refinement can still be in flight when she taps again — the
-    // countdown ref is released at the top of this function, so the control is
-    // live from that instant — and a late line about the previous capture
-    // landing on top of the current one's is a status line describing the
-    // wrong record.
+    // flag. The control itself reads "SAVING…" and is not live again until
+    // this write settles — `finishCountdown` claims `writeInFlightRef` and
+    // sets `writing` before calling here — so this guard is not what stops a
+    // second capture starting mid-refinement. What it does guard against is a
+    // stale message: a refinement that is still in flight when a fresher one
+    // starts (or the screen moves on) must not have its late result land as a
+    // status line describing the wrong record.
     const token = ++refreshToken.current
 
     // The write and the reload have their own `try` each. Sharing one meant a
@@ -1976,7 +1988,12 @@ function DiagnosticsBody(props: BodyProps) {
   if (phase === 'acquiring') {
     return (
       <Screen spokenDescription={spokenDescription}>
-        <View style={{ flex: 1, justifyContent: 'center' }}>{captureFrame}</View>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ flexGrow: 1, justifyContent: 'center' }}
+        >
+          {captureFrame}
+        </ScrollView>
       </Screen>
     )
   }
@@ -2210,6 +2227,10 @@ function DiagnosticsBody(props: BodyProps) {
           <Type variant="small" dim>
             Newest first. Verdict is what holdVerdict said at that reading, from
             only the readings before it — not replayed with today&apos;s data.
+            This buffer keeps only the most recent readings, so the oldest rows
+            after a long countdown can undercount and read improving when they
+            were plateaued at the time — see the countdown transcript for the
+            record that does not have that problem.
           </Type>
           <View style={{ height: spacing.xs }} />
           <Type variant="mono" dim>{formatLogHeader()}</Type>
