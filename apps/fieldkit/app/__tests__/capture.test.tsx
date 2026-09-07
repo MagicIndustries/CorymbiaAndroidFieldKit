@@ -497,6 +497,31 @@ describe('the ready state', () => {
     expect(screen.queryByTestId('capture-help')).toBeNull()
   })
 
+  it('scrolls, so the help affordance and the coordinates cannot be lost off the top', async () => {
+    await arriveWithAFix()
+
+    // Ready was the one state with no scroll container, on the reasoning that
+    // `flex-end` keeps the button visible. It does — and the button is not
+    // what is at risk. Ready carries a help row, a message line, two
+    // coordinate rows, a 300dp dial, the grade word, the accuracy, a
+    // paragraph and a 72dp control: over 340dp, against roughly 360dp of
+    // height on a phone in landscape, with rotation unlocked. Anchored to the
+    // bottom and unable to scroll, what is lost is everything above the fold,
+    // starting with doctrine rule 7's required help affordance.
+    const style: unknown = screen.getByTestId('capture-ready-scroll').props.contentContainerStyle
+    expect(style).toMatchObject({ flexGrow: 1 })
+    // §5.4's bottom anchoring, which has identical overflow behaviour to
+    // centring and so needs asserting in its own right.
+    expect(style).toMatchObject({ justifyContent: 'flex-end' })
+
+    // And the things that go off the top have to actually be inside the thing
+    // that scrolls, not siblings of it — which the style assertion cannot say.
+    const inside = within(screen.getByTestId('capture-ready-scroll'))
+    expect(inside.getByTestId('capture-help')).toBeTruthy()
+    expect(inside.getByTestId('capture-latitude')).toBeTruthy()
+    expect(inside.getByTestId('capture-button')).toBeTruthy()
+  })
+
   it('renders the live coordinates in monospace', async () => {
     await arriveWithAFix()
 
@@ -532,9 +557,17 @@ describe('the acquiring state', () => {
     // `CaptureFramePerimeter` are gone from here, replaced by the one
     // circular control that draws the clock, the accuracy and the crosshair
     // together.
+    //
+    // This used to also query `traffic-light-border` and `perimeter` and
+    // assert them null. Those testIDs belonged to components deleted on this
+    // branch, so nothing in the repository can produce them and the two
+    // assertions could not fail — a guard against a return that a `null`
+    // check cannot mount. What actually stops the frame coming back is that
+    // its files are gone; the dial's own presence is the assertion worth
+    // keeping here.
     expect(screen.getByTestId('capture-dial')).toBeTruthy()
-    expect(screen.queryByTestId('traffic-light-border')).toBeNull()
-    expect(screen.queryByTestId('perimeter')).toBeNull()
+    expect(screen.getByTestId('dial-ring-progress')).toBeTruthy()
+    expect(screen.getByTestId('dial-crosshair')).toBeTruthy()
   })
 
   it('renders the accuracy larger than anything else on the screen, and the seconds no longer compete with it', async () => {
@@ -1564,10 +1597,36 @@ describe('another go at a settled capture', () => {
     expect(screen.queryByTestId('capture-try-again')).toBeNull()
   })
 
-  it('keeps the record and runs another countdown over it', async () => {
+  /**
+   * A RETRY THAT COULD ACTUALLY WIN.
+   *
+   * This test used to drive the retry with `emit(3)` alone. `refineAgain`
+   * seeds the new run with the reading on screen — a 6 m one, left over from
+   * the hold that settled — so the run's samples were [6, 3], which the real
+   * `averageReadings` reports as ±2.68 m against the ±2.0 m already on the
+   * record. The real `refineRecordFix` would have refused that outright (spec
+   * §9.2.1, *Keeping the better fix*): the only screen-level proof that a
+   * successful retry works was being driven by a retry that cannot succeed,
+   * and it never looked at the resulting number at all.
+   *
+   * So the reading on screen is sharpened *before* TRY AGAIN is pressed —
+   * which is what standing there watching it improve actually looks like —
+   * and the run is genuinely sharper than what the first one stored. The
+   * accuracy the screen ends up showing is asserted, because that is the
+   * thing a retry is for.
+   */
+  it('keeps the record and runs another countdown over it, sharpening what it holds', async () => {
     await captureThatSettles()
     expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(1)
+
+    const settledAt = averagedOverAFlatHold(SETTLES_SHORT_M)
+    expect(readoutText('capture-recorded-accuracy')).toBe(`±${settledAt.toFixed(1)} m`)
+
+    // The receiver improves while the finished capture is on screen, so the
+    // reading `refineAgain` seeds the new run with is a sharp one rather than
+    // the 6 m one the settled hold left behind.
+    await emit(2)
 
     await fireEvent.press(screen.getByTestId('capture-try-again'))
     await settle()
@@ -1578,7 +1637,7 @@ describe('another go at a settled capture', () => {
     // No second record: the number on the tube is still this capture's.
     expect(mockRepo.createRecord).toHaveBeenCalledTimes(1)
 
-    await emit(3)
+    await emit(2)
     await acceptNow()
 
     expect(mockRepo.refineRecordFix).toHaveBeenCalledTimes(2)
@@ -1586,6 +1645,64 @@ describe('another go at a settled capture', () => {
       expect(call[1]).toMatchObject({ recordId: 'record-1' })
     }
     expect(readoutText('capture-recorded')).toBe('CAPTURE 1')
+
+    // The run this retry actually collected — two readings at 2 m, through
+    // the real `averageReadings`, computed here rather than typed in.
+    const retriedTo = averageReadings([reading(2, START_MS), reading(2, START_MS + 1000)]).accuracyM
+    // It is genuinely sharper than what the record held, so the real
+    // `refineRecordFix` would have applied it — this test is not driving a
+    // retry that could only ever be refused.
+    expect(retriedTo).toBeLessThan(settledAt)
+    // And the number on screen moved to it, which is the whole point of a
+    // retry and the thing nothing asserted before.
+    expect(readoutText('capture-recorded-accuracy')).toBe(`±${retriedTo.toFixed(1)} m`)
+  })
+
+  /**
+   * AND A RETRY THAT LOSES SAYS SO, IN THE WORDS §9.2.1 PINS.
+   *
+   * The repository refuses a refinement that is not sharper than what is
+   * stored — `accuracy_m` becomes the Victorian Biodiversity Atlas's
+   * mandatory positional-accuracy field, so a retry must not be able to
+   * degrade it — and reports `applied: false`. Every other test on this
+   * screen runs against a fixture that applies unconditionally, so until this
+   * one the discarded wording existed only in `useCapture`'s own unit test
+   * and had never reached a rendered assertion. The sentence is asserted
+   * whole, not by fragment: it is pinned copy in §9.2.1, and the failure it
+   * guards against is a screen that reports an ordinary finish over a write
+   * that never happened.
+   */
+  it('says the run bought nothing when the record keeps the fix it already had', async () => {
+    await captureThatSettles()
+    const settledAt = averagedOverAFlatHold(SETTLES_SHORT_M)
+
+    // What the real `refineRecordFix` does with a run that is not sharper:
+    // every fix column untouched, the row re-read from disk, `applied: false`.
+    mockRepo.refineRecordFix.mockImplementationOnce((_db: unknown, input: { recordId: string }) => {
+      const kept = mockRecords.get(input.recordId)
+      if (!kept) throw new Error(`Record ${input.recordId} does not exist in the fixture.`)
+      return Promise.resolve({ record: { ...kept }, applied: false })
+    })
+
+    await fireEvent.press(screen.getByTestId('capture-try-again'))
+    await settle()
+    // A worse run. `refineAgain` seeds it with the reading on screen — the
+    // 6 m one the settled hold left — and this adds a 9 m one, which together
+    // average well above the ±2.0 m already stored.
+    await emit(9)
+    await acceptNow()
+
+    const reachedAt = averageReadings([
+      reading(SETTLES_SHORT_M, START_MS),
+      reading(9, START_MS + 1000),
+    ]).accuracyM
+    expect(reachedAt).toBeGreaterThan(settledAt)
+    expect(screen.getByTestId('capture-message')).toHaveTextContent(
+      `You accepted it early. This run reached ±${reachedAt.toFixed(1)} m — no better than the ` +
+        `±${settledAt.toFixed(1)} m already on the record, so that fix was kept.`,
+    )
+    // And the record still shows what it kept, not what the run reached.
+    expect(readoutText('capture-recorded-accuracy')).toBe(`±${settledAt.toFixed(1)} m`)
   })
 
   it('says what the second run is measured against, which is not the tap', async () => {
@@ -1659,6 +1776,56 @@ describe('the grade the screen shows', () => {
       type: 0,
       payload: processColor(darkTheme.colors.statusGood),
     })
+  })
+
+  /**
+   * THE HYSTERESIS IS PER SERIES, AND THE SCREEN FEEDS IT TWO.
+   *
+   * While a countdown runs the graded accuracy is the *preview's* — the
+   * averaged fix, converging toward the hardware floor. Every other moment it
+   * is the live single reading, which at the measured site wobbles at 4–7 m
+   * and never converges (spec §9.2). Those differ by metres, and the held
+   * grade used to survive the change: a capture that converged to ±1.5 m left
+   * `good` on the ref, and the ready state that followed held `GOOD FIX` in
+   * green over a ±5.5 m reading for as long as it sat in the 5–6 m band. Two
+   * identical live readings then produced different grades depending on
+   * capture history, which is the opposite of what steadying is for — and a
+   * 4 m step is far outside the ±0.5 m jitter `steadyGrade` is calibrated for.
+   */
+  it('does not carry a grade earned by a converged capture into the ready state', async () => {
+    // A hold flat at 6 m: every LIVE reading is fair, while the preview the
+    // dial is grading converges to about 2.0 m, which is good. That gap is
+    // the whole of this test — the two series genuinely disagree about the
+    // grade at the same instant, which is exactly what happens in the field.
+    expect(gradeAccuracy(SETTLES_SHORT_M)).toBe('fair')
+    expect(gradeAccuracy(averagedOverAFlatHold(SETTLES_SHORT_M))).toBe('good')
+
+    await arriveWithAFix(SETTLES_SHORT_M)
+    await tap()
+    await standStillUntilItSettles(SETTLES_SHORT_M)
+    // The capture earned `good` on the preview's own series.
+
+    // Back to ready, where the live reading — never better than 6 m — is what
+    // is graded.
+    await takeAnotherReading()
+    await emit(5.5)
+
+    // 5.5 m is fair to `gradeAccuracy`, and inside the 1 m margin that would
+    // hold a `good` carried over from the capture — so this is exactly the
+    // reading a leaked grade lies about, indefinitely, for as long as the
+    // reading sits in the 5–6 m band.
+    expect(gradeAccuracy(5.5)).toBe('fair')
+    expect(gradeWordOnScreen()).toBe('FAIR FIX')
+  })
+
+  it('still steadies the live reading once it is the series being graded', async () => {
+    // The key drops the held grade at a phase boundary; it must not disable
+    // the hysteresis WITHIN a series, which is the whole point of the module.
+    await arriveWithAFix(4.8)
+    expect(gradeWordOnScreen()).toBe('GOOD FIX')
+    await emit(5.2)
+    expect(gradeAccuracy(5.2)).toBe('fair')
+    expect(gradeWordOnScreen()).toBe('GOOD FIX')
   })
 
   it('reports a fix that has genuinely degraded, rather than holding a grade it lost', async () => {

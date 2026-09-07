@@ -165,8 +165,10 @@ const IMPROVEMENT_FLOOR_M = 0.05
  * advertise a worsening this number can never show. On a repeat run it can go
  * negative, and is still not shown signed: it falls into the same "no sharper
  * … yet" branch as an improvement too small to print, which is the honest
- * reading of a second attempt that did not beat the first. The honest reading of it is "how much sharper", and
- * the spread beside it is what reports a capture that went badly.
+ * reading of a second attempt that did not beat the first.
+ *
+ * So this number is only ever "how much sharper", and the spread beside it is
+ * what reports a capture that went badly.
  *
  * `tapHadPosition` is false when the tap found no fix at all, where the
  * improvement is zero for want of a baseline rather than for want of progress.
@@ -422,8 +424,18 @@ function CaptureBody() {
    * ONE value, used for the word and for the colour alike (doctrine rule 9):
    * `CaptureDial` derives both from the `grade` prop, so they cannot disagree
    * at any instant.
+   *
+   * **Keyed to the phase, because `shownAccuracyM` above is two different
+   * measurements.** While acquiring it is the preview's averaged accuracy,
+   * converging toward the hardware floor; otherwise it is the live single
+   * reading, which wobbles at 4–7 m and never converges (spec §9.2). Held
+   * across that switch, the margin kept a `GOOD FIX` earned by a converged
+   * capture over a merely fair live reading once the screen returned to
+   * ready. The key drops the held grade at the boundary, so the first reading
+   * of each series is graded on its own merits; within a series the
+   * hysteresis is untouched. See `useSteadyGrade`'s own comment.
    */
-  const grade: FixGradeName = useSteadyGrade(shownAccuracyM)
+  const grade: FixGradeName = useSteadyGrade(shownAccuracyM, acquiring ? 'preview' : 'live')
 
   /**
    * The accuracy `CaptureDial` draws its circle from. Unlike the readout
@@ -738,8 +750,28 @@ function CaptureBody() {
       {/*
         Ready is bottom-anchored, which is what `bottomBand` means: the control
         sits where the thumb already is, with the context above it.
+
+        And it scrolls, for the same reason the acquiring and recorded states
+        do. It was the one state without a scroll container, on the reasoning
+        that `flex-end` keeps the button visible — which is true, and is not
+        the risk. What `flex: 1` loses is everything above the fold: the help
+        row, the message, the live coordinates. This state carries a help row,
+        a message line, two coordinate rows, a 300dp dial (`field.dialMax`),
+        the grade word, the accuracy, a paragraph and a 72dp control — over
+        340dp before any spacing, against roughly 360dp of height on a phone
+        in landscape, and rotation is unlocked. Clipped, the first thing off
+        the top is doctrine rule 7's required help affordance, with no way to
+        reach it.
+
+        `flexGrow: 1` is what fixes that: when the children are taller than
+        the viewport the container grows to fit them and `justifyContent`
+        becomes a no-op, so bottom-anchoring costs nothing in the overflowing
+        case and still states §5.4's requirement in the ordinary one.
       */}
-      <View style={{ flex: 1, justifyContent: 'flex-end', gap: spacing.md }}>
+      <ScrollView
+        testID="capture-ready-scroll"
+        contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end', gap: spacing.md }}
+      >
         {/*
           Doctrine rule 7: a tappable help affordance per screen, never a hover
           — there is no hover in a paddock. It lives in the ready state and only
@@ -780,7 +812,7 @@ function CaptureBody() {
         {message}
         {coordinates}
         {block}
-      </View>
+      </ScrollView>
     </Screen>
   )
 }

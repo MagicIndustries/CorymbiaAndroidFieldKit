@@ -36,6 +36,9 @@ const MEASURED_SERIES = [
  */
 const JITTER_ACROSS_THE_BOUNDARY = [5.2, 4.8, 5.1, 4.7, 5.3, 4.9, 5.2, 4.4, 5.0, 4.2]
 
+/** Worst to best, so "did this get worse" is an index comparison. */
+const ORDER_INDEX: Record<FixGradeName, number> = { poor: 0, fair: 1, good: 2 }
+
 /** Runs a series through the fold, returning what would be on screen at each step. */
 function displayedThrough(series: number[]): FixGradeName[] {
   const shown: FixGradeName[] = []
@@ -77,11 +80,84 @@ describe('steadyGrade', () => {
     expect(shown[shown.length - 1]).toBe('good')
   })
 
+  /**
+   * THE HOLD, CHECKED READING BY READING ON A SERIES THAT ACTUALLY DEGRADES.
+   *
+   * This test used to run `MEASURED_SERIES` — which is monotonically
+   * non-increasing — and assert only that each displayed grade was one the raw
+   * classifier had already returned. On a series that never worsens, the
+   * hysteresis branch is never reached at all, and set membership is satisfied
+   * by anything: `return raw`, `return previous`, and stepping down one band
+   * at a time all passed it.
+   *
+   * So the fixture degrades, in both bands, and the expectation is written out
+   * per index. Each entry is what the hold actually owes:
+   *
+   * (`GRADE_THRESHOLDS` is good < 5 m, fair < 15 m, and the margin is 1 m, so
+   * the two exits are 6 m and 16 m.)
+   *
+   *   4.2  good, raw, nothing on screen to hold
+   *   5.4  raw fair — held, 0.4 m past the boundary is jitter
+   *   5.9  held
+   *   6.0  held: exactly at the margin is still inside it
+   *   6.1  given up — a metre clear of the boundary is a different fix
+   *   9.0  fair, raw, unchanged
+   *  15.5  raw poor — held, inside fair's own margin
+   *  16.0  held, exactly at it
+   *  16.5  given up
+   *  40    poor, unchanged
+   *   4.0  good AT ONCE: improving is never delayed
+   *  40    poor at once, two bands down — not the `fair` a step-down-one-band
+   *        rule would invent, and the reason the series ends on this pair
+   */
+  const DEGRADES_THROUGH_BOTH_BANDS = [4.2, 5.4, 5.9, 6.0, 6.1, 9.0, 15.5, 16.0, 16.5, 40, 4.0, 40]
+  const EXPECTED_ON_SCREEN: FixGradeName[] = [
+    'good',
+    'good',
+    'good',
+    'good',
+    'fair',
+    'fair',
+    'fair',
+    'fair',
+    'poor',
+    'poor',
+    'good',
+    'poor',
+  ]
+
+  it('holds and gives up each grade exactly where the margin says, reading by reading', () => {
+    // The fixture genuinely degrades — asserted first, so this test cannot
+    // pass by the series quietly becoming monotonic and never reaching the
+    // hysteresis branch at all, which is how its predecessor was vacuous.
+    const raw = DEGRADES_THROUGH_BOTH_BANDS.map(gradeAccuracy)
+    const worsenings = raw.filter((grade, i) => {
+      const before = raw[i - 1]
+      return i > 0 && before !== undefined && ORDER_INDEX[grade] < ORDER_INDEX[before]
+    }).length
+    expect(worsenings).toBeGreaterThan(2)
+
+    expect(displayedThrough(DEGRADES_THROUGH_BOTH_BANDS)).toEqual(EXPECTED_ON_SCREEN)
+  })
+
+  it('is the hold that makes that series differ from the raw one, not the classifier', () => {
+    // Belt and braces on the test above: if `displayedThrough` ever equalled
+    // the raw grades, the per-index expectation would be asserting
+    // `gradeAccuracy` rather than anything this module does.
+    expect(displayedThrough(DEGRADES_THROUGH_BOTH_BANDS)).not.toEqual(
+      DEGRADES_THROUGH_BOTH_BANDS.map(gradeAccuracy),
+    )
+  })
+
   it('never shows a grade the accuracy has not actually justified', () => {
     // Hysteresis may only DELAY a change. Entering a grade still requires
     // crossing its threshold, so everything ever displayed must be a grade
     // the raw classifier had already returned by that point in the series.
-    const series = [...MEASURED_SERIES, ...JITTER_ACROSS_THE_BOUNDARY]
+    const series = [
+      ...MEASURED_SERIES,
+      ...JITTER_ACROSS_THE_BOUNDARY,
+      ...DEGRADES_THROUGH_BOTH_BANDS,
+    ]
     const shown = displayedThrough(series)
     const seen = new Set<FixGradeName>()
     series.forEach((accuracyM, i) => {

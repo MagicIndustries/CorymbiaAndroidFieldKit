@@ -106,10 +106,40 @@ export function steadyGrade(previous: FixGradeName | null, accuracyM: number | n
  * flicker this exists to remove. Safe because `steadyGrade` is a fold (above):
  * running it twice on the same accuracy, as a double-invoked render does,
  * produces the same answer as running it once.
+ *
+ * ## Why the caller must name the series
+ *
+ * **Hysteresis is only meaningful within one series of measurements, and the
+ * capture screen feeds this hook two.** While a countdown runs, the accuracy
+ * is the *preview's* — the averaged fix the override would store, converging
+ * toward about 1.4 m. Every other moment it is the live single reading, which
+ * at the measured site sits around 4–7 m and wobbles there indefinitely
+ * (spec §9.2: "the ready state does not converge"). Those are not the same
+ * quantity, and they differ by metres.
+ *
+ * Held across that change, the ref did the wrong thing in the one direction
+ * that matters: a capture converging to ±1.5 m left `good` on the ref, the
+ * screen returned to ready with a live reading of ±5.5 m, and the margin held
+ * `GOOD FIX` in green over a fair fix — indefinitely, for as long as the
+ * reading sat in the 5–6 m band. Two identical live readings then produced
+ * different grades depending on capture history, which is the opposite of
+ * what a steadying rule is for. `steadyGrade`'s margin is calibrated for a
+ * reading jittering ±0.5 m around its trend; a 4 m step between phases is
+ * outside its model entirely, and the honest answer at a discontinuity is not
+ * to damp it but to stop pretending there is anything to damp.
+ *
+ * So `series` names which measurement is being graded. A change of it drops
+ * the held grade, and the first reading of the new series is reported raw —
+ * exactly as it would be on a fresh mount, because that is what it is.
+ * Within a series nothing changes at all.
  */
-export function useSteadyGrade(accuracyM: number | null): FixGradeName {
+export function useSteadyGrade(accuracyM: number | null, series: string): FixGradeName {
   const shown = useRef<FixGradeName | null>(null)
-  const next = steadyGrade(shown.current, accuracyM)
+  const shownSeries = useRef<string | null>(null)
+  // A new series has nothing on screen to hold, so it starts from null.
+  const previous = shownSeries.current === series ? shown.current : null
+  const next = steadyGrade(previous, accuracyM)
   shown.current = next
+  shownSeries.current = series
   return next
 }

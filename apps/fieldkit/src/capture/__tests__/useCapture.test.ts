@@ -268,8 +268,8 @@ beforeEach(() => {
   // a fresh capture number — see `mockRecords`. Mirrors the real
   // `refineRecordFix`'s `{ record, applied }` shape (`packages/data`); the
   // default here always applies, which is what every test not specifically
-  // about the "keep the better fix" guard wants — that guard is proved
-  // against real SQL in `records.test.ts`, and tests below that care about
+  // about the keep-the-better-fix gate wants (spec §9.2.1) — that gate is
+  // proved against real SQL in `records.test.ts`, and tests below that care about
   // `applied` override this per-call with `mockImplementationOnce`.
   mockRepo.refineRecordFix.mockImplementation(
     (_db: unknown, input: { recordId: string; fix: Fix }) =>
@@ -531,10 +531,14 @@ describe('useCapture', () => {
 
     expect(jest.getTimerCount()).toBe(0)
 
+    // Two full caps' worth of time past the unmount, and the refinement the
+    // countdown would have written never happens — which is the whole claim.
+    // `result.current` is deliberately NOT asserted on afterwards: it is
+    // frozen at the last render before the unmount by construction, so
+    // `expect(phase).toBe('acquiring')` there would hold no matter what the
+    // teardown did or failed to do. This line is the one doing the work.
     await advanceCaps(2)
     expect(mockRepo.refineRecordFix).not.toHaveBeenCalled()
-    // Nothing wrote a new phase into a hook that no longer exists.
-    expect(view.result.current.phase).toBe('acquiring')
   })
 
   it('reports the remaining wait as a fraction that moves between ticks, not once a second', async () => {
@@ -691,12 +695,22 @@ describe('useCapture', () => {
     })
 
     /**
-     * KEEP THE BETTER FIX. `refineRecordFix` (`packages/data`) is what
-     * actually decides whether a run's fix wins — proved against real SQL in
-     * `records.test.ts` — so this test tells the mock what that function
-     * would report (`applied: false`, the record unchanged) and checks that
-     * the hook relays it honestly rather than treating a discarded write as
-     * an ordinary finish.
+     * KEEP THE BETTER FIX (spec §9.2.1). `refineRecordFix` (`packages/data`)
+     * is what actually decides whether a run's fix wins — proved against real
+     * SQL in `records.test.ts` — so this test tells the mock what that
+     * function would report (`applied: false`, the record unchanged) and
+     * checks that the hook relays it honestly rather than treating a
+     * discarded write as an ordinary finish.
+     *
+     * **The mock returns a distinct object, and that is the whole test.** It
+     * used to hand back the very object the hook was already holding, and the
+     * `toBe` below compared against that same object — so the assertion held
+     * whether the hook set the returned record, set the one it already had,
+     * or set nothing at all, while its own comment claimed to be checking
+     * "the very record `refineRecordFix` handed back". A clone, distinct by
+     * identity and equal by value, is what makes `toBe` mean what it says:
+     * only a hook that actually stores the repository's answer can pass it,
+     * and a hook that quietly keeps its own stale record now fails.
      */
     it('leaves the record untouched, and says so, when a repeat run comes back worse', async () => {
       const { result } = await mountCapture()
@@ -706,8 +720,13 @@ describe('useCapture', () => {
         throw new Error('the first run should have left a deliberate fix on the record')
       }
 
+      // What the real `refineRecordFix` returns on a discarded run: the row as
+      // it stands, re-read from disk, which is a NEW object carrying the same
+      // values rather than the caller's own.
+      const unchangedFromDisk: FieldRecord = { ...recordAfterFirstRun }
+      expect(unchangedFromDisk).not.toBe(recordAfterFirstRun)
       mockRepo.refineRecordFix.mockImplementationOnce(() =>
-        Promise.resolve({ record: recordAfterFirstRun, applied: false }),
+        Promise.resolve({ record: unchangedFromDisk, applied: false }),
       )
 
       await act(async () => {
@@ -718,9 +737,10 @@ describe('useCapture', () => {
       await advanceCaps(1)
 
       expect(result.current.phase).toBe('recorded')
-      // Not merely equal by value — the very record `refineRecordFix` handed
-      // back, because nothing about it changed.
-      expect(result.current.record).toBe(recordAfterFirstRun)
+      // The very record `refineRecordFix` handed back — not the equal-valued
+      // one this test was already holding, which is what makes this an
+      // assertion about the hook rather than about the fixture.
+      expect(result.current.record).toBe(unchangedFromDisk)
       expect(result.current.message).toContain(
         `no better than the ±${recordAfterFirstRun.fix.accuracyM.toFixed(1)} m already on the record`,
       )
