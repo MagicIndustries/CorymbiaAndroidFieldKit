@@ -560,8 +560,8 @@ It is not forgotten and it is not deferred: it is replaced. There is now **one c
    ±1.4 m. A signal like that allowed to end a capture would have ended it four times worse
    than the fix she was standing there for.
 
-   That defect is fixed rather than tolerated (§9.3), and the signal now fires at 12 samples
-   — about 11 s — on the same run. So the countdown ending itself is the intended behaviour:
+   That defect is fixed rather than tolerated (§9.3), and the signal now fires at 13 samples
+   — about 12 s — on the same run. So the countdown ending itself is the intended behaviour:
    she waits as long as the fix needs and no longer. What has *not* changed is that she can
    always end it herself; the override is reachable at every moment a countdown is running,
    and a plateau never blocks anything.
@@ -571,9 +571,13 @@ capture. The row is written with an honest `'none'` position, and the countdown 
 is what gives it one — `refineRecordFix` accepts a refinement *from* no position for exactly
 this case, while refusing one *to* no position.
 
-**The countdown default is twelve seconds**, from field measurement rather than from a desk.
-This section previously left it open for Plan 3 to set; the measurements have been taken and
-they set it.
+**The countdown default is fifteen seconds, and it is a cap, not an expected duration.**
+`holdVerdict` (`packages/geo/src/trend.ts`) ending the wait on a plateau is the normal way a
+capture finishes — on the measured hardware below that is about twelve seconds after the
+tap. The countdown length is the safety net for a run whose fix never settles, chosen
+generously so it is almost never the thing that actually ends a capture, and it is not tuned
+against the plateau threshold: that threshold comes from where the measured data itself
+bends (`packages/geo/src/trend.ts`), with no reference to how long the countdown runs.
 
 Stored captures on a Samsung S25 outdoors, readings at 1 Hz, each row a real capture:
 
@@ -584,19 +588,32 @@ Stored captures on a Samsung S25 outdoors, readings at 1 Hz, each row a real cap
 | ~11 s | 12 | ±1.2 m |
 | ~15 s | 16 | ±1.3 m |
 | 20 s | 21 | ±1.0 to ±1.4 m across several runs |
-| 60 s | 61 | ±1.1 m, spread ±1.3 m |
+| 60 s | 61 | ±1.1 m |
 
-The curve is flat from about ten seconds. A full minute was no better than twenty seconds
-and worse than the best twenty. The mechanism is the floor in `averageReadings`: once enough
-samples accumulate the reported accuracy is exactly a third of the best single reading, so
-further samples are inert and only a better individual reading helps (`docs/gps-accuracy.md`
-§5). And a longer wait actively degrades the honesty check — spread was ±0.3 m at twenty
-seconds and ±1.3 m at sixty, because standing still for longer accumulates more positional
-scatter.
+This is one device, one site, one session under clear sky — a starting point for this
+hardware, not an established property of Android GPS. The curve is flat from about ten
+seconds. Sixty seconds was **no better** than twenty — ±1.1 m sits inside the ±1.0–1.4 m the
+twenty-second runs themselves span — not worse, as an earlier version of this section
+claimed. The mechanism is the floor in `averageReadings`: once enough samples accumulate the
+reported accuracy is exactly a third of the best single reading, so further samples are
+inert and only a better individual reading helps (`docs/gps-accuracy.md` §5).
 
-So twelve seconds is not a compromise between what she will tolerate and what the receiver
-needs. It is where the receiver stops improving, and the two constraints turned out to agree.
-The diagnostics screen keeps the chooser — 5, 12, 20, 30 and 60 seconds — so the comparison
+An earlier version of this section also claimed a longer wait actively degrades the honesty
+check, from a single twenty-second/sixty-second spread comparison. That claim does not
+survive the rest of the stored records: the twenty-second runs alone span spreads of ±0.3 m,
+±0.6 m, ±1.0 m, ±2.2 m and ±2.6 m, and the sixty-second run's ±1.3 m sits inside that range.
+It is withdrawn. The finding the same records do support, and more strongly: **run-to-run
+variance at a fixed duration exceeds the difference between durations.** Two twenty-second
+captures in the same session produced accuracies of ±1.0 m and ±2.8 m — a wider gap than any
+measured difference between twenty seconds and sixty. Conditions and satellite geometry at
+the moment of capture dominate the result, and waiting longer cannot rescue a fix that
+started out bad, which argues for a short cap on its own terms, without needing a spread
+claim the data does not support.
+
+So fifteen seconds is not a compromise between what she will tolerate and what the receiver
+needs, and it is not fitted to the plateau threshold either. It is a generous cap on top of a
+self-ending wait that, on this hardware, finishes itself three seconds sooner on average.
+The diagnostics screen keeps the chooser — 5, 15, 20, 30 and 60 seconds — so the comparison
 can be run again on other hardware, in other sky, before the number is fixed for the field
 app.
 
@@ -673,10 +690,12 @@ against the figure it came from:
   then is false by construction. This is the guard that makes the n=2 misfire impossible.
 - **A trailing window of four readings**, so the verdict is about the last four seconds and
   an improvement from ten seconds ago cannot claim to be happening now.
-- **0.6 m of improvement across that window** to count as still improving. The measured
-  window improvements fall through 0.640 m at the eleventh reading and 0.549 m at the
-  twelfth, and the stored captures put the flattening at the twelfth, so any threshold in
-  that open bracket flips the verdict where the hardware flattens; 0.6 m is its midpoint.
+- **0.5 m of improvement across that window** to count as still improving, chosen from the
+  measured bracket alone, with no reference to the countdown length. The measured window
+  improvements fall through 0.549 m at the twelfth reading and 0.444 m at the thirteenth, and
+  0.5 m is the midpoint of that open bracket, so it is the threshold furthest from either
+  neighbouring measurement. The verdict crosses at the thirteenth reading on this run, about
+  12 s after the tap.
 
 **The verdict latches.** Once it has said `plateaued` it is never taken back, because with
 the countdown ending on the signal a withdrawable verdict would be a statement about a

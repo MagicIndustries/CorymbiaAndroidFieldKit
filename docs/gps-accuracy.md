@@ -301,26 +301,42 @@ was **exactly** the best single reading divided by three, and every further
 reading was inert — it added weight to a total that was no longer being used.
 Only a *better individual reading* moved the number after that.
 
-Two consequences a reader has to carry with them, because both are
-counter-intuitive:
+This is one device, one site, one session under clear sky — a starting point
+for this hardware, not an established property of Android GPS. With that
+caveat carried through everything below:
 
-- **Waiting longer stops buying accuracy.** Stored captures from that session:
-  ±1.6 m at 5 readings, ±1.5 m at 7, ±1.2 m at 12, ±1.3 m at 16, ±1.0 to ±1.4 m
-  at 21 across several runs, and ±1.1 m at 61. A full minute of standing still
-  was no better than twenty seconds, and worse than the best twenty. The curve
-  is flat from about ten seconds.
-- **Waiting longer makes the honesty check worse.** Spread was ±0.3 m on a
-  twenty-second hold and ±1.3 m on a sixty-second one. Nothing went wrong: the
-  longer you stand in one place, the more positional scatter the receiver
-  produces, and the spread is the greatest distance between any reading and the
-  fix (§4), so it can only grow. A long hold therefore reports the same
-  accuracy with a wider disagreement behind it, which is exactly the pattern
-  §4 says to be suspicious of.
+- **Accuracy is flat from about ten seconds.** Stored captures from that
+  session: ±1.6 m at 5 readings, ±1.5 m at 7, then ±1.0–1.4 m from 12 readings
+  through 61 — specifically ±1.2 m at 12, ±1.3 m at 16, ±1.0 to ±1.4 m at 21
+  across several runs, and ±1.1 m at 61. Sixty seconds was **no better** than
+  twenty: ±1.1 m sits inside the ±1.0–1.4 m the twenty-second runs themselves
+  span. It was not worse — an earlier version of this document overstated
+  that, and the sixty-second figure does not support it.
+- **Run-to-run variance at a fixed duration exceeds the difference between
+  durations, and that is the stronger and better-supported finding.** The
+  stored twenty-second runs alone span spreads of ±0.3 m, ±0.6 m, ±1.0 m,
+  ±2.2 m and ±2.6 m, and the one stored sixty-second run's ±1.3 m spread sits
+  inside that range — so "longer waits degrade spread" is not something two
+  runs can establish, and this data does not support it either; an earlier
+  version of this document made that claim and it is withdrawn. What the same
+  records *do* support: two twenty-second captures in the same session
+  produced accuracies of ±1.0 m and ±2.8 m — a wider gap than any measured
+  difference between twenty seconds and sixty. Conditions and satellite
+  geometry at the moment of capture dominate the result, and waiting longer
+  cannot rescue a fix that started out bad — which is a better argument for a
+  short wait than any claim about spread ever was.
+- **The mechanism, described above, is the floor binding.** From the reading
+  it binds at, every further sample is inert, and only a better individual
+  reading — never more of them — moves the number.
 
-So a longer hold is not a safer hold. Once the floor binds, holding on buys a
-number that does not improve and provenance that gets worse. That measurement
-is what sets the capture screen's twelve-second default and what lets the
-countdown end itself when the fix stops improving — see `packages/geo/src/trend.ts`.
+So a longer hold is not obviously a safer hold on this hardware: once the
+floor binds, more time does not reliably buy a better fix, and the run-to-run
+spread at a single duration is large enough to swamp whatever a longer wait
+might otherwise offer. That measurement is what sets the capture screen's
+fifteen-second countdown **cap** — a safety net for a run whose fix never
+settles, not an expected duration — and what lets the countdown end itself,
+which is the normal way it ends, the moment the fix stops improving; see
+`packages/geo/src/trend.ts`.
 
 ---
 
