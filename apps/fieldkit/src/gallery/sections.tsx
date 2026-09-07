@@ -4,6 +4,7 @@ import { useRouter } from 'expo-router'
 import { radii, spacing } from '@corymbia/tokens'
 import {
   Button,
+  CaptureDial,
   Card,
   ContextStamp,
   HelpAffordance,
@@ -189,21 +190,45 @@ export function GallerySections() {
         </Card>
       </Section>
 
-      <Section title="Capture controls — field size, 72dp">
-        <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-          <View style={{ flex: 1 }}>
-            <Button label="⚡ SAVE NOW" spokenLabel="Save now" kind="fast" size="field" onPress={() => {}} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Button
-              label="◎ SHARPEN"
-              spokenLabel="Sharpen the fix"
-              kind="accurate"
-              size="field"
-              onPress={() => {}}
-            />
-          </View>
+      {/*
+        THE DIAL, IN THE THREE STATES THAT CANNOT BE JUDGED FROM A DESK.
+
+        This replaces the `⚡ SAVE NOW` / `◎ SHARPEN` pair that stood here.
+        That was the two-control design, superseded by spec §9.1 after it went
+        outdoors and failed — its components are gone from the codebase, so
+        the gallery was teaching a design that no longer exists, on the one
+        screen whose whole job is to show what the app's parts actually look
+        like on a device.
+
+        Three dials rather than one, because the difference between them is
+        exactly what has to be looked at in daylight: a fix still converging,
+        a capture that settled short of the crosshair (the companion ring at
+        its own radius, the crosshair still visible inside it), and one locked
+        onto the crosshair. The lock's own motion is not visible here — the
+        ripple plays on a genuine transition into lock, not on a dial that
+        mounts already locked — so that part is judged on the capture screen
+        itself, through the button below.
+      */}
+      <Section title="Capture dial — converging, settled, locked on">
+        <View style={{ gap: spacing.lg }}>
+          <CaptureDial grade="fair" accuracyM={6.1} remaining={0.6} />
+          <CaptureDial grade="good" accuracyM={4.2} settled />
+          <CaptureDial grade="good" accuracyM={1.2} locked />
         </View>
+      </Section>
+
+      <Section title="Capture control — field size, 72dp">
+        {/*
+          One control, which is the whole of §9.1.4: `CAPTURE` before the tap
+          and `ACCEPT NOW` during the countdown, never two at once.
+        */}
+        <Button
+          label="CAPTURE"
+          spokenLabel="Record the current fix now"
+          kind="fast"
+          size="field"
+          onPress={() => {}}
+        />
       </Section>
 
       <Section title="Input affordances — fixed order">
