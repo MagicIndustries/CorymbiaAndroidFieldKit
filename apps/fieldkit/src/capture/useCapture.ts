@@ -193,11 +193,11 @@ export type Capture = {
    * tube, and a real measurement is not thrown away for a second attempt that
    * might be no better. Every run appends its own `'edited'` event, so the
    * chain of custody carries both — but **only the sharper of the two fixes is
-   * ever actually stored**. `refineRecordFix` (`packages/data`) keeps the
-   * better fix by `accuracyM` alone and reports which one won; a run that
-   * comes back worse leaves the record untouched and this hook says so on
-   * screen (`discardedRunMessage`) rather than showing a change that did not
-   * happen.
+   * ever actually stored** (spec §9.2.1, *Keeping the better fix*).
+   * `refineRecordFix` (`packages/data`) applies the run's fix by `accuracyM`
+   * alone and reports which one won; a run that comes back worse leaves the
+   * record untouched and this hook says so on screen (`discardedRunMessage`)
+   * rather than showing a change that did not happen.
    *
    * A no-op unless a finished capture is actually on screen (`recorded`, with
    * a record) and nothing is already being written.
@@ -379,8 +379,14 @@ function formatAccuracyM(accuracyM: number): string {
 
 /**
  * What the screen says when a run's fix loses to what the record already
- * held — `refineRecordFix` reports `applied: false` (spec §9.2.1's TRY AGAIN,
- * "keep the better fix").
+ * held — `refineRecordFix` reports `applied: false` (spec §9.2.1, *Keeping the
+ * better fix*).
+ *
+ * **The wording is spec'd, not composed here.** §9.2.1 pins this sentence the
+ * way §9.3 pins the two verdict sentences, and for the same reason: a run that
+ * bought nothing is exactly the moment a screen is tempted to say nothing.
+ * `capture.test.tsx` asserts it whole, so a rewording fails there rather than
+ * quietly drifting away from the copy.
  *
  * She stood still for the whole wait `reason` describes, and this is what it
  * bought her: nothing, this time, because the fix already on the record was

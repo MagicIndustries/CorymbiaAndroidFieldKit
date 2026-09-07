@@ -540,17 +540,27 @@ It is not forgotten and it is not deferred: it is replaced. There is now **one c
    path exactly one tap, which is what the second box existed for.
 2. **The screen then counts down while she stands still**, showing the accuracy now, how
    much it has improved since the tap, how many readings have gone into it, and how many
-   seconds remain. All of that sits inside the traffic-light frame with the button, within
+   seconds remain. All of that sits inside the dial, with the button, within
    sight of the thumb pressing it. **That adjacency is a requirement, not a layout
    preference** — it is the specific defect this supersession exists to fix, and a design
    that puts the countdown readout in a panel above the control has not implemented this
    section.
 3. **When the countdown completes, the saved record is refined in place** with the averaged
-   fix. `refineRecordFix` writes the new fix and appends an `'edited'` event carrying **both
-   the previous and the new accuracy**, so the chain of custody shows a ±6 m fix that was
-   stood over and sharpened to ±3 m, rather than a record that was always ±3 m. The capture
-   number and the capture time do not move — the capture happened at the tap, and the number
-   may already be written on a tube.
+   fix — **when that fix is sharper than the one already stored**. `refineRecordFix` writes
+   the new fix and appends an `'edited'` event carrying **both the previous and the new
+   accuracy**, so the chain of custody shows a ±6 m fix that was stood over and sharpened to
+   ±3 m, rather than a record that was always ±3 m. The capture number and the capture time
+   do not move — the capture happened at the tap, and the number may already be written on a
+   tube.
+
+   On the countdown the tap itself starts, the condition is never actually in play and this
+   clause reads exactly as it always did: the tap's own reading is a member of the run's
+   sample set, and inverse-variance averaging over a set containing it cannot come back worse
+   than it alone. The condition exists for TRY AGAIN (§9.2.1), a second, independent
+   measurement whose samples do not include the first run's, which genuinely can come back
+   worse. **An earlier version of this clause described the refinement as unconditional**,
+   which was true of the design at the time and is no longer true of it; §9.2.1's *Keeping
+   the better fix* is where the rule lives and where its consequences are set out.
 4. **An override accepts whatever has accumulated and ends the wait.** It is the same
    control: during a countdown the button reads `ACCEPT NOW`. So exactly one action is ever
    live, and the override is reachable at every moment the countdown is running.
@@ -661,10 +671,19 @@ at once, and each answers a different question, so none of them competes:
 the S25 outdoors, §9.1's table — and every other radius is scaled against that same mapping.
 This is what makes the next paragraph true rather than decorative.
 
-**A good fix lands exactly on the crosshair. A poor one visibly stops short and never
-reaches it.** That falls out of the honest mapping rather than being drawn on top of it, and
-it is intended behaviour, not a gap: a capture that never settled looks different from one
-that did, at a glance, with nothing to read. **Do not "fix" this into always locking.**
+**A fix that reaches the hardware floor lands exactly on the crosshair. One that stops short
+of the floor visibly stops short of the crosshair, and never reaches it.** That falls out of
+the honest mapping rather than being drawn on top of it, and it is intended behaviour, not a
+gap: a capture that reached what this receiver can do looks different from one that did not,
+at a glance, with nothing to read. **Do not "fix" this into always locking.**
+
+**The floor, not the grade — this sentence used to say "a good fix".** It was wrong, and
+§9.2.1 was written specifically to correct it. The crosshair is pinned to 1.4 m while
+`gradeAccuracy` calls anything under 5 m good, so a green circle resting well outside the
+crosshair is what a *normal* capture looks like. Read as a claim about the grade, the
+sentence said most successful captures were failures; read as a claim about the floor, which
+is what the mapping actually pins, it is true. §9.2.1's two completion levels exist for
+exactly the gap between those two readings.
 
 **The pulse does not carry over, and that is a decision, not an oversight.** The traffic-light
 frame pulsed — breathing slowly in and out while a fix refined — because it had no other way
@@ -798,6 +817,65 @@ the first left on the record rather than against the tap, and the screen says so
 also the one case where the improvement figure can come back at or below zero, since the
 baseline is no longer a member of the run's own samples (§9.3).
 
+#### Keeping the better fix
+
+**A second run's fix replaces the first's only when it is not worse.** The gate is
+`fix.accuracyM <= the accuracy already on the record`; anything above it leaves every fix
+column exactly as it was. A record that carries no accuracy yet — a `'none'` capture, or one
+positioned without an accuracy — has nothing to lose, so any positioned fix applies to it,
+which is what keeps refining *from* `'none'` (§9.1) working unchanged.
+
+**`accuracyM` is the sole criterion, and spread is deliberately not a tiebreak.** Accuracy is
+the figure that travels: it becomes the Victorian Biodiversity Atlas's mandatory "Positional
+accuracy (metres)", which a state agency filters public extracts on, so it is the one number
+a retry must not be able to degrade. Spread is not a competing measure of the same thing.
+Spread is a run's *internal* disagreement — how far its own readings sit from their own
+average — not distance from the truth, and two runs' spreads are not comparable to each
+other: a tight spread around a systematically wrong position is not better than a wide spread
+around a correct one. Weighing it here would let a run's self-consistency override the number
+the extract is actually filtered on. (§9.3 makes the same argument for why the screen shows
+spread *beside* the improvement rather than folding it in.)
+
+**A discarded run is still on the record.** It appends its own `'edited'` event carrying that
+run's position and accuracy — this run's, not the kept fix's — because a second run that went
+badly and a second run that never happened are different facts about a wait she actually
+stood through, and only the event distinguishes them. Its `detail` is worded differently from
+an applied refinement's (`fix refinement reached …` rather than `fix refined from … to …`),
+so a reader matching on the applied prefix cannot mistake one for the other.
+
+**And the screen says so, in these words.** Pinned here as copy, the way §9.3's two verdict
+sentences are, because a run that bought nothing is exactly where a screen is tempted to say
+nothing:
+
+> *&lt;how the wait ended&gt;* This run reached ±*X.X* m — no better than the ±*Y.Y* m already
+> on the record, so that fix was kept.
+
+The first clause is the same sentence any finish gets (`The countdown ran out.` / `You
+accepted it early.` / `The fix stopped improving, so the countdown finished itself.`). Where
+the record somehow carries no accuracy to name, "the ±*Y.Y* m already on the record" becomes
+"the fix already on the record" and nothing else changes. Reporting only the first clause
+would read as the countdown having done its usual job, which is the untrue impression the
+record-layer gate exists to keep off the record; the screen owes her the same honesty.
+
+**The consequence, stated plainly: the stored accuracy is now a one-way ratchet.** Because a
+run applies only when it is sharper, the number on a record can only ever fall. A spuriously
+optimistic reading that wins once — a receiver briefly and wrongly confident, which is a
+thing GPS does — cannot be walked back by any path in this application. TRY AGAIN cannot
+beat it except by beating it, and there is no delete: `softDeleteRecord` exists in
+`packages/data` and has no caller anywhere under `apps/`. This is a deliberate trade — the
+alternative is a retry that can quietly degrade a state agency's filter field, which is
+worse — but it is a trade, not a free win, and a future editing or QA path is where the
+other side of it gets answered. Do not remove the gate to answer it.
+
+**An applied retry replaces the whole evidence bundle, not just the number.**
+`fix_sample_count`, `fix_spread_m`, `fix_hold_ms` and `gps_time` all move with the fix they
+were measured alongside; they have to, or the record would claim a spread and a sample count
+belonging to a position it no longer holds. So a one-sample retry that happens to beat a
+thirteen-sample average wins on `accuracyM` and replaces richer evidence with thinner — and
+the honesty check §9.3 relies on, spread beside the accuracy, is exactly what a reader would
+use to notice that. The gate does not protect against it, and is not meant to: it protects
+the one number the extract filters on.
+
 ### 9.2.2 Motion, and when to refuse it
 
 The dial's motion must respect the system's reduced-motion setting — but **the setting means
@@ -923,8 +1001,11 @@ holding a phone still over a point should answer *how good is it* and *how much 
 before it answers anything else.
 
 **Readings averaged and the improvement delta are not supporting readouts.** They live
-inside the traffic-light frame with the control (§9.1.2). Separating them from the button is
+inside the dial, with the control (§9.1.2). Separating them from the button is
 the exact defect §9.1 exists to fix, and this section previously prescribed that separation.
+(This clause and §9.1.2 both said "inside the traffic-light frame" until the dial superseded
+that frame in §9.2. The object changed; the adjacency requirement did not, and it is the
+requirement — not the frame — that either section was ever about.)
 
 **A countdown transcript**, on the diagnostics screen while the countdown length is still
 being settled: one row per reading collected since the tap, carrying the elapsed seconds,
