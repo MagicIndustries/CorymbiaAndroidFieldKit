@@ -1,6 +1,6 @@
 import React from 'react'
-import { processColor, Text } from 'react-native'
-import { render, screen } from '@testing-library/react-native'
+import { AccessibilityInfo, Animated, processColor, Text } from 'react-native'
+import { act, render, screen } from '@testing-library/react-native'
 import type { ReactTestRendererNode } from 'react-test-renderer'
 import { darkTheme } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
@@ -11,6 +11,7 @@ const renderDial = (props: {
   grade: 'good' | 'fair' | 'poor'
   accuracyM: number
   remaining?: number
+  locked?: boolean
 }) =>
   render(
     <ThemeProvider>
@@ -182,5 +183,223 @@ describe('CaptureDial', () => {
       'dial-accuracy',
       'dial-crosshair',
     ])
+  })
+})
+
+describe('CaptureDial the lock (spec §9.2.1)', () => {
+  it('renders the crosshair in textDim while unlocked, even when a lock prop is explicitly false', async () => {
+    await renderDial({ grade: 'good', accuracyM: 3, locked: false })
+    const horizontal = screen.getByTestId('dial-crosshair-horizontal')
+    expect(horizontal.props.stroke).toEqual({
+      type: 0,
+      payload: processColor(darkTheme.colors.textDim),
+    })
+  })
+
+  it('lights the crosshair in the grade colour once locked', async () => {
+    await renderDial({ grade: 'good', accuracyM: 1, locked: true })
+    const horizontal = screen.getByTestId('dial-crosshair-horizontal')
+    const vertical = screen.getByTestId('dial-crosshair-vertical')
+    expect(horizontal.props.stroke).toEqual({
+      type: 0,
+      payload: processColor(darkTheme.colors.statusGood),
+    })
+    expect(vertical.props.stroke).toEqual({
+      type: 0,
+      payload: processColor(darkTheme.colors.statusGood),
+    })
+  })
+
+  it('lights the crosshair for a fair fix too, not just good', async () => {
+    await renderDial({ grade: 'fair', accuracyM: 1, locked: true })
+    const horizontal = screen.getByTestId('dial-crosshair-horizontal')
+    expect(horizontal.props.stroke).toEqual({
+      type: 0,
+      payload: processColor(darkTheme.colors.statusFair),
+    })
+  })
+
+  // The exact figures — 0.15/0.45 fill opacity, 1.75/4 outline weight — are
+  // spec §9.2.1's own numbers, settled by eye against an animated mockup and
+  // strengthened twice on review. They are asserted as literals rather than
+  // via any shared constant, the same reasoning dialGeometry.test.ts uses
+  // for its own anchor points: a test that imported the same constant the
+  // component uses to draw would pass no matter what that constant held.
+  it('keeps the accuracy circle soft — a low fill opacity and a thin outline — while unlocked', async () => {
+    await renderDial({ grade: 'good', accuracyM: 7 })
+    const accuracy = screen.getByTestId('dial-accuracy')
+    expect(accuracy.props.fillOpacity).toBeCloseTo(0.15, 5)
+    expect(accuracy.props.strokeWidth).toBeCloseTo(1.75, 5)
+  })
+
+  it('fills and firms the accuracy circle once locked — a definite object, not a soft region', async () => {
+    // Reduced motion renders the locked *state* with no animation to wait
+    // out (spec §9.2.2), which is what makes this assertion deterministic
+    // under Jest rather than dependent on animation frames never advancing.
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(true)
+    await renderDial({ grade: 'good', accuracyM: 1, locked: true })
+    await screen.findByTestId('dial-accuracy')
+    const accuracy = screen.getByTestId('dial-accuracy')
+    expect(accuracy.props.fillOpacity).toBeCloseTo(0.45, 5)
+    expect(accuracy.props.strokeWidth).toBeCloseTo(4, 5)
+  })
+
+  it('renders no ripple while not locked', async () => {
+    await renderDial({ grade: 'good', accuracyM: 7 })
+    expect(screen.queryByTestId('dial-ripple-1')).toBeNull()
+    expect(screen.queryByTestId('dial-ripple-2')).toBeNull()
+  })
+
+  it('renders no ripple when the dial mounts already locked', async () => {
+    await renderDial({ grade: 'good', accuracyM: 1, locked: true })
+    expect(screen.queryByTestId('dial-ripple-1')).toBeNull()
+    expect(screen.queryByTestId('dial-ripple-2')).toBeNull()
+  })
+
+  /**
+   * DOCTRINE RULE 9: THE LOCK MUST NOT BE CARRIED BY COLOUR OR MOTION ALONE.
+   *
+   * The screen adds `GOOD FIX · LOCKED ON` in the next task, and it already
+   * holds `locked` itself — it computed it to pass down as this very prop.
+   * What this component still owes doctrine rule 9 on its own is a fact
+   * about the lock that survives independently of this component's own
+   * colour and motion: `accessibilityState.selected`, readable off the root
+   * view without inspecting a stroke colour or waiting out an animation.
+   */
+  it('exposes the lock on the dial itself as a plain fact, not only through colour', async () => {
+    await renderDial({ grade: 'good', accuracyM: 1, locked: true })
+    expect(screen.getByTestId('capture-dial').props.accessibilityState).toEqual({ selected: true })
+  })
+
+  it('exposes not-locked the same way', async () => {
+    await renderDial({ grade: 'good', accuracyM: 7 })
+    expect(screen.getByTestId('capture-dial').props.accessibilityState).toEqual({ selected: false })
+  })
+})
+
+describe('CaptureDial the lock: reduced motion (spec §9.2.2)', () => {
+  // "The setting means 'do not animate at me unbidden'... Motion that is
+  // the direct result of something she did... is a response to a request."
+  // But the lock's *ripple* is pure emphasis on top of a state already
+  // fully conveyed by fill, outline and crosshair colour — so §9.2.2 is
+  // read here as: render the locked state, run no ripple, when reduced
+  // motion is on. This is the branch Step 5's deliberate-breakage proof
+  // targets (see the task report).
+  it('renders the locked state with no ripple when reduced motion is on', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(true)
+    await renderDial({ grade: 'good', accuracyM: 1, locked: true })
+    await screen.findByTestId('dial-accuracy')
+    const accuracy = screen.getByTestId('dial-accuracy')
+    expect(accuracy.props.fillOpacity).toBeCloseTo(0.45, 5)
+    expect(accuracy.props.strokeWidth).toBeCloseTo(4, 5)
+    expect(screen.queryByTestId('dial-ripple-1')).toBeNull()
+    expect(screen.queryByTestId('dial-ripple-2')).toBeNull()
+  })
+
+  it('renders the locked state with no ripple while reduced motion is still unresolved', async () => {
+    // No mock: `isReduceMotionEnabled()` never answers in this headless
+    // environment, so `reduceMotion` stays `null` — "not yet known" is
+    // treated the same as "on" (see the component's own doc comment).
+    await renderDial({ grade: 'good', accuracyM: 1, locked: true })
+    const accuracy = screen.getByTestId('dial-accuracy')
+    expect(accuracy.props.fillOpacity).toBeCloseTo(0.45, 5)
+    expect(screen.queryByTestId('dial-ripple-1')).toBeNull()
+  })
+})
+
+describe('CaptureDial the lock: the ripple actually starts (and does not replay)', () => {
+  // Fake timers make "started" provable the same way TrafficLightFrame.tsx
+  // proves its pulse loop starts: `Animated.parallel` is spied on directly,
+  // which records every construction attempt regardless of what later
+  // happens to it. This is the fix for the exact trap the task brief warns
+  // about — a timer count reaching zero cannot tell "never started" apart
+  // from "started, then finished" (both read back as zero), so nothing
+  // below asserts on a timer count.
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] })
+  })
+
+  afterEach(() => {
+    jest.clearAllTimers()
+    jest.useRealTimers()
+    jest.restoreAllMocks()
+  })
+
+  it('starts the ripple on a genuine transition into lock, with motion allowed', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
+    const parallelSpy = jest.spyOn(Animated, 'parallel')
+    const { rerender } = await renderDial({ grade: 'good', accuracyM: 7 })
+    await screen.findByTestId('capture-dial')
+    await act(async () => {
+      jest.advanceTimersByTime(0)
+    })
+    expect(parallelSpy).not.toHaveBeenCalled()
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={1} locked />
+      </ThemeProvider>,
+    )
+    expect(parallelSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('never starts the ripple when the dial mounts already locked', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
+    const parallelSpy = jest.spyOn(Animated, 'parallel')
+    await renderDial({ grade: 'good', accuracyM: 1, locked: true })
+    await screen.findByTestId('capture-dial')
+    await act(async () => {
+      jest.advanceTimersByTime(0)
+    })
+    expect(parallelSpy).not.toHaveBeenCalled()
+  })
+
+  it('does not replay the ripple on a redundant re-render that is still locked', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
+    const parallelSpy = jest.spyOn(Animated, 'parallel')
+    const { rerender } = await renderDial({ grade: 'good', accuracyM: 7 })
+    await screen.findByTestId('capture-dial')
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={1} locked />
+      </ThemeProvider>,
+    )
+    expect(parallelSpy).toHaveBeenCalledTimes(1)
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={1} locked />
+      </ThemeProvider>,
+    )
+    expect(parallelSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('starts nothing new once lock is lost, and replays on a subsequent re-lock', async () => {
+    jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(false)
+    const parallelSpy = jest.spyOn(Animated, 'parallel')
+    const { rerender } = await renderDial({ grade: 'good', accuracyM: 7 })
+    await screen.findByTestId('capture-dial')
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={1} locked />
+      </ThemeProvider>,
+    )
+    expect(parallelSpy).toHaveBeenCalledTimes(1)
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={7} locked={false} />
+      </ThemeProvider>,
+    )
+    expect(parallelSpy).toHaveBeenCalledTimes(1)
+
+    await rerender(
+      <ThemeProvider>
+        <CaptureDial grade="good" accuracyM={1} locked />
+      </ThemeProvider>,
+    )
+    expect(parallelSpy).toHaveBeenCalledTimes(2)
   })
 })
