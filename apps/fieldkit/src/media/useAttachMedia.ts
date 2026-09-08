@@ -1,9 +1,16 @@
 import { useCallback } from 'react'
-import { attachMedia, newMediaId, type Database, type Fix } from '@corymbia/data'
+import {
+  attachMedia,
+  newMediaId,
+  AttachmentPersistError,
+  type Database,
+  type Fix,
+} from '@corymbia/data'
 import { mediaFileName, type MediaKind } from '@corymbia/media'
 import { useDatabase, useDevice } from '../db/provider'
 import { mediaStore } from './store'
 import { readAmbient } from './ambient'
+import { buildAmbientFix } from './ambientFix'
 
 /**
  * The pipeline behind `attachPhoto` and `attachVoice` (`src/media`, Tasks 8
@@ -24,6 +31,17 @@ import { readAmbient } from './ambient'
  * `attachMedia` takes the media id rather than minting its own, precisely so
  * this can derive the filename and write the bytes before the row exists —
  * see `newMediaId`'s own doc comment in `@corymbia/data`.
+ *
+ * **The rollback is narrower than "`attachMedia` threw."** `attachMedia`'s
+ * insert runs inside its own transaction, which commits before that function
+ * returns — and only then does it re-read the row to hand back, throwing if
+ * that re-read fails. A throw from that post-commit read is not a refused
+ * insert: the row already exists, and deleting the file it names would
+ * create the exact outcome this ordering exists to prevent, a row with no
+ * file. `attachMedia` signals that case distinctly, as `AttachmentPersistError`
+ * (`@corymbia/data`) — see its own doc comment — and this rollback checks for
+ * it and skips the delete when it sees one, propagating the error unrolled
+ * either way.
  */
 
 export type AttachPhotoInput = {
@@ -56,39 +74,21 @@ export type AttachVoiceInput = {
  * annotation, not the attachment itself — the photo or voice note is
  * attached either way, which is the one thing spec §8.2 will not let this
  * function refuse to do.
+ *
+ * The field-by-field construction of a positioned reading lives in
+ * `buildAmbientFix` (`./ambientFix.ts`) — shared with `diagnostics.tsx`'s own
+ * ambient save, which resolves the same `'notReported'` question the
+ * opposite way; see that function's doc comment for why both answers are
+ * kept.
  */
 function ambientFix(): Fix {
   const cached = readAmbient()
   if (cached === null || cached.isMocked === 'notReported') {
     return { quality: 'none' }
   }
-  return {
-    quality: 'ambient',
-    latitude: cached.latitude,
-    longitude: cached.longitude,
-    accuracyM: cached.accuracyM,
-    datum: 'WGS84',
-    ageSeconds: cached.ageSeconds,
-    verticalAccuracyM: cached.verticalAccuracyM,
-    // Guarded above: `cached.isMocked === 'notReported'` already returned,
-    // so the only two verdicts reaching here are 'mocked' and 'notMocked'.
-    // No cast and no `?? false` — see the doc comment above for why.
-    isMocked: cached.isMocked === 'mocked',
-    // expo-location does not expose which provider produced a reading (the
-    // same reason `useCapture.ts`'s CONDITIONS leaves this null).
-    provider: null,
-    // Android's accuracy figure is the 68% confidence radius, not a maximum
-    // error (spec §7.5) — the same convention every device-derived position
-    // in this app stores.
-    accuracyConvention: 'radius68',
-    // The ambient cache holds a position and an age, not the satellite
-    // clock reading that produced it — `diagnostics.tsx`'s own ambient save
-    // stamps the same null for the same reason.
-    gpsTime: null,
-    ...(cached.altitudeM === null
-      ? { altitudeM: null, altitudeReference: null }
-      : { altitudeM: cached.altitudeM, altitudeReference: 'wgs84Ellipsoid' }),
-  }
+  // No cast and no `?? false` — see the doc comment above for why: the only
+  // two verdicts reaching here are 'mocked' and 'notMocked', guarded above.
+  return buildAmbientFix(cached, cached.isMocked === 'mocked')
 }
 
 /**
@@ -123,6 +123,14 @@ async function attachOne(
       fix: ambientFix(),
     })
   } catch (insertError) {
+    // The transaction already committed and only the confirming re-read
+    // afterwards failed — see the doc comment at the top of this file. The
+    // row exists; removing the file it names here would be exactly the
+    // outcome this ordering exists to prevent, so this does not roll back
+    // and simply reports the failure onward.
+    if (insertError instanceof AttachmentPersistError) {
+      throw insertError
+    }
     try {
       await mediaStore.remove(fileName)
     } catch {

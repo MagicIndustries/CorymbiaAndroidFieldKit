@@ -32,6 +32,7 @@ import {
 import { field, radii, spacing } from '@corymbia/tokens'
 import { Button, Card, Screen, Type, useTheme } from '@corymbia/ui'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
+import { buildAmbientFix } from '../src/media/ambientFix'
 
 /**
  * The project and activity this screen owns, found by name.
@@ -1630,24 +1631,16 @@ function DiagnosticsBody(props: BodyProps) {
       props.setMessage(describeFailure('Could not open the diagnostics activity', error))
       return
     }
+    // Guarded above: fixNow is truthy here, so the guard already returned if
+    // the cached reading never reported a mocked flag. No cast and no `??
+    // false` — the verdict is a string union precisely so this line has to
+    // state what it does about "never said". The field-by-field construction
+    // itself lives in `buildAmbientFix` (`../src/media/ambientFix.ts`),
+    // shared with `useAttachMedia.ts`'s own ambient save — see that
+    // function's doc comment for why this screen's refusal above and that
+    // hook's downgrade-to-`'none'` are both kept as they are.
     const fix: Fix = fixNow
-      ? {
-          quality: 'ambient',
-          latitude: fixNow.latitude,
-          longitude: fixNow.longitude,
-          accuracyM: fixNow.accuracyM,
-          datum: 'WGS84',
-          ageSeconds: fixNow.ageSeconds,
-          verticalAccuracyM: fixNow.verticalAccuracyM,
-          // Guarded above: fixNow is truthy here, so the guard already
-          // returned if the cached reading never reported a mocked flag. No
-          // cast and no `?? false` — the verdict is a string union precisely
-          // so this line has to state what it does about "never said".
-          isMocked: fixNow.isMocked === 'mocked',
-          gpsTime: null,
-          ...CONDITIONS,
-          ...altitudeEvidence(fixNow.altitudeM),
-        }
+      ? buildAmbientFix(fixNow, fixNow.isMocked === 'mocked')
       : { quality: 'none' }
     // Guarded for the same reason as the capture path above: this one had no
     // guard at all, so a refused insert vanished as an unhandled rejection.

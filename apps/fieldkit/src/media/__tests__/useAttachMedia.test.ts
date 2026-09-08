@@ -1,6 +1,7 @@
 import { renderHook } from '@testing-library/react-native'
 import type { AmbientFix } from '@corymbia/geo'
-import type { Attachment, Database, Device } from '@corymbia/data'
+import { AttachmentPersistError, type Attachment, type Database, type Device } from '@corymbia/data'
+import type { MediaStore } from '@corymbia/media'
 
 /**
  * Tests for `useAttachMedia` (Plan 4, Task 10): the pipeline behind
@@ -15,7 +16,9 @@ import type { Attachment, Database, Device } from '@corymbia/data'
  * the `media_added` event, the CHECK constraints). `newMediaId` is left real:
  * it is a pure id generator with no I/O, and every test below reads the id
  * back out of the mocked calls rather than assuming what it produced, so
- * nothing here depends on its exact shape.
+ * nothing here depends on its exact shape. `AttachmentPersistError` is also
+ * left real — it is a plain `Error` subclass with no I/O, and the rollback
+ * test below needs `instanceof` to see the genuine class, not a mock's.
  *
  * Mocked: `../store`'s `mediaStore` and `../ambient`'s `readAmbient` /
  * `refreshAmbient` — the two singletons this hook reads from, each backed by
@@ -38,25 +41,36 @@ import type { Attachment, Database, Device } from '@corymbia/data'
 // (enforced by babel-plugin-jest-hoist) — and plain aliases matching the
 // brief's own naming are declared after the imports below, never inside a
 // factory.
+//
+// Every mock below is typed against the real signature it stands in for
+// (`jest.fn<typeof ...>()`), not left as a bare `jest.fn()`. An untyped mock
+// checks nothing about what a test hands it or reads back off it — a
+// misspelled or dropped payload field is a silent `undefined`, not a compile
+// error. That gap is exactly how a hardcoded `kind: 'photo'` (see the
+// payload tests below) went unnoticed before.
 // ---------------------------------------------------------------------------
 
-const mockAttachMedia = jest.fn()
+const mockAttachMedia = jest.fn<
+  ReturnType<typeof import('@corymbia/data').attachMedia>,
+  Parameters<typeof import('@corymbia/data').attachMedia>
+>()
 
 jest.mock('@corymbia/data', () => {
   const actual = jest.requireActual<typeof import('@corymbia/data')>('@corymbia/data')
   return {
     ...actual,
-    attachMedia: (...args: unknown[]) => mockAttachMedia(...args),
+    attachMedia: (...args: Parameters<typeof import('@corymbia/data').attachMedia>) =>
+      mockAttachMedia(...args),
   }
 })
 
-const mockSave = jest.fn()
-const mockRemove = jest.fn()
+const mockSave = jest.fn<ReturnType<MediaStore['save']>, Parameters<MediaStore['save']>>()
+const mockRemove = jest.fn<ReturnType<MediaStore['remove']>, Parameters<MediaStore['remove']>>()
 
 jest.mock('../store', () => ({
   mediaStore: {
-    save: (...args: unknown[]) => mockSave(...args),
-    remove: (...args: unknown[]) => mockRemove(...args),
+    save: (...args: Parameters<MediaStore['save']>) => mockSave(...args),
+    remove: (...args: Parameters<MediaStore['remove']>) => mockRemove(...args),
     exists: () => Promise.reject(new Error('not used by useAttachMedia')),
     uriFor: () => {
       throw new Error('not used by useAttachMedia')
@@ -64,12 +78,20 @@ jest.mock('../store', () => ({
   },
 }))
 
-const mockReadAmbient = jest.fn()
-const mockRefreshAmbient = jest.fn()
+const mockReadAmbient = jest.fn<
+  ReturnType<typeof import('../ambient').readAmbient>,
+  Parameters<typeof import('../ambient').readAmbient>
+>()
+const mockRefreshAmbient = jest.fn<
+  ReturnType<typeof import('../ambient').refreshAmbient>,
+  Parameters<typeof import('../ambient').refreshAmbient>
+>()
 
 jest.mock('../ambient', () => ({
-  readAmbient: (...args: unknown[]) => mockReadAmbient(...args),
-  refreshAmbient: (...args: unknown[]) => mockRefreshAmbient(...args),
+  readAmbient: (...args: Parameters<typeof import('../ambient').readAmbient>) =>
+    mockReadAmbient(...args),
+  refreshAmbient: (...args: Parameters<typeof import('../ambient').refreshAmbient>) =>
+    mockRefreshAmbient(...args),
 }))
 
 const testDb: Database = {
@@ -192,10 +214,10 @@ describe('useAttachMedia', () => {
     // renders a tile whose image is another record's photo.
     const result = await setUp()
     await result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' })
-    const [fileName] = save.mock.calls[0] as [string, string]
+    const fileName = save.mock.calls[0]?.[0]
     const inserted = attachMediaSpy.mock.calls[0]?.[1]
-    expect(fileName).toBe(`${inserted.mediaId}.jpg`)
-    expect(inserted.fileName).toBe(fileName)
+    expect(fileName).toBe(`${inserted?.mediaId}.jpg`)
+    expect(inserted?.fileName).toBe(fileName)
   })
 
   it('mints a fresh id and filename for every attachment, not a reused one', async () => {
@@ -205,8 +227,8 @@ describe('useAttachMedia', () => {
     const result = await setUp()
     await result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot-1.jpg' })
     await result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot-2.jpg' })
-    const [firstFileName] = save.mock.calls[0] as [string, string]
-    const [secondFileName] = save.mock.calls[1] as [string, string]
+    const firstFileName = save.mock.calls[0]?.[0]
+    const secondFileName = save.mock.calls[1]?.[0]
     expect(firstFileName).not.toBe(secondFileName)
   })
 
@@ -224,13 +246,60 @@ describe('useAttachMedia', () => {
     expect(attachMediaSpy.mock.calls[0]?.[1].byteSize).toBe(7)
   })
 
+  it('sends the row the full payload attachMedia needs for a photo, not just its media fields', async () => {
+    // recordId, deviceId and kind were previously asserted by nothing: a
+    // hardcoded `kind: 'photo'`, a wrong recordId, or the wrong device would
+    // all have passed the whole suite silently. recordId wrong means the
+    // attachment silently binds to a different record's chain of custody;
+    // kind wrong means a voice note stored as a photo row, which
+    // `media_duration_matches_kind`'s CHECK constraint refuses mid-capture on
+    // the device rather than in a test. `save`'s own second argument
+    // (`sourceUri`) is asserted here too — the exact input a caller handed
+    // in, not merely its filename.
+    const result = await setUp()
+    await result.current.attachPhoto({ recordId: 'rec_photo', sourceUri: 'file:///tmp/shot.jpg' })
+    const sourceUriPassedToSave = save.mock.calls[0]?.[1]
+    expect(sourceUriPassedToSave).toBe('file:///tmp/shot.jpg')
+    const inserted = attachMediaSpy.mock.calls[0]?.[1]
+    expect(inserted?.recordId).toBe('rec_photo')
+    expect(inserted?.deviceId).toBe('device-under-test')
+    expect(inserted?.kind).toBe('photo')
+  })
+
+  it('sends the row the full payload attachMedia needs for a voice note, with kind actually "voice"', async () => {
+    // The counterpart to the photo assertion above, on the other kind — a
+    // hardcoded `kind: 'photo'` in the payload (while the filename still
+    // used the real kind) would pass every photo-only assertion and only
+    // fail here.
+    const result = await setUp()
+    await result.current.attachVoice({
+      recordId: 'rec_voice',
+      sourceUri: 'file:///tmp/n.m4a',
+      durationMs: 8200,
+    })
+    const sourceUriPassedToSave = save.mock.calls[0]?.[1]
+    expect(sourceUriPassedToSave).toBe('file:///tmp/n.m4a')
+    const inserted = attachMediaSpy.mock.calls[0]?.[1]
+    expect(inserted?.recordId).toBe('rec_voice')
+    expect(inserted?.deviceId).toBe('device-under-test')
+    expect(inserted?.kind).toBe('voice')
+  })
+
   it('removes the file when the row is refused', async () => {
     attachMediaSpy.mockRejectedValue(new Error('constraint failed'))
     const result = await setUp()
     await expect(
       result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' }),
     ).rejects.toThrow()
-    expect(remove).toHaveBeenCalledWith(expect.stringMatching(/\.jpg$/))
+    // Read back the exact name `save` was called with rather than pattern
+    // matching an extension: `save` moves the source file, so a rollback
+    // written as `remove(input.sourceUri)` would delete nothing (the source
+    // is already gone) and leak the destination file — and the source URI
+    // used in this test's own fixture happens to end in `.jpg` too, so a
+    // loose `stringMatching(/\.jpg$/)` would not have caught it.
+    const fileName = save.mock.calls[0]?.[0]
+    expect(fileName).toBeDefined()
+    expect(remove).toHaveBeenCalledWith(fileName)
   })
 
   it('reports the row failure even when the rollback also fails', async () => {
@@ -247,6 +316,24 @@ describe('useAttachMedia', () => {
   it('does not remove the file when the row succeeded', async () => {
     const result = await setUp()
     await result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' })
+    expect(remove).not.toHaveBeenCalled()
+  })
+
+  it('does not remove the file when the row committed but only the confirming read failed', async () => {
+    // `attachMedia`'s insert runs inside its own transaction, which commits
+    // before that function returns; only afterwards does it re-read the row,
+    // and throw if that fails. A throw from that post-commit read is not a
+    // refused insert — the row already exists — and `attachMedia` signals
+    // exactly that case with `AttachmentPersistError`. Rolling the file back
+    // here would produce a row with no file, the one outcome this pipeline's
+    // ordering exists to prevent.
+    attachMediaSpy.mockRejectedValue(
+      new AttachmentPersistError('Attachment med_x vanished immediately after being attached.'),
+    )
+    const result = await setUp()
+    await expect(
+      result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' }),
+    ).rejects.toThrow(AttachmentPersistError)
     expect(remove).not.toHaveBeenCalled()
   })
 
@@ -286,6 +373,12 @@ describe('useAttachMedia', () => {
     const result = await setUp()
     await result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' })
     expect(attachMediaSpy.mock.calls[0]?.[1].fix.quality).toBe('ambient')
+    // This only ever fails if something starts importing `refreshAmbient` —
+    // the hook imports only `readAmbient`, so it does not constrain a live
+    // read reached some other way (e.g. a future change that reaches the
+    // location source directly rather than through `../ambient`). Kept
+    // anyway: it is a real, if narrow, guard against the easiest way to
+    // reintroduce a wait.
     expect(refreshAmbient).not.toHaveBeenCalled()
   })
 
@@ -321,6 +414,35 @@ describe('useAttachMedia', () => {
       gpsTime: null,
       altitudeM: 12,
       altitudeReference: 'wgs84Ellipsoid',
+    })
+  })
+
+  it('stamps a null altitude and reference when the cache has no altitude', async () => {
+    // The altitude ternary's other branch — every other test's ambient
+    // fixture that reaches a `toEqual` assertion carries an altitude, so
+    // this is the only place the null-altitude arm is actually checked.
+    // `verticalAccuracyM` is asserted null here too: that field is mapped
+    // straight through, outside this ternary, which is only correct because
+    // `createAmbientCache` (`packages/geo`) already nulls it whenever there
+    // is no altitude — an invariant this hook relies on rather than proves.
+    readAmbient.mockReturnValue(fakeAmbientFix({ altitudeM: null, verticalAccuracyM: null }))
+    const result = await setUp()
+    await result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' })
+    const fix = attachMediaSpy.mock.calls[0]?.[1].fix
+    expect(fix).toEqual({
+      quality: 'ambient',
+      latitude: -37.8214,
+      longitude: 144.9631,
+      accuracyM: 12,
+      datum: 'WGS84',
+      ageSeconds: 30,
+      verticalAccuracyM: null,
+      isMocked: false,
+      provider: null,
+      accuracyConvention: 'radius68',
+      gpsTime: null,
+      altitudeM: null,
+      altitudeReference: null,
     })
   })
 

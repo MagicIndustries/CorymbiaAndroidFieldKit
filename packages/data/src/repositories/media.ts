@@ -100,6 +100,30 @@ async function nextOrdinal(db: Database, recordId: string): Promise<number> {
 }
 
 /**
+ * Thrown when `attachMedia`'s insert transaction has already committed, but
+ * the confirming re-read that follows it did not — either the read itself
+ * failed, or it came back empty.
+ *
+ * Distinguished from every other failure `attachMedia` can throw (the
+ * transaction's own rejection, and the two named refusals inside it — a
+ * missing or deleted record) so a caller doing file rollback on an insert
+ * failure can tell "the transaction never committed" from "it did, and only
+ * the confirmation afterwards failed". `useAttachMedia.ts`'s rollback
+ * pipeline (spec §12.1) is exactly that caller: the row exists either way in
+ * the second case, and deleting the file it names would produce a row with
+ * no file behind it — the one outcome that ordering exists to make
+ * impossible. Without this, any error class here looked identical to an
+ * insert that never happened at all.
+ */
+export class AttachmentPersistError extends Error {
+  override readonly name = 'AttachmentPersistError'
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+  }
+}
+
+/**
  * Attaches a photo or voice note to a record (spec §7.1, §12.1).
  *
  * Takes the media id rather than minting one — see `newMediaId`'s doc comment
@@ -185,9 +209,19 @@ export async function attachMedia(
     )
   })
 
-  const attachment = await db.first<MediaRow>(`${SELECT} WHERE id = ?`, [input.mediaId])
+  let attachment: MediaRow | null
+  try {
+    attachment = await db.first<MediaRow>(`${SELECT} WHERE id = ?`, [input.mediaId])
+  } catch (error) {
+    throw new AttachmentPersistError(
+      `Attachment ${input.mediaId} was committed, but reading it back failed.`,
+      { cause: error },
+    )
+  }
   if (!attachment) {
-    throw new Error(`Attachment ${input.mediaId} vanished immediately after being attached.`)
+    throw new AttachmentPersistError(
+      `Attachment ${input.mediaId} vanished immediately after being attached.`,
+    )
   }
   return toAttachment(attachment)
 }
