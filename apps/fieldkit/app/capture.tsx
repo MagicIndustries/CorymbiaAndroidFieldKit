@@ -30,15 +30,19 @@ import {
   type MediaStripItem,
 } from '@corymbia/ui'
 import {
+  appendEvent,
   listMedia,
   renameRecord,
+  softDeleteMedia,
   type Attachment,
   type Database,
   type FieldRecord,
+  type Fix,
   type StoredFix,
 } from '@corymbia/data'
 import { mediaStore } from '../src/media/store'
 import { ambientCache, feedingAmbientCache } from '../src/geo/ambient'
+import { buildAmbientFix } from '../src/geo/ambientFix'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useSteadyGrade } from '../src/capture/steadyGrade'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
@@ -1094,6 +1098,28 @@ function RecordedSummary({ record }: { record: FieldRecord }) {
 }
 
 /**
+ * The `Fix` stamped on an event this screen appends after a record has
+ * already been saved — a voice note played, or an attachment removed.
+ *
+ * Deliberately the same policy `useAttachMedia.ts`'s own (unexported)
+ * `ambientFix()` uses, and deliberately re-implemented here rather than
+ * imported: that function is private to the attach pipeline, and its own doc
+ * comment is explicit that "what to do about an unreported mocked verdict" is
+ * a decision each caller keeps for itself, not a shared policy —
+ * `diagnostics.tsx` already answers it the other way. This screen answers it
+ * the same way `useAttachMedia.ts` does, for the same reason: spec §8.2 will
+ * not let an ordinary interaction with an attachment be refused over a
+ * missing location annotation, so a cache with nothing usable in it degrades
+ * the event to `{ quality: 'none' }` rather than blocking the play or the
+ * removal.
+ */
+function ambientEventFix(): Fix {
+  const cached = ambientCache.read()
+  if (cached === null || cached.isMocked === 'notReported') return { quality: 'none' }
+  return buildAmbientFix(cached, cached.isMocked === 'mocked')
+}
+
+/**
  * What can still be attached to a recorded point (spec §9.6), and what is
  * already there.
  *
@@ -1138,6 +1164,65 @@ function RecordedAffordances({
   const [media, setMedia] = useState<Attachment[]>([])
 
   /**
+   * The removal confirmation (spec, this task; doctrine rule 4).
+   *
+   * `pendingRemoval` is the id of the attachment a `media-remove-*` tile has
+   * been pressed for, and nothing more — it is not itself the confirmation
+   * being shown, it is what the confirmation would be shown *for*. Rendered
+   * inline, on this screen, rather than as an `Alert` (the same reason
+   * `camera.tsx`'s own error is inline): a modal that dismisses takes the
+   * question, and the answer, with it.
+   *
+   * `removeError` is kept separate from `error` above (the title/notes save
+   * failure) rather than reusing it — the two are shown in different places
+   * on the screen, next to what they are about, and clearing one must never
+   * clear the other.
+   */
+  const [pendingRemoval, setPendingRemoval] = useState<string | null>(null)
+  const [removing, setRemoving] = useState(false)
+  const [removeError, setRemoveError] = useState<string | null>(null)
+
+  /**
+   * `useAudioPlayer`, loaded with a runtime `require` rather than a module-top
+   * `import` — deliberately, and the one thing in this file that departs from
+   * its own convention.
+   *
+   * `expo-audio`'s own entry point (`ExpoAudio.ts`) patches
+   * `AudioModule.AudioPlayer.prototype` at MODULE EVALUATION TIME, not inside
+   * any function — so a static `import { useAudioPlayer } from 'expo-audio'`
+   * at the top of this file runs that patch the instant `capture.tsx` is
+   * loaded, for every importer, whether or not this component ever renders.
+   * `app/__tests__/ambient-wiring.test.tsx` is exactly such an importer: it
+   * renders `CaptureScreen` to prove the ambient-cache wiring and never taps
+   * CAPTURE, so it never reaches this component and rightly mocks nothing
+   * about audio — and under jest-expo's native module registry, that patch
+   * throws (`AudioModule.AudioPlayer` is `undefined`; `voice.test.tsx` avoids
+   * this the other way, by mocking `expo-audio` itself). A `require` here
+   * runs the same patch, but only the first time THIS component actually
+   * renders — which needs a capture already accepted, exactly what
+   * `ambient-wiring.test.tsx` never does. Typed by the destructuring
+   * assignment's own annotation, not a generic `require<T>()` call or an
+   * `as` — the ambient `require` this workspace's typecheck resolves to
+   * returns a bare `any` (Metro's own generic `require<T>()`, declared in
+   * `expo/types/metro-require.d.ts`, is wired in through a generated
+   * `expo-env.d.ts` this checkout does not have).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- deliberately deferred, see above
+  const { useAudioPlayer }: typeof import('expo-audio') = require('expo-audio')
+
+  /**
+   * The one player this screen ever plays a voice note through.
+   *
+   * A single instance, not one per tile: `useAudioPlayer` starts loading
+   * whatever source it is given immediately, and a strip can hold several
+   * voice notes she may never tap. `null` here means "nothing loaded yet" —
+   * `playVoiceNote` below calls `player.replace(uri)` before `player.play()`
+   * on every press, which is what lets the same player stand in for whichever
+   * tile she actually taps.
+   */
+  const player = useAudioPlayer(null)
+
+  /**
    * Guards the `setState`s that follow an await. She can leave the screen, or
    * take another reading, while `renameRecord` is still in a transaction or
    * `listMedia` is still reading, and nothing may write into a component that
@@ -1180,21 +1265,32 @@ function RecordedAffordances({
    * This depends on the root layout being a `Stack` and not a `Slot` (see
    * `_layout.tsx`): under `Slot` there is nothing left to refocus, because
    * the push unmounted this screen and everything the capture is.
+   *
+   * **`refresh` is also what a successful removal calls**, below — not a
+   * second, independent fetch. A removal and a return from `/camera` can in
+   * principle race (she declines a removal, backgrounds the app onto the
+   * camera, and comes back), and routing both through the one ticketed
+   * function is what keeps them last-request-wins instead of two competing
+   * writers into `media`.
    */
+  const refresh = useCallback((): Promise<void> => {
+    generation.current += 1
+    const ticket = generation.current
+    return listMedia(db, record.id)
+      .then((rows) => {
+        if (mounted.current && ticket === generation.current) setMedia(rows)
+      })
+      .catch(() => {
+        // The record itself is unaffected by a read that fails; the tiles
+        // simply carry on showing no count until the next successful fetch,
+        // which is honester than inventing a number that was never read.
+      })
+  }, [db, record.id])
+
   useFocusEffect(
     useCallback(() => {
-      generation.current += 1
-      const ticket = generation.current
-      listMedia(db, record.id)
-        .then((rows) => {
-          if (mounted.current && ticket === generation.current) setMedia(rows)
-        })
-        .catch(() => {
-          // The record itself is unaffected by a read that fails; the tiles
-          // simply carry on showing no count until the next successful fetch,
-          // which is honester than inventing a number that was never read.
-        })
-    }, [db, record.id]),
+      void refresh()
+    }, [refresh]),
   )
 
   const photoCount = media.filter((item) => item.kind === 'photo').length
@@ -1205,6 +1301,108 @@ function RecordedAffordances({
     uri: mediaStore.uriFor(item.fileName),
     durationMs: item.durationMs,
   }))
+
+  /** The attachment a removal is pending for, when one is. */
+  const removalTarget = pendingRemoval === null ? null : media.find((item) => item.id === pendingRemoval) ?? null
+  const REMOVAL_NOUN: Record<Attachment['kind'], string> = { photo: 'photo', voice: 'voice note' }
+
+  /**
+   * A voice tile's press (this task). `MediaStrip` takes one `onPress` for
+   * the whole strip, not one per kind, so a photo tile presses this too —
+   * see `handleMediaPress` below for what it does there.
+   *
+   * `replace` before `play`, on the one player this screen owns: see its own
+   * doc comment above for why there is only one. Both calls are synchronous
+   * (`AudioPlayer.replace`/`.play`, `expo-audio` v57 —
+   * `node_modules/expo-audio/build/AudioModule.types.d.ts`), so a decoder or
+   * source failure surfaces as a synchronous throw here, not a rejected
+   * promise — which is exactly what the `try` below is written to catch.
+   *
+   * **The event is appended only once `play()` has returned without
+   * throwing** — never before it, and never from a `.catch` on a promise
+   * that was never produced. `'played'` is a permitted `EventAction`
+   * (migration 003) precisely for this (spec §8.5): who listened to a field
+   * note and when is part of chain of custody, and an event log that cannot
+   * be edited or removed must never record a play that never started.
+   */
+  function playVoiceNote(uri: string): void {
+    try {
+      player.replace(uri)
+      player.play()
+    } catch {
+      // A voice note that will not play is not a fact about the record
+      // itself being wrong, and this screen has nowhere pinned to say so —
+      // the one thing that must not happen is logging a play that did not
+      // happen, which the early return here guarantees.
+      return
+    }
+    void appendEvent(db, {
+      recordId: record.id,
+      action: 'played',
+      deviceId,
+      fix: ambientEventFix(),
+    })
+  }
+
+  /**
+   * A tile's press, dispatched by kind. A photo tile opens nothing: a
+   * full-screen viewer belongs with the browsing views Plan 5 builds, and
+   * `MediaStrip` has no per-item `onPress` to withhold from just the photo
+   * tiles — passing one at all makes every tile a `Pressable` (its own
+   * doctrine: never a `Pressable` around a handler with nothing to do), so
+   * the photo case is a deliberate no-op rather than an absent handler.
+   */
+  function handleMediaPress(id: string): void {
+    const item = mediaItems.find((entry) => entry.id === id)
+    if (item === undefined || item.kind !== 'voice') return
+    playVoiceNote(item.uri)
+  }
+
+  /** Opens the inline confirmation for one attachment (doctrine rule 4). */
+  function requestRemoval(id: string): void {
+    setRemoveError(null)
+    setPendingRemoval(id)
+  }
+
+  function cancelRemoval(): void {
+    setPendingRemoval(null)
+    setRemoveError(null)
+  }
+
+  /**
+   * Removes the pending attachment, once she has confirmed it.
+   *
+   * **Never optimistic.** `softDeleteMedia` is awaited before anything about
+   * `media` changes — no filtering the strip ahead of the result — so a
+   * refusal leaves the tile exactly as it was, with nothing to undo. Only
+   * once the removal has actually committed does this refetch through
+   * `refresh()` (the same ticketed fetch a focus return uses) and let what
+   * `listMedia` says replace `media` outright, rather than computing the new
+   * list itself by filtering the id out locally: the row is soft-deleted,
+   * not gone, and `listMedia`'s own `deleted_at IS NULL` filter is the one
+   * true statement of what she should still see — this screen does not
+   * restate it.
+   */
+  async function confirmRemoval(): Promise<void> {
+    if (pendingRemoval === null) return
+    const id = pendingRemoval
+    setRemoving(true)
+    setRemoveError(null)
+    try {
+      await softDeleteMedia(db, id, deviceId, ambientEventFix())
+      if (!mounted.current) return
+      setPendingRemoval(null)
+      await refresh()
+    } catch (caught) {
+      if (!mounted.current) return
+      const detail = caught instanceof Error ? caught.message : String(caught)
+      setRemoveError(
+        `The attachment was not removed: ${detail.replace(/[.?!…]+$/, '')}. It is still attached.`,
+      )
+    } finally {
+      if (mounted.current) setRemoving(false)
+    }
+  }
 
   const completed: InputAffordanceKind[] = [
     ...(title !== null ? (['title'] as const) : []),
@@ -1299,7 +1497,57 @@ function RecordedAffordances({
         busy={busy}
       />
 
-      <MediaStrip testID="capture-media-strip" items={mediaItems} />
+      <MediaStrip
+        testID="capture-media-strip"
+        items={mediaItems}
+        onPress={handleMediaPress}
+        onRemove={requestRemoval}
+      />
+
+      {removalTarget === null ? null : (
+        <View
+          style={{
+            gap: spacing.sm,
+            padding: spacing.md,
+            borderRadius: radii.md,
+            borderWidth: 2,
+            // Amber, the same warn-never-block colour the duplicate-pin
+            // guard uses above — this is a question, not a refusal.
+            borderColor: theme.colors.statusFair,
+            backgroundColor: theme.colors.surfaceRaised,
+          }}
+        >
+          <Type variant="body">
+            {`Remove this ${REMOVAL_NOUN[removalTarget.kind]}? The file stays on the device until a purge.`}
+          </Type>
+          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+            <Button
+              testID="media-remove-confirm"
+              label={removing ? 'REMOVING…' : 'REMOVE'}
+              spokenLabel={`Remove this ${REMOVAL_NOUN[removalTarget.kind]}`}
+              kind="secondary"
+              disabled={removing}
+              onPress={() => {
+                void confirmRemoval()
+              }}
+            />
+            <Button
+              testID="media-remove-cancel"
+              label="KEEP IT"
+              spokenLabel="Keep this attachment"
+              kind="secondary"
+              disabled={removing}
+              onPress={cancelRemoval}
+            />
+          </View>
+        </View>
+      )}
+
+      {removeError === null ? null : (
+        <Type variant="small" testID="media-remove-error">
+          {removeError}
+        </Type>
+      )}
 
       {title === null ? null : (
         <Type variant="body" testID="capture-title-value">

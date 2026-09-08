@@ -96,6 +96,20 @@ const mockRepo = {
     ReturnType<typeof import('@corymbia/data').listMedia>,
     Parameters<typeof import('@corymbia/data').listMedia>
   >(),
+  // Typed against the real functions for the same reason `renameRecord`
+  // above is: `softDeleteMedia is called with (this task's own
+  // "removes it once confirmed" test asserts its exact payload, and
+  // `appendEvent`'s "logs that a voice note was played" test asserts
+  // `action`/`recordId` on an `objectContaining` — an untyped `jest.fn()`
+  // would let either be handed a shape the real functions never accept.
+  softDeleteMedia: jest.fn<
+    ReturnType<typeof import('@corymbia/data').softDeleteMedia>,
+    Parameters<typeof import('@corymbia/data').softDeleteMedia>
+  >(),
+  appendEvent: jest.fn<
+    ReturnType<typeof import('@corymbia/data').appendEvent>,
+    Parameters<typeof import('@corymbia/data').appendEvent>
+  >(),
 }
 
 jest.mock('@corymbia/data', () => {
@@ -108,12 +122,18 @@ jest.mock('@corymbia/data', () => {
       mockRepo.renameRecord(...args),
     listMedia: (...args: Parameters<typeof import('@corymbia/data').listMedia>) =>
       mockRepo.listMedia(...args),
+    softDeleteMedia: (...args: Parameters<typeof import('@corymbia/data').softDeleteMedia>) =>
+      mockRepo.softDeleteMedia(...args),
+    appendEvent: (...args: Parameters<typeof import('@corymbia/data').appendEvent>) =>
+      mockRepo.appendEvent(...args),
   }
 })
 
-// A plain alias, matching the brief's own naming — not referenced from inside
+// Plain aliases, matching the brief's own naming — not referenced from inside
 // the `jest.mock` factory above, which is hoisted ahead of this declaration.
 const listMedia = mockRepo.listMedia
+const softDeleteMedia = mockRepo.softDeleteMedia
+const appendEvent = mockRepo.appendEvent
 
 /**
  * The router, mocked as an object rather than a fresh one per call.
@@ -195,6 +215,31 @@ jest.mock('../../src/media/store', () => ({
     exists: () => Promise.reject(new Error('not used by capture.tsx')),
     uriFor: (fileName: string) => `file:///media/${fileName}`,
   },
+}))
+
+/**
+ * `expo-audio`'s `useAudioPlayer`, mocked whole — a native module with no
+ * meaningful behaviour in a headless test environment, the same reason
+ * `mediaStore` above is. `mockPlayer` is one stable object for the life of a
+ * render, matching what the real hook hands back (`AudioPlayer` is a
+ * `SharedObject`, not a fresh value per call) — `capture.tsx` calls
+ * `useAudioPlayer(null)` once, at the top of `RecordedAffordances`, and
+ * `replace`/`play` on whichever tile she presses.
+ *
+ * `play` and `replace`/`pause` are plain `jest.fn()`s rather than typed
+ * against `AudioPlayer`'s own methods: both are `(): void`, so there is no
+ * payload for an untyped mock to hide the shape of. `play` is what the
+ * "plays a voice note" and "logs that a voice note was played" tests below
+ * assert was called, and what the "does not log a play that never started"
+ * test makes throw.
+ */
+const play = jest.fn()
+const pause = jest.fn()
+const replace = jest.fn()
+const mockPlayer = { play, pause, replace }
+
+jest.mock('expo-audio', () => ({
+  useAudioPlayer: () => mockPlayer,
 }))
 
 const mockDevice = {
@@ -364,6 +409,13 @@ beforeEach(() => {
   mockRepo.refineRecordFix.mockReset()
   mockRepo.renameRecord.mockReset()
   mockRepo.listMedia.mockReset()
+  mockRepo.softDeleteMedia.mockReset()
+  mockRepo.appendEvent.mockReset()
+  mockRepo.softDeleteMedia.mockResolvedValue(undefined)
+  mockRepo.appendEvent.mockResolvedValue(undefined)
+  play.mockReset()
+  pause.mockReset()
+  replace.mockReset()
   mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) =>
     Promise.resolve(recordFrom(input.fix)),
   )
@@ -1493,12 +1545,18 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     await settle()
 
     // `MediaStrip` renders a voice tile as a glyph (SVG, deliberately not
-    // text) plus its duration in `m:ss`, so the tile's only text content is
-    // the length — which pins both `kind` and `durationMs` coming through the
-    // mapping intact. A tile mapped as a photo would render an `Image` and no
-    // text at all; one mapped with a null duration would render an empty
-    // string.
-    expect(screen.getByTestId('media-tile-med_v')).toHaveTextContent('0:08')
+    // text) plus its duration in `m:ss` — which pins both `kind` and
+    // `durationMs` coming through the mapping intact. A tile mapped as a
+    // photo would render an `Image` and no such text at all; one mapped with
+    // a null duration would render an empty string.
+    //
+    // `{ exact: false }` as of this task: the tile is no longer *only* its
+    // duration — `capture.tsx` now passes `onRemove` to `MediaStrip`, so
+    // every tile also carries the remove control's own `✕` text (asserted on
+    // its own in "confirms before removing an attachment", below). An exact
+    // match here would be pinned to that control's glyph, which is not what
+    // this test is about.
+    expect(screen.getByTestId('media-tile-med_v')).toHaveTextContent('0:08', { exact: false })
     expect(screen.queryByTestId('media-thumb-med_v')).toBeNull()
   })
 
@@ -1774,6 +1832,168 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     expect(screen.getByTestId('capture-title-value')).toHaveTextContent('Frog pond outflow')
     expect(screen.getByTestId('affordance-description-label')).toHaveTextContent('Notes ✓')
     expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title ✓')
+  })
+})
+
+describe('playing a voice note back, and removing an attachment (Task 12)', () => {
+  it('plays a voice note when its tile is pressed', async () => {
+    listMedia.mockResolvedValue([voiceRow('med_b')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-tile-med_b'))
+
+    // The player is handed the stored file's URI, not merely pressed —
+    // `replace` before `play` is what lets the one player this screen owns
+    // stand in for whichever voice tile she taps.
+    expect(replace).toHaveBeenCalledWith('file:///media/med_b.m4a')
+    expect(play).toHaveBeenCalled()
+  })
+
+  it('does nothing when a photo tile is pressed', async () => {
+    // The other half of the same wiring: `MediaStrip` takes one `onPress` for
+    // the whole strip, so a photo tile reaches this screen's handler too —
+    // and the handler is required to recognise it is a photo and do nothing,
+    // rather than handing its URI to an audio player that cannot play it. A
+    // build that called `replace`/`play` regardless of kind would satisfy
+    // "plays a voice note" above and only fail here.
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-tile-med_a'))
+
+    expect(replace).not.toHaveBeenCalled()
+    expect(play).not.toHaveBeenCalled()
+  })
+
+  it('logs that a voice note was played', async () => {
+    // `'played'` is already a valid event action in migration 003's CHECK —
+    // it was put there for exactly this. The event log is chain of custody
+    // (spec §8.5), and who listened to a field note and when is part of it.
+    listMedia.mockResolvedValue([voiceRow('med_b')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-tile-med_b'))
+    await settle()
+
+    expect(appendEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'played', recordId: 'record-1' }),
+    )
+  })
+
+  it('does not log a play that never started', async () => {
+    // `play` throwing is `AudioPlayer.play()`'s own failure mode for a
+    // decoder or source refusal — both `play` and `replace` are synchronous
+    // (`node_modules/expo-audio/build/AudioModule.types.d.ts`), so a failure
+    // surfaces here, not through a rejected promise. An event logged from
+    // this path would be a false entry in a log nothing can remove.
+    play.mockImplementation(() => {
+      throw new Error('decoder failed')
+    })
+    listMedia.mockResolvedValue([voiceRow('med_b')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-tile-med_b'))
+    await settle()
+
+    expect(appendEvent).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'played' }),
+    )
+  })
+
+  it('confirms before removing an attachment', async () => {
+    // Doctrine rule 4: warn, never block. But a photo removed by a mis-tap on
+    // a strip of thumbnails is gone from her view with no undo on this
+    // screen, so this is the one input affordance that asks first.
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+
+    expect(softDeleteMedia).not.toHaveBeenCalled()
+    expect(screen.getByTestId('media-remove-confirm')).toBeTruthy()
+    // On screen, not an `Alert` — the same reason the camera screen's error
+    // is inline: a modal that dismisses takes the question with it. Asserted
+    // by what the confirmation actually says, not merely that some element
+    // with the right testID exists.
+    expect(screen.getByText(/Remove this photo\?/)).toBeTruthy()
+  })
+
+  it('removes it once confirmed', async () => {
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+    await fireEvent.press(screen.getByTestId('media-remove-confirm'))
+    await settle()
+
+    expect(softDeleteMedia).toHaveBeenCalledWith(
+      expect.anything(),
+      'med_a',
+      mockDevice.id,
+      expect.anything(),
+    )
+  })
+
+  it('stops showing a removed attachment', async () => {
+    // The initial fetch (on focus) sees the photo; the refetch this screen
+    // makes after a successful removal sees the database as it now stands —
+    // without it, everything below still shows the photo (leaving her
+    // reading her own mis-tap's confirmation as fact and not what the
+    // database holds).
+    listMedia.mockResolvedValueOnce([photoRow('med_a')])
+    await renderRecorded()
+    await settle()
+
+    listMedia.mockResolvedValueOnce([])
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+    await fireEvent.press(screen.getByTestId('media-remove-confirm'))
+    await settle()
+
+    expect(screen.queryByTestId('media-tile-med_a')).toBeNull()
+    // And the count on the affordance tile agrees with it — the same two
+    // channels asked of a save's own success below.
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Photo')
+  })
+
+  it('keeps the attachment when the removal is declined', async () => {
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+    await fireEvent.press(screen.getByTestId('media-remove-cancel'))
+    await settle()
+
+    expect(softDeleteMedia).not.toHaveBeenCalled()
+    expect(screen.getByTestId('media-tile-med_a')).toBeTruthy()
+    expect(screen.queryByTestId('media-remove-confirm')).toBeNull()
+  })
+
+  it('says so and keeps the tile when the removal fails', async () => {
+    // THE TEST THAT MATTERS MOST (task-12-brief.md). An optimistic removal
+    // that hides the tile and then fails leaves her believing a photo is
+    // gone when it is still attached, and the export will disagree with her.
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    softDeleteMedia.mockRejectedValue(new Error('database locked'))
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+    await fireEvent.press(screen.getByTestId('media-remove-confirm'))
+    await settle()
+
+    expect(screen.getByTestId('media-tile-med_a')).toBeTruthy()
+    expect(screen.getByTestId('media-remove-error')).toHaveTextContent(
+      'The attachment was not removed: database locked. It is still attached.',
+    )
   })
 })
 
