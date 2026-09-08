@@ -28,6 +28,7 @@ import {
   type InputAffordanceKind,
 } from '@corymbia/ui'
 import { renameRecord, type Database, type FieldRecord, type StoredFix } from '@corymbia/data'
+import { feedingAmbientCache } from '../src/geo/ambient'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useSteadyGrade } from '../src/capture/steadyGrade'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
@@ -299,9 +300,21 @@ function CaptureBody() {
    * of a countdown. Lazily initialised through the ref rather than passed as
    * `useRef(createExpoLocationSource()).current`, so the factory is not called
    * on every render merely to have its result discarded.
+   *
+   * **And it is wrapped, because this screen is the app's main producer of
+   * ambient positions** (spec §8.2). `feedingAmbientCache` copies every
+   * reading into the one shared cache (`src/geo/ambient.ts`) on its way to
+   * `useCapture`, which is what lets a photo or a voice note attached a
+   * minute later carry a position at all — without it every `media_added`
+   * event is stamped `{ quality: 'none' }`. The wrap goes here rather than
+   * inside `useCapture` on purpose: that hook is handed its dependencies and
+   * unit-tested against a scripted source, and reaching a module singleton
+   * from inside it would take that away.
    */
   const sourceRef = useRef<LocationSource | null>(null)
-  const source: LocationSource = (sourceRef.current ??= createExpoLocationSource())
+  const source: LocationSource = (sourceRef.current ??= feedingAmbientCache(
+    createExpoLocationSource(),
+  ))
 
   const capture = useCapture({ db, device, source })
   const acquiring = capture.phase === 'acquiring'

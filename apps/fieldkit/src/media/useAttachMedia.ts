@@ -9,12 +9,12 @@ import {
 import { mediaFileName, type MediaKind } from '@corymbia/media'
 import { useDatabase, useDevice } from '../db/provider'
 import { mediaStore } from './store'
-import { readAmbient } from './ambient'
+import { ambientCache } from '../geo/ambient'
 import { buildAmbientFix } from './ambientFix'
 
 /**
- * The pipeline behind `attachPhoto` and `attachVoice` (`src/media`, Tasks 8
- * and 9's seams) — spec §12.1.
+ * The pipeline that attaches a photo (`app/camera.tsx`) or a voice note
+ * (`app/voice.tsx`) to a record — spec §12.1.
  *
  * **Ordering, and why it is this way round.** A row without its file is a
  * broken record: the strip shows a tile, the tile shows nothing, and export
@@ -60,8 +60,11 @@ export type AttachVoiceInput = {
  * the `media_added` event (spec §8.1: every event carries where it
  * happened).
  *
- * Never reads a live position — `readAmbient` only ever returns what is
- * already cached, so attaching a photo can never wait on the GPS.
+ * Never reads a live position — `ambientCache.read()` only ever returns what
+ * is already cached, so attaching a photo can never wait on the GPS. The
+ * cache's other method, `refresh()`, reaches for a live position and is
+ * exactly the wait this must not take; the screens that watch a GPS are what
+ * feed it (`src/geo/ambient.ts`).
  *
  * `{ quality: 'none' }` covers two cases, not one: the cache holding nothing
  * at all, and the cache holding a reading whose mocked status was never
@@ -82,7 +85,7 @@ export type AttachVoiceInput = {
  * kept.
  */
 function ambientFix(): Fix {
-  const cached = readAmbient()
+  const cached = ambientCache.read()
   if (cached === null || cached.isMocked === 'notReported') {
     return { quality: 'none' }
   }
@@ -144,8 +147,15 @@ async function attachOne(
 }
 
 /**
- * Fills the `attachPhoto`/`attachVoice` seams (`src/media/attachPhoto.ts`,
- * `src/media/attachVoice.ts`) with the real pipeline.
+ * What `camera.tsx` and `voice.tsx` call once a photo or a recording has been
+ * written to a temporary file.
+ *
+ * **This is a hook, and that is a precondition on its callers.** `useDatabase`
+ * and `useDevice` both throw before the database is open, so a screen that
+ * calls this must sit under `DatabaseProvider` and check `useDatabaseStatus`
+ * before rendering the part of itself that calls it — which is why both
+ * screens are split into a guard and a body, the same shape `capture.tsx` and
+ * `diagnostics.tsx` already use.
  *
  * Reads the database and the device from context (`src/db/provider.tsx`)
  * rather than taking them as parameters — unlike `useCapture`, which is

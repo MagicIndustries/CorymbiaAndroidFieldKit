@@ -20,10 +20,11 @@ import type { MediaStore } from '@corymbia/media'
  * left real — it is a plain `Error` subclass with no I/O, and the rollback
  * test below needs `instanceof` to see the genuine class, not a mock's.
  *
- * Mocked: `../store`'s `mediaStore` and `../ambient`'s `readAmbient` /
- * `refreshAmbient` — the two singletons this hook reads from, each backed by
- * a native module (`expo-file-system`, `expo-location`) that has no
- * meaningful behaviour in a headless test environment.
+ * Mocked: `../store`'s `mediaStore` and `../../geo/ambient`'s `ambientCache`
+ * — the two singletons this hook reads from, each backed by a native module
+ * (`expo-file-system`, `expo-location`) that has no meaningful behaviour in a
+ * headless test environment. The cache is mocked whole rather than by method,
+ * so `refresh` is observable too: see the "never waits" test below.
  *
  * Mocked: `../../db/provider`'s `useDatabase` / `useDevice` — this hook's
  * only two context reads, stood up as fixed test doubles rather than a real
@@ -78,20 +79,27 @@ jest.mock('../store', () => ({
   },
 }))
 
+type SharedAmbientCache = typeof import('../../geo/ambient').ambientCache
+
 const mockReadAmbient = jest.fn<
-  ReturnType<typeof import('../ambient').readAmbient>,
-  Parameters<typeof import('../ambient').readAmbient>
+  ReturnType<SharedAmbientCache['read']>,
+  Parameters<SharedAmbientCache['read']>
 >()
 const mockRefreshAmbient = jest.fn<
-  ReturnType<typeof import('../ambient').refreshAmbient>,
-  Parameters<typeof import('../ambient').refreshAmbient>
+  ReturnType<SharedAmbientCache['refresh']>,
+  Parameters<SharedAmbientCache['refresh']>
+>()
+const mockRecordAmbient = jest.fn<
+  ReturnType<SharedAmbientCache['record']>,
+  Parameters<SharedAmbientCache['record']>
 >()
 
-jest.mock('../ambient', () => ({
-  readAmbient: (...args: Parameters<typeof import('../ambient').readAmbient>) =>
-    mockReadAmbient(...args),
-  refreshAmbient: (...args: Parameters<typeof import('../ambient').refreshAmbient>) =>
-    mockRefreshAmbient(...args),
+jest.mock('../../geo/ambient', () => ({
+  ambientCache: {
+    read: (...args: Parameters<SharedAmbientCache['read']>) => mockReadAmbient(...args),
+    refresh: (...args: Parameters<SharedAmbientCache['refresh']>) => mockRefreshAmbient(...args),
+    record: (...args: Parameters<SharedAmbientCache['record']>) => mockRecordAmbient(...args),
+  },
 }))
 
 const testDb: Database = {
@@ -373,12 +381,12 @@ describe('useAttachMedia', () => {
     const result = await setUp()
     await result.current.attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' })
     expect(attachMediaSpy.mock.calls[0]?.[1].fix.quality).toBe('ambient')
-    // This only ever fails if something starts importing `refreshAmbient` —
-    // the hook imports only `readAmbient`, so it does not constrain a live
-    // read reached some other way (e.g. a future change that reaches the
-    // location source directly rather than through `../ambient`). Kept
-    // anyway: it is a real, if narrow, guard against the easiest way to
-    // reintroduce a wait.
+    // This only ever fails if something starts calling `ambientCache.refresh`
+    // — the hook calls only `read`, so it does not constrain a live read
+    // reached some other way (e.g. a future change that reaches the location
+    // source directly rather than through `../../geo/ambient`). Kept anyway:
+    // it is a real, if narrow, guard against the easiest way to reintroduce a
+    // wait.
     expect(refreshAmbient).not.toHaveBeenCalled()
   })
 
