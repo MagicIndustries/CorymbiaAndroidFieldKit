@@ -14,6 +14,7 @@ import {
   moveRecord,
   refileRecord,
   refineRecordFix,
+  renameRecord,
   sampleEvidence,
   softDeleteRecord,
 } from '../records'
@@ -1266,12 +1267,16 @@ describe('filing, reordering and refiling', () => {
       const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
       expect(record.fix).toEqual(INSTANT)
 
-      const refined = await refineRecordFix(db, {
+      const { record: refined, applied } = await refineRecordFix(db, {
         recordId: record.id,
         fix: DELIBERATE,
         deviceId,
       })
 
+      // INSTANT is ±6 m, DELIBERATE is ±4 m — a genuine improvement, so it
+      // applies (see the `keeps the better fix` block below for the guard
+      // itself).
+      expect(applied).toBe(true)
       // Every fix column moves together, spread included: INSTANT is a
       // one-reading capture whose spread must be NULL, DELIBERATE is a
       // seven-reading one whose spread must not be —
@@ -1287,7 +1292,7 @@ describe('filing, reordering and refiling', () => {
       const first = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
       const second = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
 
-      const refined = await refineRecordFix(db, {
+      const { record: refined } = await refineRecordFix(db, {
         recordId: second.id,
         fix: DELIBERATE,
         deviceId,
@@ -1350,8 +1355,17 @@ describe('filing, reordering and refiling', () => {
     it('clears the columns a sparser fix does not carry, not just the ones it sets', async () => {
       // DELIBERATE carries the lot: seven readings, a spread, a hold, an
       // altitude with its reference frame, a vertical accuracy, a provider and
-      // a satellite clock reading.
-      const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+      // a satellite clock reading. Started coarser than BARE below (±20 m,
+      // rather than DELIBERATE's own ±4 m) so that refining down to BARE is a
+      // genuine improvement — this test is about column clearing, not about
+      // the `keeps the better fix` guard, and a starting accuracy sharper than
+      // the target would trip that guard and leave BARE discarded.
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: { ...DELIBERATE, accuracyM: 20 },
+        deviceId,
+      })
 
       // A one-reading capture on a receiver that reported none of it. Every
       // optional part of the previous fix is absent here, and each absence has
@@ -1379,8 +1393,13 @@ describe('filing, reordering and refiling', () => {
         gpsTime: null,
       }
 
-      const refined = await refineRecordFix(db, { recordId: record.id, fix: BARE, deviceId })
+      const { record: refined, applied } = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: BARE,
+        deviceId,
+      })
 
+      expect(applied).toBe(true)
       expect(refined.fix).toEqual(BARE)
       expect((await getRecord(db, record.id))?.fix).toEqual(BARE)
 
@@ -1420,10 +1439,25 @@ describe('filing, reordering and refiling', () => {
       // and record_ambient_carries_age each police their own half, so a stale
       // sample count left behind by the update aborts the transaction rather
       // than surviving — which is the same failure, caught one layer down.
-      const record = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+      // Started coarser than AMBIENT below (±50 m, rather than DELIBERATE's own
+      // ±4 m) for the same reason as the BARE test above: this is a
+      // column-clearing test, and a starting accuracy sharper than AMBIENT's
+      // ±38 m would trip the `keeps the better fix` guard and leave AMBIENT
+      // discarded rather than applied.
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: { ...DELIBERATE, accuracyM: 50 },
+        deviceId,
+      })
 
-      const refined = await refineRecordFix(db, { recordId: record.id, fix: AMBIENT, deviceId })
+      const { record: refined, applied } = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: AMBIENT,
+        deviceId,
+      })
 
+      expect(applied).toBe(true)
       expect(refined.fix).toEqual(AMBIENT)
       expect((await getRecord(db, record.id))?.fix).toEqual(AMBIENT)
 
@@ -1443,6 +1477,119 @@ describe('filing, reordering and refiling', () => {
       expect(row?.fix_sample_count).toBeNull()
       expect(row?.fix_spread_m).toBeNull()
       expect(row?.fix_hold_ms).toBeNull()
+    })
+
+    // TRY AGAIN's whole promise: a second countdown over a record that already
+    // has a fix is a real second measurement, not guaranteed to land closer
+    // than the first — and the record must never end up worse for having been
+    // tried again. These prove the guard directly against real SQL, including
+    // the CHECK constraints a half-applied write would trip.
+    describe('keeps the better fix (a run must not make the record worse)', () => {
+      it('leaves the record untouched when a run comes back worse, and says so in the event log', async () => {
+        const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+        const worse: Fix = { ...INSTANT, accuracyM: 9 }
+        const { record: refined, applied } = await refineRecordFix(db, {
+          recordId: record.id,
+          fix: worse,
+          deviceId,
+        })
+
+        expect(applied).toBe(false)
+        // Not merely "an equally-accurate fix" — the same row, untouched.
+        expect(refined.fix).toEqual(INSTANT)
+        expect((await getRecord(db, record.id))?.fix).toEqual(INSTANT)
+
+        // The attempt is still on the record: an 'edited' event exists, and it
+        // reports what THIS RUN reached (±9.0 m) — not what stayed stored.
+        const events = await listEvents(db, record.id)
+        expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+        const attemptEvent = events[1]
+        expect(attemptEvent?.accuracyM).toBe(9)
+        expect(attemptEvent?.fixQuality).toBe('deliberate')
+        expect(attemptEvent?.detail).toBe(
+          'fix refinement reached ±9.0 m, kept the sharper ±6.0 m already on the record',
+        )
+      })
+
+      it('replaces the record when a run comes back better', async () => {
+        const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+        const better: Fix = { ...INSTANT, accuracyM: 3 }
+        const { record: refined, applied } = await refineRecordFix(db, {
+          recordId: record.id,
+          fix: better,
+          deviceId,
+        })
+
+        expect(applied).toBe(true)
+        expect(refined.fix).toEqual(better)
+        expect((await getRecord(db, record.id))?.fix).toEqual(better)
+
+        const events = await listEvents(db, record.id)
+        expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+        expect(events[1]?.detail).toBe('fix refined from ±6.0 m to ±3.0 m')
+      })
+
+      it('a second run worse than the first leaves the first run in place, not the tap', async () => {
+        // The real TRY AGAIN shape: a tap with no fix yet, a countdown that
+        // gives it one, and a second countdown that comes back worse than
+        // that FIRST RUN — the baseline is the previous run's own result, not
+        // the tap's.
+        const record = await createRecord(db, {
+          activityId,
+          kind: 'pin',
+          fix: { quality: 'none' },
+          deviceId,
+        })
+
+        const firstRun: Fix = { ...INSTANT, accuracyM: 6 }
+        const { applied: firstApplied } = await refineRecordFix(db, {
+          recordId: record.id,
+          fix: firstRun,
+          deviceId,
+        })
+        expect(firstApplied).toBe(true)
+
+        const secondRun: Fix = { ...INSTANT, accuracyM: 8 }
+        const { record: afterSecond, applied: secondApplied } = await refineRecordFix(db, {
+          recordId: record.id,
+          fix: secondRun,
+          deviceId,
+        })
+
+        expect(secondApplied).toBe(false)
+        expect(afterSecond.fix).toEqual(firstRun)
+        expect((await getRecord(db, record.id))?.fix).toEqual(firstRun)
+
+        const events = await listEvents(db, record.id)
+        expect(events.map((e) => e.action)).toEqual(['created', 'edited', 'edited'])
+        expect(events[2]?.detail).toBe(
+          'fix refinement reached ±8.0 m, kept the sharper ±6.0 m already on the record',
+        )
+      })
+
+      it('applies a run of exactly the same accuracy — a tie is not a regression', async () => {
+        // The first countdown over the tap's own reading can end with exactly
+        // one sample and land on precisely the tap's own accuracy (see
+        // `CapturePreview.improvedByM`'s doc comment on why that delta is
+        // "structurally incapable of going negative" for a first run). The
+        // guard must not treat that as a loss — only "not worse" is refused,
+        // never "not strictly better" — or the ordinary, non-retry refinement
+        // this project's other caller (`diagnostics.tsx`) always performs
+        // would silently stop writing.
+        const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+        const tie: Fix = { ...INSTANT, latitude: INSTANT.latitude + 0.0001 }
+        const { record: refined, applied } = await refineRecordFix(db, {
+          recordId: record.id,
+          fix: tie,
+          deviceId,
+        })
+
+        expect(applied).toBe(true)
+        expect(refined.fix).toEqual(tie)
+      })
     })
 
     it('rolls back the fix update when the event insert fails, leaving neither written', async () => {
@@ -1501,6 +1648,114 @@ describe('filing, reordering and refiling', () => {
 
       expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
       expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created'])
+    })
+  })
+
+  describe('renameRecord', () => {
+    it('gives a saved record a title', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const renamed = await renameRecord(db, {
+        recordId: record.id,
+        title: 'Frog pool, north end',
+        deviceId,
+      })
+
+      expect(renamed.title).toBe('Frog pool, north end')
+      expect((await getRecord(db, record.id))?.title).toBe('Frog pool, north end')
+    })
+
+    it('records the change in the event log, because a title is part of the observation', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      await renameRecord(db, { recordId: record.id, title: 'Frog pool', deviceId })
+
+      const events = await listEvents(db, record.id)
+      expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+      const renaming = events[1]
+      expect(renaming?.detail).toBe('title set to "Frog pool"')
+      expect(renaming?.activityId).toBe(activityId)
+    })
+
+    it('accepts a null title, because clearing a name is a real edit', async () => {
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: INSTANT,
+        deviceId,
+        title: 'Wrong',
+      })
+
+      const renamed = await renameRecord(db, { recordId: record.id, title: null, deviceId })
+
+      expect(renamed.title).toBeNull()
+      const renaming = (await listEvents(db, record.id)).find((e) => e.action === 'edited')
+      expect(renaming?.detail).toBe('title cleared')
+    })
+
+    it('leaves description untouched when the caller does not supply one', async () => {
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: INSTANT,
+        deviceId,
+        description: 'Original notes',
+      })
+
+      const renamed = await renameRecord(db, { recordId: record.id, title: 'Named', deviceId })
+
+      expect(renamed.description).toBe('Original notes')
+    })
+
+    it('overwrites description, including clearing it with an explicit null', async () => {
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: INSTANT,
+        deviceId,
+        description: 'Original notes',
+      })
+
+      const renamed = await renameRecord(db, {
+        recordId: record.id,
+        title: 'Named',
+        description: null,
+        deviceId,
+      })
+
+      expect(renamed.description).toBeNull()
+      expect((await getRecord(db, record.id))?.description).toBeNull()
+    })
+
+    it('does not touch the capture number, which may be written on a sample tube', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const renamed = await renameRecord(db, { recordId: record.id, title: 'Named', deviceId })
+
+      expect(renamed.captureNumber).toBe(record.captureNumber)
+    })
+
+    it('does not touch capturedAt, because naming happens later but the capture did not', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+
+      const renamed = await renameRecord(db, { recordId: record.id, title: 'Named', deviceId })
+
+      expect(renamed.capturedAt).toBe(record.capturedAt)
+    })
+
+    it('refuses a record that does not exist, with a sentence', async () => {
+      await expect(
+        renameRecord(db, { recordId: 'rec_missing', title: 'x', deviceId }),
+      ).rejects.toThrow(/does not exist/)
+    })
+
+    it('refuses a deleted record, because a tombstone is not editable', async () => {
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: INSTANT, deviceId })
+      await softDeleteRecord(db, record.id, deviceId)
+
+      await expect(
+        renameRecord(db, { recordId: record.id, title: 'x', deviceId }),
+      ).rejects.toThrow(/has been deleted/)
     })
   })
 })

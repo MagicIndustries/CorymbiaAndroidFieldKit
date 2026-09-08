@@ -197,9 +197,11 @@ corners are easiest. This inverts phone thinking.
   exactly where they are rather than migrated away: removing a settings column costs a
   migration, and the underlying question — what the dominant thumb should be given on the
   real capture screen — is still open, merely no longer answerable by swapping two boxes.
-  Plan 3 decides whether it acquires a new meaning or is retired. Until then it is stored,
-  displayed on the diagnostics screen as the persistence proof it has always doubled as, and
-  read by nothing.
+  **Plan 3 considered it and declined**, which is a decision rather than an omission: with one
+  control there is no side to trade, so there is nothing for the setting to mean on the capture
+  screen and nothing the screen could honestly do with it. Plan 5 decides, once the launcher has
+  shown whether it wants the setting. Until then it is stored, displayed on the diagnostics
+  screen as the persistence proof it has always doubled as, and read by nothing.
 - Readouts occupy the centre — looked at, not touched.
 - **Reach zones are user-configurable.** A handedness and anchor setting determines which
   corner the working column occupies and which side primary actions sit on. Changing it
@@ -453,8 +455,10 @@ It also still holds **`capturePrimary`**, which is no longer live settings conte
 which of two capture boxes took the dominant side, and §9.1 replaced the pair with a single
 control, so there is nothing left for it to choose. The key and its column stay exactly where
 they are rather than being migrated away (§5.4): it is stored, shown on the diagnostics
-screen as the persistence proof it has always doubled as, and read by nothing. Plan 3 decides
-whether it acquires a new meaning or is retired.
+screen as the persistence proof it has always doubled as, and read by nothing. Plan 3
+considered whether to give it a new meaning or retire it and declined to do either — with one
+control there is no side to trade — and Plan 5 decides, once the launcher has shown whether it
+wants the setting.
 
 The reason it exists at all is that an override which resets at every launch is not an
 override — and the field conditions these settings exist for do not change between launches.
@@ -536,23 +540,43 @@ It is not forgotten and it is not deferred: it is replaced. There is now **one c
    path exactly one tap, which is what the second box existed for.
 2. **The screen then counts down while she stands still**, showing the accuracy now, how
    much it has improved since the tap, how many readings have gone into it, and how many
-   seconds remain. All of that sits inside the traffic-light frame with the button, within
+   seconds remain. All of that sits inside the dial, with the button, within
    sight of the thumb pressing it. **That adjacency is a requirement, not a layout
    preference** — it is the specific defect this supersession exists to fix, and a design
    that puts the countdown readout in a panel above the control has not implemented this
    section.
 3. **When the countdown completes, the saved record is refined in place** with the averaged
-   fix. `refineRecordFix` writes the new fix and appends an `'edited'` event carrying **both
-   the previous and the new accuracy**, so the chain of custody shows a ±6 m fix that was
-   stood over and sharpened to ±3 m, rather than a record that was always ±3 m. The capture
-   number and the capture time do not move — the capture happened at the tap, and the number
-   may already be written on a tube.
+   fix — **when that fix is sharper than the one already stored**. `refineRecordFix` writes
+   the new fix and appends an `'edited'` event carrying **both the previous and the new
+   accuracy**, so the chain of custody shows a ±6 m fix that was stood over and sharpened to
+   ±3 m, rather than a record that was always ±3 m. The capture number and the capture time
+   do not move — the capture happened at the tap, and the number may already be written on a
+   tube.
+
+   On the countdown the tap itself starts, the condition is never actually in play and this
+   clause reads exactly as it always did: the tap's own reading is a member of the run's
+   sample set, and inverse-variance averaging over a set containing it cannot come back worse
+   than it alone. The condition exists for TRY AGAIN (§9.2.1), a second, independent
+   measurement whose samples do not include the first run's, which genuinely can come back
+   worse. **An earlier version of this clause described the refinement as unconditional**,
+   which was true of the design at the time and is no longer true of it; §9.2.1's *Keeping
+   the better fix* is where the rule lives and where its consequences are set out.
 4. **An override accepts whatever has accumulated and ends the wait.** It is the same
    control: during a countdown the button reads `ACCEPT NOW`. So exactly one action is ever
    live, and the override is reachable at every moment the countdown is running.
 5. **A plateau ends the countdown, and the override is live throughout.** When the fix has
-   stopped improving, the screen says so, makes the override prominent, and finishes the
-   wait. This reverses an earlier position — "nothing auto-completes on a trend" — which was
+   stopped improving, the wait finishes and the recorded state says that is why it ended.
+
+   **It does not announce the plateau first.** An earlier draft of this clause said the
+   screen "says so, makes the override prominent, and finishes the wait" — all three, in that
+   order. The first two are a leftover from the version of this design in which a plateau
+   only ever *suggested*, and they cannot survive alongside auto-finish: the render that
+   first shows `plateaued` is the same one that ends the countdown, so on a device the
+   prompt would exist for about a frame. Telling her a fix has settled and then removing the
+   screen before she can read it is worse than not telling her, and inviting her to accept a
+   wait that has already ended is an invitation to press nothing. The fact still reaches her,
+   in the place she can actually act on it: the recorded state names how the capture ended.
+   This reverses an earlier position — "nothing auto-completes on a trend" — which was
    held because `holdVerdict` was not yet trustworthy: it judged each reading's own accuracy
    estimate, which jitters half a metre between consecutive samples, and had no minimum
    sample count, so on the measured Samsung S25 run it declared `plateaued` at the second
@@ -622,47 +646,260 @@ Placement follows the reach zone setting: a bottom band by default, and the bott
 under the dominant thumb on a tablet in landscape. Handedness still drives that. Which
 control takes the dominant side no longer means anything, because there is one (§5.4).
 
-### 9.2 The traffic-light frame
+### 9.2 The dial
 
-A coloured frame, live at all times, doing two jobs:
+**This supersedes the rectangular traffic-light frame.** That design put a coloured border
+around the capture block and drew the countdown as a stroke on its perimeter. It was built,
+and it failed on hardware for a reason no desk review found: the border and the countdown
+stroke were the same colour at the same width on the same path, so the stroke did not draw a
+countdown *onto* the frame — it covered it, and retreating, uncovered an identical ring
+beneath. On a good or fair fix nothing appeared to move for the entire wait. The correction
+is not a better stroke; it is a different object.
 
-- **Fix quality**, continuously — green, amber, red. Readable from peripheral vision in
-  glare, with gloves, while moving.
-- **Countdown progress**, charging around the perimeter as the wait runs down.
+**The control is one large circular dial, centred.** Coordinates sit above it in monospace,
+small — context about the receiver, not the thing she is watching. The dial does three jobs
+at once, and each answers a different question, so none of them competes:
 
-Two things changed with §9.1 and are stated here rather than left to be inferred:
+- **The ring is the clock.** It empties as the seconds run down. "How much longer."
+- **The filled circle is the accuracy, drawn as a real radius**, shrinking as the fix
+  converges. "How good, and is it still getting better." A number states the metres; the
+  circle is what makes convergence visible without reading anything.
+- **The crosshair at the centre is the target**, sized to the sharpest this hardware actually
+  reaches. "How close to as good as it gets."
 
-- **The frame is around the capture block, not around the whole screen.** It encloses the
-  readout and the control together, because §9.1.2 requires them to be one object within
-  sight of the thumb. A frame around the entire screen would put its own perimeter as far
-  from the button as the old readout panel was, which is the defect being fixed.
-- **The perimeter shows the countdown, not accumulated readings.** Under the superseded
-  press-and-hold model the only measure of progress was how many readings a hold had
-  gathered. There is now a fixed wait with a known end, so the perimeter is the honest
-  progress of *that* — it empties as the seconds run down and completes when the countdown
-  does. Sample count is still shown, as a number, inside the frame.
+**The radius always means metres.** The crosshair is sized to the measured floor — 1.4 m on
+the S25 outdoors, §9.1's table — and every other radius is scaled against that same mapping.
+This is what makes the next paragraph true rather than decorative.
 
-Always backed by the word in the chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`), the numeric
-readout, and a dashed border when poor. Colour never carries the meaning alone.
+**A fix that reaches the hardware floor lands exactly on the crosshair. One that stops short
+of the floor visibly stops short of the crosshair, and never reaches it.** That falls out of
+the honest mapping rather than being drawn on top of it, and it is intended behaviour, not a
+gap: a capture that reached what this receiver can do looks different from one that did not,
+at a glance, with nothing to read. **Do not "fix" this into always locking.**
 
-**The frame itself pulses slowly while the fix is still being refined**, and stops when the
-point is recorded — motion is what says "still working, stand still" from peripheral vision,
-where a word cannot be read. It must respect the system's reduced-motion setting, rendering
-steady and running no animation when that is on.
+**The floor, not the grade — this sentence used to say "a good fix".** It was wrong, and
+§9.2.1 was written specifically to correct it. The crosshair is pinned to 1.4 m while
+`gradeAccuracy` calls anything under 5 m good, so a green circle resting well outside the
+crosshair is what a *normal* capture looks like. Read as a claim about the grade, the
+sentence said most successful captures were failures; read as a claim about the floor, which
+is what the mapping actually pins, it is true. §9.2.1's two completion levels exist for
+exactly the gap between those two readings.
 
-The whole frame breathes, not a secondary ring inside it. The prototype pulsed an inset ring
-because that was the easy way to keep the grade colour at full strength — a naive pulse of
-the frame's own colour would make a good fix look worse at the bottom of every cycle, which
-is the one thing this frame must never do. Both properties are required: the frame is what
-moves, *and* the fix quality stays honestly readable at every point in the cycle. Solving
-that is Plan 3's, and it is a real constraint, not a preference.
+**The pulse does not carry over, and that is a decision, not an oversight.** The traffic-light
+frame pulsed — breathing slowly in and out while a fix refined — because it had no other way
+to say "still working, stand still": a static rectangle around a changing number is
+indistinguishable from a frozen one. The dial does not have that problem. It is already in
+motion for the whole wait — the ring emptying as the seconds run down, the circle shrinking as
+the fix converges — and both of those motions carry information a glance can read. A pulse on
+top would be a third thing moving, competing with two that mean something, to say what they
+already say. A future reader who finds the dial holding still between those two motions should
+not read that as a missing feature and add a breath back in; the dial was never static to begin
+with, which is exactly the condition the pulse existed to answer.
+
+**The dial is bounded, and the bound is the dial's own** (`field.dialMax`,
+`packages/tokens/src/scales.ts`). Its SVG is drawn `width="100%" height="100%"` against a
+fixed square viewBox, so it has no intrinsic size: dropped into a centred, flex-grown column
+it takes the whole viewport. That shipped to a Samsung S25 and the screen was unusable — the
+accuracy, the verdict, the seconds and **the only control** were all off the bottom of the
+screen, so no capture could be started, nothing counted down, and nothing ever locked. Every
+symptom reported from the field ("it went very slowly and never locked", "it's never auto
+completing, just sitting there measuring") was that one defect. The bound belongs to the
+component rather than to each screen that places one: a component whose height is whatever
+its container allows is a trap for every future caller, and the gallery and the capture
+screen would otherwise each have to re-derive the same square. It stays the largest single
+element in the acquiring state — §9.4's accuracy is the largest *text*, which is a different
+claim — and it takes the full width of anything narrower than the cap.
+
+**The grade the screen shows has hysteresis; the classifier does not.** `gradeAccuracy`'s
+good/fair boundary is exactly 5 m, and at the site this app was measured on the raw live
+reading hovers either side of it: a run from 7.5 m down to about 4.2 m, jittering roughly
+±0.5 m around its trend the whole way. The owner watched the ready state there on the S25 and
+saw the dial flip amber → green → amber → green with no change whatever in the quality of the
+fix. A colour that flickers between two states says nothing and reads as a fault.
+
+The fix is not a different threshold. `gradeAccuracy` and `GRADE_THRESHOLDS` are shared, they
+are this section's, and the diagnostics instrument depends on reading them raw — so the
+hysteresis lives where the *screen* decides what to display
+(`apps/fieldkit/src/capture/steadyGrade.ts`), and nothing stored or instrument-reported
+changes. **Entering a grade still requires crossing its threshold; only leaving one is
+delayed**, by a margin of 1 m — twice the measured jitter, and small against bands 5 m and
+10 m wide, so a fix that has genuinely degraded still reports it. An absent fix is not
+jitter and takes the worst grade at once. The word and the colour come from that one value,
+so they cannot disagree at any instant (doctrine rule 9).
+
+**The ready state does not converge, and must not be made to look as though it does.** The
+convergence this dial is built around happens through `averageReadings` during a countdown.
+Before the tap the dial is showing a single live reading, which at the measured site sits
+around 4–7 m and wobbles there indefinitely. A large circle that never narrows is the honest
+picture of that.
+
+### 9.2.1 The lock, and the two ways a capture completes
+
+When the circle closes onto the crosshair, the fix has converged as far as this receiver
+takes it. The target stops being something aimed at and becomes something hit:
+
+- **The circle answers for itself** — a brief snap inside the crosshair, as if catching, then
+  easing back to rest on it; its interior fills and its outline firms. Arriving at the right
+  size and doing nothing is not enough; the moment has to be visible from peripheral vision,
+  not inferred from a radius.
+- **The crosshair lights** in the grade colour and thickens.
+- **A ripple goes outward once** — two rings, the second trailing the first by about a fifth
+  of a second, because a single ring reads as a flicker while a pair reads as a ripple. Once,
+  then nothing. A confirmation, not an alarm on a screen she watches all day.
+- **And the words say so.** `GOOD FIX · LOCKED ON`, and the sentence changes. Colour and
+  motion never carry the lock alone (doctrine rule 9): in glare, or for a colour-blind
+  reader, the word is what survives.
+
+**The numbers, for the record** (`CaptureDial.tsx`'s lock constants and the `field` scale,
+`packages/tokens/src/scales.ts`). These were settled by eye, on the S25 hardware, watching the
+animated mockup — the project owner asked twice for the effect to read as *stronger*, not
+softer, so treat them as measurements this design already made, not as defaults a future pass
+should tune down toward the vaguer language above:
+
+- **The snap** reaches 4.5px inward before easing back onto the crosshair: 100ms in, 150ms
+  out, 250ms end to end (the "roughly a quarter of a second" above) — the figure that survived
+  the mockup review that asked for it to read as stronger than an earlier, too-subtle pass.
+- **The fill and the outline firm together**, over that same 250ms: the accuracy circle's fill
+  opacity rises from 0.15 to 0.45, its outline weight from 1.75px to 4px, and the crosshair's
+  own stroke thickens from 3px to that same 4px as it lights in the grade colour.
+- **The ripple** reaches 84px past the crosshair's own radius — the other figure the owner
+  asked to be made more visible, not softened — with the second ring starting 190ms after the
+  first (the "about a fifth of a second" above). Each ring runs its own 600ms outward, holding
+  near-full opacity (0.9, not literally 1) for the first third of that run before falling away.
+  The 600ms duration of each ring's own run is a judgement call this implementation made to
+  read as an outward ripple rather than a flash; unlike the snap and the ripple's reach, it was
+  not itself a figure the mockup review settled, and a later pass is free to retune it without
+  reopening that review.
+
+**There are two completion levels, not one.** The lock above requires the circle to reach the
+crosshair — and the crosshair is pinned to 1.4 m, the best figure this hardware produced
+outdoors, while `gradeAccuracy` calls anything under 5 m good. So a green circle resting well
+outside the crosshair is what a *normal* capture looks like, and a design with only one
+completion left the normal case with no completion at all. A capture that has genuinely
+stopped improving deserves a moment that does not lie about how good it got:
+
+- **Settled** — `holdVerdict` says it stopped improving, above the hardware's floor. **The
+  circle stays exactly where its accuracy puts it** and firms up (the same fill and outline
+  the lock uses — "this is a finished measurement" is one treatment, not two), and a
+  companion ring is drawn *at that radius* (`field.dialSettledGap` outside its own outline,
+  because two strokes on one path are one thickened stroke) marking where the capture
+  actually got to, with the crosshair still visible inside it showing what was possible. The
+  gap between the ring and the crosshair is itself the signal: how far this spot fell short
+  of what the device can do. The words say how good it actually got — `As good as it gets
+  here — ±4.2 m`. No snap, no ripple, and the crosshair stays unlit: settled is deliberately
+  not a ceremony.
+- **Locked on** — it stopped improving *and* reached the floor. The full ceremony above.
+
+**Snapping a settled circle onto the crosshair was considered and rejected.** It would make
+the completion look better and it would make the picture lie: "the radius always means
+metres" (§9.2) is the invariant the whole dial rests on, and a circle drawn at a radius its
+accuracy has not earned defeats every other claim on it. This is the rejected alternative a
+later reader should not re-propose.
+
+"Stopped improving" is `holdVerdict`'s plateau throughout — the signal that already ends the
+countdown (§9.1.5), measured and calibrated against this hardware. There is no second
+convergence test anywhere in this design.
+
+**Where the completion is shown is forced, not chosen.** A plateau ends the countdown in the
+same render that first reports it, so a completion drawn during the wait would exist for
+about one frame on a device — the same reason §9.3's plateau sentence is not shown live. The
+*recorded* state is where a finished capture is actually looked at, so the dial is drawn
+there, from the fix that was stored, with whichever completion it earned. A capture ended by
+the cap or by `ACCEPT NOW` earned neither: it was cut short rather than finished.
+
+**A settled capture is offered another go**, and the offer keeps the record
+(`useCapture`'s `refineAgain`). It runs the same in-place refinement the countdown already
+performs, over the same row: no second record and no second capture number, because that
+number may already be written on a sample tube and a real measurement is not discarded for an
+attempt that might be no better. Both runs append their own `'edited'` event, so the chain of
+custody (§8.5) carries the whole story. The second run's improvement is measured against what
+the first left on the record rather than against the tap, and the screen says so — that is
+also the one case where the improvement figure can come back at or below zero, since the
+baseline is no longer a member of the run's own samples (§9.3).
+
+#### Keeping the better fix
+
+**A second run's fix replaces the first's only when it is not worse.** The gate is
+`fix.accuracyM <= the accuracy already on the record`; anything above it leaves every fix
+column exactly as it was. A record that carries no accuracy yet — a `'none'` capture, or one
+positioned without an accuracy — has nothing to lose, so any positioned fix applies to it,
+which is what keeps refining *from* `'none'` (§9.1) working unchanged.
+
+**`accuracyM` is the sole criterion, and spread is deliberately not a tiebreak.** Accuracy is
+the figure that travels: it becomes the Victorian Biodiversity Atlas's mandatory "Positional
+accuracy (metres)", which a state agency filters public extracts on, so it is the one number
+a retry must not be able to degrade. Spread is not a competing measure of the same thing.
+Spread is a run's *internal* disagreement — how far its own readings sit from their own
+average — not distance from the truth, and two runs' spreads are not comparable to each
+other: a tight spread around a systematically wrong position is not better than a wide spread
+around a correct one. Weighing it here would let a run's self-consistency override the number
+the extract is actually filtered on. (§9.3 makes the same argument for why the screen shows
+spread *beside* the improvement rather than folding it in.)
+
+**A discarded run is still on the record.** It appends its own `'edited'` event carrying that
+run's position and accuracy — this run's, not the kept fix's — because a second run that went
+badly and a second run that never happened are different facts about a wait she actually
+stood through, and only the event distinguishes them. Its `detail` is worded differently from
+an applied refinement's (`fix refinement reached …` rather than `fix refined from … to …`),
+so a reader matching on the applied prefix cannot mistake one for the other.
+
+**And the screen says so, in these words.** Pinned here as copy, the way §9.3's two verdict
+sentences are, because a run that bought nothing is exactly where a screen is tempted to say
+nothing:
+
+> *&lt;how the wait ended&gt;* This run reached ±*X.X* m — no better than the ±*Y.Y* m already
+> on the record, so that fix was kept.
+
+The first clause is the same sentence any finish gets (`The countdown ran out.` / `You
+accepted it early.` / `The fix stopped improving, so the countdown finished itself.`). Where
+the record somehow carries no accuracy to name, "the ±*Y.Y* m already on the record" becomes
+"the fix already on the record" and nothing else changes. Reporting only the first clause
+would read as the countdown having done its usual job, which is the untrue impression the
+record-layer gate exists to keep off the record; the screen owes her the same honesty.
+
+**The consequence, stated plainly: the stored accuracy is now a one-way ratchet.** Because a
+run applies only when it is sharper, the number on a record can only ever fall. A spuriously
+optimistic reading that wins once — a receiver briefly and wrongly confident, which is a
+thing GPS does — cannot be walked back by any path in this application. TRY AGAIN cannot
+beat it except by beating it, and there is no delete: `softDeleteRecord` exists in
+`packages/data` and has no caller anywhere under `apps/`. This is a deliberate trade — the
+alternative is a retry that can quietly degrade a state agency's filter field, which is
+worse — but it is a trade, not a free win, and a future editing or QA path is where the
+other side of it gets answered. Do not remove the gate to answer it.
+
+**An applied retry replaces the whole evidence bundle, not just the number.**
+`fix_sample_count`, `fix_spread_m`, `fix_hold_ms` and `gps_time` all move with the fix they
+were measured alongside; they have to, or the record would claim a spread and a sample count
+belonging to a position it no longer holds. So a one-sample retry that happens to beat a
+thirteen-sample average wins on `accuracyM` and replaces richer evidence with thinner — and
+the honesty check §9.3 relies on, spread beside the accuracy, is exactly what a reader would
+use to notice that. The gate does not protect against it, and is not meant to: it protects
+the one number the extract filters on.
+
+### 9.2.2 Motion, and when to refuse it
+
+The dial's motion must respect the system's reduced-motion setting — but **the setting means
+"do not animate at me unbidden", not "refuse an animation I asked for"**. Motion that runs on
+its own — the pulse, an idle state — stops when reduced motion is on. Motion that is the
+direct result of something she did — tapping capture, and the wait that follows — is a
+response to a request, and a control that silently refuses to respond looks broken rather
+than considerate. Where a page or screen exists *to be judged in motion*, it opens still,
+says why, and offers to play.
+
+This distinction was learnt the hard way: a mockup built to settle this very design rendered
+one static frame and appeared broken, because it treated both cases as the same case.
+
+**Colour never carries meaning alone.** The grade chip (`GOOD FIX` / `FAIR FIX` / `POOR FIX`)
+and the numeric accuracy back the status colour in words at every phase; on a poor fix the
+accuracy circle's own outline additionally dashes — not a border, the dial has none of its
+own; the circle *is* the accuracy, so its edge is where "this fix is uncertain" belongs
+(`CaptureDial.tsx`, `field.dialAccuracyOutlineDash`/`dialAccuracyOutlineDashGap` in
+`packages/tokens/src/scales.ts`); and the lock carries its own label the same way (§9.2.1).
 
 **There is no separate `SHARPENING…` state.** That chip existed because a hold produced a
 provisional number that was not yet the saved one. Under §9.1 the record is already on disk
-and the countdown is refining it, so at every instant the frame grades the fix that would
-actually be stored if the wait ended now — which is a real graded fix, not a pending one.
-The countdown is shown by the seconds remaining and the perimeter, not by replacing the
-grade with a status word.
+and the countdown is refining it, so at every instant the dial grades the fix that would
+actually be stored if the wait ended now — a real graded fix, not a pending one.
 
 ### 9.3 What the countdown says in words
 
@@ -670,6 +907,14 @@ grade with a status word.
 accuracy is still falling across recent readings: "Still improving — keep standing still."
 Once it plateaus: "About as sharp as it gets here — accepting now costs nothing." This is
 honest, computable, and answers the only question she actually has.
+
+**Only the first of those is displayed live.** Both sentences stay pinned here as copy — the
+wording is the answer to the question she has, and it is not to be re-composed at a call site
+— but §9.1.5 was corrected so that a plateau *finishes* the wait rather than announcing one
+first, and calls the announcement "an invitation to press nothing". The render that first
+reports a plateau is the same one that ends the countdown, so on a device the plateau sentence
+would exist for about a frame. Where it actually reaches her is the *recorded* state's "how the
+wait ended" line, which names the plateau among the three ways a countdown can finish (§9.6).
 
 **The trend is the averaged accuracy, not each reading's own estimate**, and the rule is
 calibrated against measured hardware rather than reasoned out. This replaces the earlier
@@ -703,8 +948,28 @@ the countdown ending on the signal a withdrawable verdict would be a statement a
 capture that no longer exists.
 
 Beside it, in words rather than a bar: **how much sharper the fix is than it was at the
-tap**, signed. A countdown that made the fix *worse* is the single most useful thing this
-interaction could report, and a readout that only ever showed improvement would hide it.
+tap**. A countdown that went badly is the single most useful thing this interaction could
+report, and a readout that could only ever show improvement would hide it.
+
+**That number cannot report it, and an earlier version of this section wrongly said it
+could.** It described the delta as signed, on the reasoning that a worsening countdown must
+be visible. It is right about the requirement and wrong about the instrument: the delta is
+structurally incapable of going negative, which was established by fuzzing twenty thousand
+trials against the real `averageReadings` rather than argued from the code. Inverse-variance
+weighting is monotonic in the sample set, and the tap's own reading is always a member of
+it, so every reading that arrives can only shrink the combined accuracy. A capture that went
+badly and one that went well produce the same shape of number.
+
+**The spread is what reports it**, and is shown beside the improvement for exactly that
+reason. Spread is the greatest distance from any reading to the averaged position, it is
+already computed and already stored on the record as provenance, and unlike the accuracy it
+genuinely worsens when a capture goes wrong — she moved, the sky closed in, the receiver
+wandered between readings. A tight spread with a good accuracy is a fix to trust; a good
+accuracy with a wide spread is the case the accuracy number alone would quietly hide.
+
+So the pair is the readout: **how much sharper, and how far apart.** The first can only
+improve and is described that way rather than as signed; the second is the honesty check on
+it.
 
 **The hatched gap bar is gone.** It drew a solid bar for current accuracy and a hatched
 extension for what a hold *could* add — a prediction about a future the app cannot make. It
@@ -718,21 +983,29 @@ Satellites, datum, altitude, and live coordinates in monospace. These are contex
 receiver, are not about the convergence of the capture in hand, and may sit anywhere on the
 screen.
 
-**The accuracy and the seconds remaining are not among them, and are not sized like them.**
-They are the two numbers she is standing still for, and in the acquiring state they are the
-largest things on the screen — legible at arm's length, in glare, without leaning in. The
-diagnostics prototype rendered them at the same weight as the rest of its instrument
-readouts, which is correct for an instrument and wrong for the field. Plan 3 sizes them as
-the primary content of that state, and everything else on the acquiring screen is
-subordinate to them.
+**The accuracy is not among them, and is not sized like them.** It is the number she is
+standing still for, and in the acquiring state it is the largest thing on the screen —
+legible at arm's length, in glare, without leaning in. The diagnostics prototype rendered it
+at the same weight as the rest of its instrument readouts, which is correct for an instrument
+and wrong for the field.
+
+**The seconds remaining are answered by the dial, so the number stops competing.** An earlier
+version of this section made accuracy and seconds equally the largest things on the screen,
+which was right when the only countdown feedback was a number. §9.2's ring now answers "how
+much longer" without being read, so the numeric seconds sits with the sample count and the
+improvement — present, precise, and subordinate. Two numbers at the same size compete; one
+number and a moving ring do not.
 
 This is a specific instance of the doctrine's single-focus rule: a screen she looks at while
 holding a phone still over a point should answer *how good is it* and *how much longer*
 before it answers anything else.
 
 **Readings averaged and the improvement delta are not supporting readouts.** They live
-inside the traffic-light frame with the control (§9.1.2). Separating them from the button is
+inside the dial, with the control (§9.1.2). Separating them from the button is
 the exact defect §9.1 exists to fix, and this section previously prescribed that separation.
+(This clause and §9.1.2 both said "inside the traffic-light frame" until the dial superseded
+that frame in §9.2. The object changed; the adjacency requirement did not, and it is the
+requirement — not the frame — that either section was ever about.)
 
 **A countdown transcript**, on the diagnostics screen while the countdown length is still
 being settled: one row per reading collected since the tap, carrying the elapsed seconds,
@@ -748,6 +1021,18 @@ fires on real hardware was the whole reason for the field measurements that set 
 default and §9.3's constants, and the transcript is what carried that evidence home. It
 stays for the same reason the chooser does — the numbers hold for one device under one sky
 and want re-measuring under another.
+
+**Landscape is currently survivable, not designed — and that is a deferral, not a
+finish.** All three capture states scroll, anchored to the bottom so the control is never
+the thing pushed off; on a phone in landscape that is what keeps the help affordance and
+the live coordinates reachable at all (doctrine rule 7). But reachable-by-scrolling is a
+fallback, and it fails this section's own premise: she is holding a phone still over a
+point with one hand, and a readout she has to scroll to is a readout she will not look at.
+The landscape capture screen wants a real layout — the dial and the readouts side by side
+rather than stacked, which is what the width is *for* — so that everything is on screen at
+once and nothing scrolls. Deferred to the tablet work, where `expanded` layouts are
+designed properly; the phone-in-landscape case is `expanded` by width and must be settled
+in the same pass rather than inheriting a tablet layout it has no height for (§5.2).
 
 ### 9.5 Duplicate guard
 

@@ -62,6 +62,119 @@ export const field = {
   control: 72,
   /** The traffic-light frame thickness. */
   frame: 5,
+  /**
+   * The dial's thin secondary stroke, in dp.
+   *
+   * Named for the countdown because that is where it started: it was the
+   * stroke of the deleted traffic-light frame's countdown ring, sized
+   * deliberately thinner than `frame` so the grade border stayed the dominant
+   * edge. That frame and its perimeter are gone (spec §9.2 — the dial
+   * supersedes them), and this weight survived them, on the three pieces of
+   * `CaptureDial`'s linework that want a thin, secondary stroke rather than
+   * a weight of their own (spec §9.2.1): the crosshair while unlocked (it
+   * thickens to `dialAccuracyOutlineLocked` once lit), the lock's ripple
+   * rings, and the settled level's companion ring.
+   *
+   * It is *not* used for the accuracy circle's own outline — that wants a
+   * softer resting weight than this, so it has its own pair of tokens below —
+   * nor for the dial's own ring, which is `dialRing` and much heavier.
+   */
+  countdown: 3,
+  /**
+   * `CaptureDial`'s own ring stroke (spec §9.2): the track that is always
+   * drawn, and — while a countdown is running — the same-width progress
+   * stroke painted over it in the grade colour. One ring doing both jobs is
+   * deliberate: the dial has no separate always-on grade border the way
+   * `TrafficLightFrame` does, carried instead by the accuracy circle, so this
+   * ring is the only edge a glance has to register the control by and must
+   * stand on its own rather than nest thinly inside a thicker frame the way
+   * `countdown` nests inside `frame`.
+   */
+  dialRing: 10,
+  /**
+   * The greatest diameter `CaptureDial` will ever draw itself at, in dp.
+   *
+   * **This is the bound that stops the dial being the whole screen.** Its
+   * SVG is sized `width="100%" height="100%"` against a square viewBox, so
+   * without a cap it grows to whatever its container allows — and in the
+   * capture screen's centred, flex-grown column that is the entire viewport.
+   * That shipped, and on a Samsung S25 it pushed the accuracy readout, the
+   * verdict and *the only control* off the bottom of the screen: no capture
+   * could be started at all, so nothing ever counted down and nothing ever
+   * locked.
+   *
+   * An ergonomic figure rather than a fraction of the window, which is why
+   * it lives here and not in a stylesheet: at roughly 5 cm across on a
+   * phone it is comfortably the largest single element in the acquiring
+   * state — larger than the `hero` accuracy's own ~74dp line — and legible
+   * at arm's length in glare, while leaving room in a 360×780dp portrait
+   * viewport for the accuracy, the verdict and a 72dp control beneath it.
+   * The dial still takes the full width of anything narrower than this
+   * (`width: '100%'` beside the cap), so it shrinks on a small screen and
+   * stops growing on a large one — never branching on a raw width, which
+   * the layout doctrine forbids.
+   */
+  dialMax: 300,
+  /**
+   * The accuracy circle's outline weight before a fix locks (spec §9.2.1:
+   * unlocked, the circle is "a soft region of uncertainty"). Promoted here
+   * from a local constant in `CaptureDial.tsx` for the same reason
+   * `dialRing` was: it is an ergonomic line weight on a field control, which
+   * is exactly what this scale exists to hold, not a rendering detail
+   * private to one SVG.
+   */
+  dialAccuracyOutline: 1.75,
+  /**
+   * The accuracy circle's outline weight once a fix locks, and — reused
+   * as-is, because the two firm together as one beat, not as two
+   * separately-tuned effects (spec §9.2.1) — the crosshair's own thickened
+   * stroke once lit. "A definite object on the target," firm rather than
+   * soft.
+   */
+  dialAccuracyOutlineLocked: 4,
+  /**
+   * The accuracy circle's outline dash length on a poor fix, in px (doctrine
+   * rule 9, spec §9.2.2: "a dashed treatment when poor"). A poor fix is the
+   * one case where the accuracy circle visibly stops short of the crosshair
+   * rather than converging onto it — the exact condition a dashed boundary
+   * exists to say ("this edge is uncertain") — so the treatment lives on the
+   * accuracy circle's own outline, not the ring (the clock) or the crosshair
+   * (a fixed target).
+   *
+   * Sized against `dialAccuracyOutline` (1.75px), not against anything the
+   * deleted `TrafficLightFrame` used: that frame dashed a rectangle with
+   * React Native's own `borderStyle: 'dashed'`, which has no numeric dash
+   * geometry of its own to inherit, and a rectangle's straight edges are a
+   * different drawing problem from a circle's curved one regardless. At
+   * ~4.5x the unlocked outline's own weight, each dash reads as a solid
+   * segment rather than a hairline that could be mistaken for anti-aliasing
+   * — the risk with a short dash on a thin stroke — without growing so long
+   * it reads as a broken ring rather than a deliberately dashed one.
+   */
+  dialAccuracyOutlineDash: 8,
+  /**
+   * The gap between dashes on a poor fix's accuracy outline, in px. Shorter
+   * than the dash itself (5px against 8px, roughly 2:3) so the eye reads
+   * mostly-line-interrupted-by-gaps rather than a row of separate dots —
+   * dashes and gaps close to equal length are the dotted look this is
+   * deliberately not going for.
+   */
+  dialAccuracyOutlineDashGap: 5,
+  /**
+   * How far outside the accuracy circle's own outline the *settled*
+   * companion ring is drawn, in px (spec §9.2.1's settled level).
+   *
+   * The ring marks where the capture actually got to, so it belongs at the
+   * accuracy circle's own radius — but two strokes on the same path are one
+   * thickened stroke, not two rings (the exact defect that killed the
+   * rectangular traffic-light frame, spec §9.2). This is the separation that
+   * makes it read as a companion ring around the circle rather than as a
+   * heavier outline on it, and it is deliberately small: the ring must stay
+   * unmistakably *at* the accuracy's radius, because the gap between it and
+   * the crosshair inside it is the whole signal — how far this spot fell
+   * short of what the device can do.
+   */
+  dialSettledGap: 7,
 } as const
 
 /**
