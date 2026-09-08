@@ -40,6 +40,20 @@ the docs disagree, the docs win — say so in your report rather than making the
 - Do not run `npx expo run:android`. It never exits — it keeps Metro alive by design. The owner builds and installs.
 - Media files are **app-owned and flat**, named by record UUID plus index (spec §12.1). Never a public shared directory: scoped storage on Android 10+ forbids it, and anything placed there is swept into the gallery and cloud backup, which destroys chain-of-custody.
 
+**Ordering assertions and `noUncheckedIndexedAccess`.** `mock.invocationCallOrder[0]` is
+`number | undefined` under this project's TypeScript settings, and this codebase forbids `as`
+casts to silence a type. Earlier drafts of these snippets used `as number`; do not copy that.
+Write a small local helper that throws when a call order is missing — a mutation that stops a
+function being called then fails loudly rather than comparing against `undefined`:
+
+```ts
+const callOrder = (mock: jest.Mock, call = 0): number => {
+  const order = mock.mock.invocationCallOrder[call]
+  if (order === undefined) throw new Error(`expected call ${call} to have happened`)
+  return order
+}
+```
+
 ## Scope
 
 In: photo capture, voice note capture, storage lifecycle, soft delete, media rows on the
@@ -547,7 +561,7 @@ describe('the expo-file-system media store', () => {
     const moveOrder = move.mock.invocationCallOrder[0]
     expect(createOrder).toBeDefined()
     expect(moveOrder).toBeDefined()
-    expect(createOrder as number).toBeLessThan(moveOrder as number)
+    expect(callOrder(createDirectory)).toBeLessThan(callOrder(move))
   })
 
   it('moves the captured file out of its temporary home', async () => {
@@ -1798,7 +1812,7 @@ it('prepares before recording, because record() on an unprepared recorder does n
   await render(<VoiceScreen />)
   await fireEvent.press(screen.getByTestId('voice-toggle'))
   expect(prepareToRecordAsync.mock.invocationCallOrder[0]).toBeLessThan(
-    record.mock.invocationCallOrder[0] as number,
+    callOrder(record),
   )
 })
 
@@ -1928,7 +1942,7 @@ wait on the GPS.
 ```ts
 it('writes the file before the row', async () => {
   await attachPhoto({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' })
-  expect(save.mock.invocationCallOrder[0]).toBeLessThan(attachMediaSpy.mock.invocationCallOrder[0] as number)
+  expect(callOrder(save)).toBeLessThan(callOrder(attachMediaSpy))
 })
 
 it('names the file after the media id it inserts', async () => {
