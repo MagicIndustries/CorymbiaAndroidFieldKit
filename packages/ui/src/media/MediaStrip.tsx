@@ -5,9 +5,20 @@ import { field, radii, spacing, touch } from '@corymbia/tokens'
 // Type-only: `@corymbia/media` owns the `MediaKind` union (photo | voice —
 // see packages/media/src/naming.ts, spec §12.1). Re-declaring it here would
 // be a fourth copy alongside the discriminated `Fix` union pattern this repo
-// already avoids duplicating (see CLAUDE.md's "three fix classes" note) —
-// `@corymbia/ui` already reaches into a sibling package for a type only this
-// way (see `packages/ui/src/layout/reach.ts`).
+// already avoids duplicating (see CLAUDE.md's "three fix classes" note).
+//
+// This is the FIRST cross-package type-only import in `@corymbia/ui` — not
+// an established pattern. `packages/ui/src/layout/reach.ts` only imports
+// `DeviceClass`/`Orientation` from local files in this same package, so it
+// is not a precedent for reaching into a sibling `@corymbia/*` package at
+// all. That distinction matters here because `@corymbia/media` re-exports
+// the `expo-file-system` adapter (`src/store/expo.ts`): nothing in the
+// language stops a future contributor dropping the `type` keyword, which
+// would turn this into a value import and pull that native module into
+// every screen that imports anything from `@corymbia/ui` — nearly the whole
+// app. `src/__tests__/import-graph.test.ts` is the guard against exactly
+// that: it walks this package's barrel and fails if `@corymbia/media`'s
+// entry point is ever reached as a value.
 import type { MediaKind } from '@corymbia/media'
 import { useTheme } from '../theme'
 import { Type } from '../primitives/Type'
@@ -25,15 +36,23 @@ const KIND_LABEL: Record<MediaKind, string> = {
 }
 
 /**
- * A minimal microphone glyph, drawn as SVG (as `CaptureDial`'s icons are)
- * rather than as an emoji `Text` node. That distinction is load-bearing, not
- * decorative: `toHaveTextContent` walks every `Text` descendant of a tile and
- * concatenates them (see `getTextContent` in
+ * A minimal microphone glyph, drawn as SVG rather than as an emoji `Text`
+ * node. That distinction is load-bearing, not decorative: `toHaveTextContent`
+ * walks every `Text` descendant of a tile and concatenates them (see
+ * `getTextContent` in
  * @testing-library/react-native/dist/helpers/text-content.js), so a `🎙️`
  * rendered as text would land in front of the duration and turn
  * `toHaveTextContent('0:08')` — an exact match, deliberately not
  * `{ exact: false }` — into a failure no matter how the duration itself
  * formats. A voice tile's only legible text is its length.
+ *
+ * This is not `CaptureDial`'s pattern reused: `CaptureDial` tokenises every
+ * one of its `strokeWidth`s through the `field` scale (spec §9.2.1) because
+ * those weights answer an ergonomic question — how a field control reads at
+ * arm's length, gloved. This glyph is a fixed 20×20 static icon with no such
+ * question to answer; its width, stroke width and coordinates are bare
+ * literals sized only to look right at that one size, not decisions the
+ * `field` scale exists to hold.
  */
 function VoiceGlyph({ color }: { color: string }) {
   return (
@@ -102,10 +121,18 @@ export function MediaStrip({
 
         const content =
           item.kind === 'photo' ? (
+            // `height` is `field.mediaTile` directly, not `'100%'`: the tile
+            // itself only sets `minHeight`, not `height` (a voice tile's
+            // content is allowed to grow it), so a percentage height here
+            // would resolve against an undetermined parent height — a known
+            // Yoga trap that can settle at zero. Sized to the same token as
+            // the tile itself rather than to the tile's own runtime layout,
+            // which is exactly the arithmetic-on-a-token trap finding 2
+            // avoids for the remove control below.
             <Image
               testID={`media-thumb-${item.id}`}
               source={{ uri: item.uri }}
-              style={{ width: '100%', height: '100%' }}
+              style={{ width: field.mediaTile, height: field.mediaTile }}
             />
           ) : (
             <>
@@ -123,12 +150,22 @@ export function MediaStrip({
             accessibilityLabel={`Remove ${KIND_LABEL[item.kind].toLowerCase()}`}
             onPress={() => onRemove(item.id)}
             hitSlop={spacing.sm}
+            // `touch.min` (48dp), not half of it: `touch.min` is documented
+            // as "Absolute minimum for any interactive element", and this is
+            // a `Pressable` on a device used gloved and one-handed — nothing
+            // about it is exempt from that floor. A 64dp `mediaTile` cannot
+            // hold a 48dp control in a corner without covering most of the
+            // thumbnail; the tension is resolved by letting it overlap
+            // (`position: 'absolute'` over the image) rather than by
+            // shrinking the control below the floor or growing the tile
+            // past `field.mediaTile`'s own considered size (see that
+            // token's doc comment in `packages/tokens/src/scales.ts`).
             style={{
               position: 'absolute',
               top: spacing.xs,
               right: spacing.xs,
-              minWidth: touch.min / 2,
-              minHeight: touch.min / 2,
+              minWidth: touch.min,
+              minHeight: touch.min,
               alignItems: 'center',
               justifyContent: 'center',
               borderRadius: radii.pill,

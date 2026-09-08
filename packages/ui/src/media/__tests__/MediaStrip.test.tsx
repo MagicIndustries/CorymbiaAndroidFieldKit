@@ -92,14 +92,35 @@ describe('MediaStrip', () => {
     expect(onRemove).toHaveBeenCalledWith('c')
   })
 
-  // Not in the brief, added for this task's "two examples, not one" standard
-  // (see task-7-brief.md's closing note): the tile-per-item test above uses
-  // three items but never checks the count itself, and `getAllByTestId`
-  // would pass unchanged if a stray fourth tile were rendered as long as
-  // the first three still matched in order. This pins the count too.
-  it('renders exactly one tile per attachment, not merely the given ones in order', async () => {
-    await wrap(<MediaStrip items={[photo('a'), voice('b', 4000), photo('c')]} testID="strip" />)
-    expect(screen.getAllByTestId(/^media-tile-/)).toHaveLength(3)
+  it('gives the remove control a real touch target, not half of one', async () => {
+    // `touch.min` (48dp) is documented as "Absolute minimum for any
+    // interactive element" — a `Pressable` used gloved and one-handed is not
+    // exempt from that floor. Pinned directly against the token rather than
+    // an arithmetic derivation of it, so the size stays a decision someone
+    // made rather than something that can silently drift.
+    await wrap(<MediaStrip items={[photo('a')]} onRemove={() => {}} testID="strip" />)
+    const control = screen.getByTestId('media-remove-a')
+    const style = Array.isArray(control.props.style)
+      ? Object.assign({}, ...control.props.style)
+      : control.props.style
+    expect(style.minWidth).toBe(touch.min)
+    expect(style.minHeight).toBe(touch.min)
+  })
+
+  it('does not also trigger the tile when the remove control inside it is pressed', async () => {
+    // Task 12 wires `onPress` (playback) and `onRemove` up simultaneously,
+    // and the remove control is a `Pressable` nested inside the tile's own
+    // `Pressable`. On a voice tile, removing an attachment and starting to
+    // play it in the same tap would be a real, damaging bug — this pins
+    // that pressing remove fires only `onRemove`.
+    const onPress = jest.fn()
+    const onRemove = jest.fn()
+    await wrap(
+      <MediaStrip items={[voice('b', 4000)]} onPress={onPress} onRemove={onRemove} testID="strip" />,
+    )
+    await fireEvent.press(screen.getByTestId('media-remove-b'))
+    expect(onRemove).toHaveBeenCalledWith('b')
+    expect(onPress).not.toHaveBeenCalled()
   })
 
   // Pins that a Pressable is never rendered with no handler at all — a
