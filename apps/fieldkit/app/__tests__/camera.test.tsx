@@ -411,6 +411,64 @@ describe('CameraScreen', () => {
     expect(screen.queryByTestId('camera-shutter')).toBeNull()
   })
 
+  /**
+   * Doctrine rule 16 on this screen. Stripping all five `spokenDescription`
+   * props off `camera.tsx` left this suite fully green: nothing here
+   * referenced the prop, so the rule was carried on this screen by memory
+   * alone. `voice.tsx` shows the expected shape — state-dependent, and
+   * asserted — and these are that shape for the states this screen has.
+   *
+   * `Screen` only gives its description node a `testID` when the `Screen`
+   * itself has one; `camera.tsx` already tags every state `camera-screen`.
+   */
+  describe('the spoken description (doctrine rule 16)', () => {
+    function spokenDescription(): unknown {
+      return screen.getByTestId('camera-screen-spoken-description').props.accessibilityLabel
+    }
+
+    it('describes the viewfinder', async () => {
+      setPermission({ granted: true, canAskAgain: false, status: 'granted' })
+      await renderScreen()
+      expect(spokenDescription()).toBe(
+        'Camera. The live viewfinder and one control that captures a photo and attaches it to this record.',
+      )
+    })
+
+    it('describes the refusal, and where to undo it', async () => {
+      // Not the viewfinder's sentence: a screen-reader user on this state
+      // has no viewfinder and no shutter, and a description that promised
+      // both would be the one thing worse than none.
+      setPermission({ granted: false, canAskAgain: false, status: 'denied' })
+      await renderScreen()
+      expect(spokenDescription()).toEqual(expect.stringContaining('Camera access refused.'))
+      expect(spokenDescription()).toEqual(expect.stringContaining('Settings'))
+    })
+
+    it('describes the request state', async () => {
+      setPermission({ granted: false, canAskAgain: true, status: 'undetermined' })
+      await renderScreen()
+      expect(spokenDescription()).toEqual(expect.stringContaining('Camera access needed.'))
+    })
+
+    it('describes the state where there is no record to attach to', async () => {
+      mockRecordId = undefined
+      setPermission({ granted: true, canAskAgain: false, status: 'granted' })
+      await renderScreen()
+      expect(spokenDescription()).toEqual(
+        expect.stringContaining('opened without a record to attach a photo to'),
+      )
+    })
+
+    it('names the database state it is waiting on', async () => {
+      mockStatus = { state: 'opening', error: null, applied: [] }
+      setPermission({ granted: true, canAskAgain: false, status: 'granted' })
+      await renderScreen()
+      expect(spokenDescription()).toBe(
+        'Camera. The database is opening, so there is nowhere to attach a photo yet.',
+      )
+    })
+  })
+
   it('renders something honest when opened without a record to attach to', async () => {
     // Latent until Task 11 wires up navigation to this screen, but
     // `useLocalSearchParams` yields `undefined` in practice regardless of

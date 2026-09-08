@@ -1757,6 +1757,48 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     expect(screen.getByTestId('capture-title-save')).not.toBeDisabled()
   })
 
+  it('strips a trailing stop from the save failure rather than doubling it', async () => {
+    // Both fixtures above ('database is locked') carry no trailing
+    // punctuation, so neither can tell a stripping build from one that
+    // interpolates `${detail}.` raw — they render the same sentence either
+    // way. This was the last error sentence on the branch still doubling its
+    // stop: `camera.tsx`, `voice.tsx` and the removal path beside it all
+    // strip, and their own suites all pin it with a punctuated cause. Both
+    // kinds of save go through the same line, so the notes case below rules
+    // out a fix applied to only one of them.
+    mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('disk is full!')))
+
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    expect(screen.getByTestId('capture-title-error')).toHaveTextContent(
+      'The name was not saved: disk is full. The point itself is safe.',
+    )
+  })
+
+  it('strips a run of trailing punctuation from a notes save failure too', async () => {
+    // `?!` rather than a single mark, for the same reason the removal path's
+    // own pair of tests uses one: `/[.?!…]+$/` and a narrower `/[.!]$/` are
+    // indistinguishable on one character, so the `+` is not exercised by the
+    // test above.
+    mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('disk is full?!')))
+
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+    await fireEvent.changeText(screen.getByTestId('capture-description-input'), 'Turbid, cattle')
+    await fireEvent.press(screen.getByTestId('capture-description-save'))
+    await settle()
+
+    expect(screen.getByTestId('capture-description-error')).toHaveTextContent(
+      'The notes were not saved: disk is full. The point itself is safe.',
+    )
+  })
+
   it('takes the failure away with the editor that produced it', async () => {
     mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('database is locked')))
 
@@ -1917,6 +1959,28 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
     )
   })
 
+  it('carries a help affordance for what attaching means (doctrine rule 7)', async () => {
+    // The recorded state used to be exempt from rule 7, and the exemption was
+    // granted with an explicit expiry written into `docs/ui-doctrine.md` and
+    // into `capture.tsx`'s own comment: it held only while everything the
+    // state asked for explained itself, and named "attaching media" in
+    // advance as the change that would end it. This branch made that change,
+    // so the affordance is here. Asserted through the modal it opens, the way
+    // the ready state's own help test is — a `?` that renders and does
+    // nothing satisfies presence and fails the rule.
+    listMedia.mockResolvedValue([])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('capture-media-help'))
+    expect(screen.getByText('Photos and voice notes')).toBeTruthy()
+    // The one fact nothing on the screen can show her, and the reason a `?`
+    // here is not decoration: removing an attachment does not give the
+    // storage back, because there is no purge. Phrased without the word.
+    expect(screen.getByText(/does not free up any space/)).toBeTruthy()
+    expect(screen.queryByText(/purge/i)).toBeNull()
+  })
+
   it('confirms before removing an attachment', async () => {
     // Doctrine rule 4: warn, never block. But a photo removed by a mis-tap on
     // a strip of thumbnails is gone from her view with no undo on this
@@ -1933,7 +1997,88 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
     // is inline: a modal that dismisses takes the question with it. Asserted
     // by what the confirmation actually says, not merely that some element
     // with the right testID exists.
-    expect(screen.getByText(/Remove this photo\?/)).toBeTruthy()
+    expect(screen.getByText(/Remove photo 1 of 1\?/)).toBeTruthy()
+  })
+
+  it('names which attachment it is about to remove, not merely its kind', async () => {
+    // "Remove this photo?" names a kind, and a kind is not an identity. The
+    // strip holds up to ten near-identical 64dp thumbnails, roughly five
+    // visible, back at offset 0 after every refresh, and there is no undo
+    // anywhere in the app — so the question has to say WHICH. The ordinal is
+    // the strip's own (`mediaStripLabel`), so the sentence and the tile it
+    // marks cannot disagree.
+    listMedia.mockResolvedValue([photoRow('med_a'), photoRow('med_b'), photoRow('med_c')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_b'))
+
+    expect(screen.getByText(/Remove photo 2 of 3\?/)).toBeTruthy()
+    expect(screen.getByTestId('media-remove-confirm').props.accessibilityLabel).toBe(
+      'Remove photo 2 of 3',
+    )
+  })
+
+  it('numbers a voice note among the voice notes, not among everything attached', async () => {
+    // The same within-kind numbering `MediaStrip` uses for its own tiles. A
+    // flat count over the strip would ask "Remove voice note 4 of 4?" of the
+    // second of two voice notes sitting behind two photos — a number she
+    // cannot match to anything she can see.
+    listMedia.mockResolvedValue([
+      photoRow('med_a'),
+      photoRow('med_b'),
+      voiceRow('med_v'),
+      voiceRow('med_w'),
+    ])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_w'))
+
+    expect(screen.getByText(/Remove voice note 2 of 2\?/)).toBeTruthy()
+  })
+
+  it('marks the tile in the strip that the question is about', async () => {
+    // The other half of naming it: the sentence says "photo 2 of 3" and the
+    // strip says which tile that is. Without this, counting tiles against a
+    // number is the only way to tell, on a strip that does not all fit on
+    // screen.
+    listMedia.mockResolvedValue([photoRow('med_a'), photoRow('med_b'), photoRow('med_c')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_b'))
+
+    expect(screen.getByTestId('media-tile-med_b').props.accessibilityLabel).toBe(
+      'Photo 2 of 3, the attachment the removal question is about',
+    )
+    expect(screen.getByTestId('media-tile-med_a').props.accessibilityLabel).toBe('Photo 1 of 3')
+    expect(screen.getByTestId('media-tile-med_b').props.style.borderColor).toBe(
+      darkTheme.colors.statusFair,
+    )
+    expect(screen.getByTestId('media-tile-med_a').props.style.borderColor).toBe(
+      darkTheme.colors.border,
+    )
+  })
+
+  it('promises no purge, because there is none', async () => {
+    // This sentence used to end "The file stays on the device until a purge."
+    // No purge exists — no settings route, no reconciliation, nothing in the
+    // application that deletes a media file (`docs/media-storage.md` §5) — so
+    // that was a mechanism offered to a field ecologist that nobody had
+    // built, and "purge" is a software word besides (doctrine rule 6). The
+    // duplicate-pin warning a few lines up the same screen already models
+    // the honest version: it stopped offering a deletion the app cannot
+    // perform. What is true is that the file stays on the device, and the
+    // sentence stops there.
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+
+    expect(screen.queryByText(/purge/i)).toBeNull()
+    expect(screen.getByText(/The file stays on the device\./)).toBeTruthy()
   })
 
   it('names a voice note correctly, not as a photo', async () => {
@@ -1950,9 +2095,9 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
 
     await fireEvent.press(screen.getByTestId('media-remove-med_v'))
 
-    expect(screen.getByText(/Remove this voice note\?/)).toBeTruthy()
+    expect(screen.getByText(/Remove voice note 1 of 1\?/)).toBeTruthy()
     expect(screen.getByTestId('media-remove-confirm').props.accessibilityLabel).toBe(
-      'Remove this voice note',
+      'Remove voice note 1 of 1',
     )
   })
 
@@ -2099,6 +2244,96 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
     expect(screen.getByTestId('media-remove-error')).toHaveTextContent(
       'The attachment was not removed: database locked. It is still attached.',
     )
+  })
+})
+
+/**
+ * Doctrine rule 16 on this screen (`packages/ui/src/primitives/Screen.tsx`
+ * renders the description on a dedicated zero-size `accessible` node).
+ *
+ * Nothing here used to reference `spokenDescription` at all: stripping every
+ * one of the five off `capture.tsx` left this whole suite green, so the rule
+ * was enforced on the two screens this branch is about by nothing but
+ * memory. `voice.test.tsx` was the only file in the repository asserting one.
+ *
+ * The `Screen`s carry a `testID` for the same reason `voice.tsx`'s does —
+ * without one, `Screen` renders the node with no `testID` of its own and
+ * there is nothing to find it by.
+ */
+describe('the spoken description (doctrine rule 16)', () => {
+  function spokenDescription(): unknown {
+    return screen.getByTestId('capture-screen-spoken-description').props.accessibilityLabel
+  }
+
+  it('describes the ready state', async () => {
+    await arriveWithAFix()
+    expect(spokenDescription()).toEqual(
+      expect.stringContaining('The live position and its accuracy'),
+    )
+  })
+
+  it('describes the acquiring state', async () => {
+    await arriveWithAFix()
+    await tap()
+    expect(spokenDescription()).toEqual(expect.stringContaining('Acquiring a fix.'))
+  })
+
+  it('describes the recorded state, and says nothing is attached when nothing is', async () => {
+    listMedia.mockResolvedValue([])
+    await renderRecorded()
+    await settle()
+    expect(spokenDescription()).toEqual(
+      expect.stringContaining('A survey point has been recorded and its position is final.'),
+    )
+    expect(spokenDescription()).toEqual(expect.stringContaining('Nothing is attached to it yet.'))
+  })
+
+  it('says what is attached, and that it is in a strip', async () => {
+    // The recorded state's sentence named the capture number, the accuracy,
+    // how the wait ended and the two ways onward — and never the
+    // attachments, which is exactly what this branch added to that state. A
+    // screen-reader user was told about a screen that no longer exists.
+    // Counted per kind, so a build reading `media.length` twice cannot pass.
+    listMedia.mockResolvedValue([photoRow('med_a'), photoRow('med_b'), voiceRow('med_v')])
+    await renderRecorded()
+    await settle()
+    expect(spokenDescription()).toEqual(
+      expect.stringContaining('2 photos and 1 voice note are attached, in a strip of tiles'),
+    )
+  })
+
+  it('uses the singular for a single attachment', async () => {
+    listMedia.mockResolvedValue([voiceRow('med_v')])
+    await renderRecorded()
+    await settle()
+    expect(spokenDescription()).toEqual(expect.stringContaining('1 voice note is attached'))
+  })
+
+  it('says a removal question is open, and which attachment it is about', async () => {
+    // The one a screen reader most needs, and the one the marked tile cannot
+    // convey: REMOVE is destructive, there is no undo, and "photo 2 of 3" is
+    // the only thing that says which of three near-identical thumbnails goes.
+    listMedia.mockResolvedValue([photoRow('med_a'), photoRow('med_b'), photoRow('med_c')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_b'))
+
+    expect(spokenDescription()).toEqual(
+      expect.stringContaining('You are being asked whether to remove photo 2 of 3'),
+    )
+  })
+
+  it('takes the question back out of the description when it is declined', async () => {
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+    await fireEvent.press(screen.getByTestId('media-remove-cancel'))
+    await settle()
+
+    expect(spokenDescription()).toEqual(expect.not.stringContaining('asked whether to remove'))
   })
 })
 

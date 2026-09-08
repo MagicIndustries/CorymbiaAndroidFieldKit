@@ -18,11 +18,11 @@ import {
   CORNER_BLOCK_MAX_W,
   HelpAffordance,
   InputAffordanceRow,
-  KIND_LABEL,
   MediaStrip,
   Screen,
   Type,
   isLocked,
+  mediaStripLabel,
   radiusForMetres,
   resolveReach,
   useLayout,
@@ -256,7 +256,10 @@ export default function CaptureScreen() {
   // (`diagnostics.tsx` does the same, for the same reason).
   if (status.state !== 'ready') {
     return (
-      <Screen spokenDescription={`Capture. The database is ${status.state}.`}>
+      <Screen
+        testID="capture-screen"
+        spokenDescription={`Capture. The database is ${status.state}.`}
+      >
         <Type variant="title">Database {status.state}</Type>
         {status.error ? <Type dim>{status.error.message}</Type> : null}
       </Screen>
@@ -707,7 +710,10 @@ function CaptureBody() {
 
   if (acquiring) {
     return (
-      <Screen spokenDescription="Acquiring a fix. The reading is already saved and is being refined while you stand still. The accuracy and the seconds remaining, how much sharper the fix is than the tap, how far apart the readings are, and a control that accepts what has accumulated and ends the wait.">
+      <Screen
+        testID="capture-screen"
+        spokenDescription="Acquiring a fix. The reading is already saved and is being refined while you stand still. The accuracy and the seconds remaining, how much sharper the fix is than the tap, how far apart the readings are, and a control that accepts what has accumulated and ends the wait."
+      >
         {/*
           The acquiring state scrolls. Rotation is unlocked and a phone in
           landscape has roughly 360dp of height, where non-scrolling content
@@ -746,7 +752,10 @@ function CaptureBody() {
   }
 
   return (
-    <Screen spokenDescription="Capture. The live position and its accuracy, and one control that records the fix immediately and then counts down while you stand still and sharpens the record.">
+    <Screen
+      testID="capture-screen"
+      spokenDescription="Capture. The live position and its accuracy, and one control that records the fix immediately and then counts down while you stand still and sharpens the record."
+    >
       {/*
         Ready is bottom-anchored, which is what `bottomBand` means: the control
         sits where the thumb already is, with the context above it.
@@ -774,16 +783,17 @@ function CaptureBody() {
       >
         {/*
           Doctrine rule 7: a tappable help affordance per screen, never a hover
-          — there is no hover in a paddock. It lives in the ready state and only
-          there. `acquiring` is exempt by rule 17, which requires that nothing
-          else is on screen while she stands still. `recorded` does ask one
-          thing of her — a name — but asks it with a labelled text box whose
-          placeholder says what to type, so there is nothing a `?` beside it
-          would explain; the moment that state asks for something whose meaning
-          is not on its face, filing to an activity or attaching media, it
-          takes a help affordance with it. Both exemptions are written down in
-          `docs/ui-doctrine.md` so their absence reads as a decision rather than
-          as an oversight.
+          — there is no hover in a paddock. `acquiring` is the one state with
+          none, and it is exempt by rule 17, which requires that nothing else
+          is on screen while she stands still. `recorded` used to be exempt
+          too, on the reasoning that the one thing it asked for — a name —
+          asked it with a labelled text box whose placeholder says what to
+          type. That exemption came with a written pre-commitment, in this
+          comment and in `docs/ui-doctrine.md`: it held only until the state
+          asked for something whose meaning is not on its face, and named
+          attaching media as such a thing. It now does, so it now carries its
+          own affordance (`capture-media-help`, in `RecordedAffordances`) and
+          the exemption is gone rather than quietly outlived.
         */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
           <Type variant="label" dim>
@@ -814,6 +824,44 @@ function CaptureBody() {
         {block}
       </ScrollView>
     </Screen>
+  )
+}
+
+/**
+ * The recorded state, said out loud (doctrine rule 16).
+ *
+ * Everything before the media clause is what this sentence has always said.
+ * What follows it is what this branch added to the state and what the
+ * sentence did not previously mention at all: how many of each kind are
+ * attached, that they sit in a strip that can be played back and removed
+ * from, and — the one that matters most to say — that a destructive question
+ * is open and which attachment it is about. A screen-reader user who cannot
+ * see the marked tile has nothing else to tell her which of ten photos REMOVE
+ * would take.
+ */
+function describeRecordedScreen(media: RecordMedia): string {
+  const total = media.photoCount + media.voiceCount
+  const kinds: string[] = []
+  if (media.photoCount > 0) {
+    kinds.push(media.photoCount === 1 ? '1 photo' : `${String(media.photoCount)} photos`)
+  }
+  if (media.voiceCount > 0) {
+    kinds.push(media.voiceCount === 1 ? '1 voice note' : `${String(media.voiceCount)} voice notes`)
+  }
+  const attached =
+    total === 0
+      ? 'Nothing is attached to it yet.'
+      : `${kinds.join(' and ')} ${total === 1 ? 'is' : 'are'} attached, in a strip of tiles you ` +
+        'can play back or remove.'
+  const question =
+    media.removalLabel === null
+      ? ''
+      : ` You are being asked whether to remove ${media.removalLabel.toLowerCase()}, with one ` +
+        'control that removes it and one that keeps it.'
+  return (
+    'A survey point has been recorded and its position is final. Where the capture got to, ' +
+    'its capture number, final accuracy and how the wait ended, a name you can give it, and ' +
+    `the ways onward: take another reading, or leave. ${attached}${question}`
   )
 }
 
@@ -872,8 +920,28 @@ function RecordedState({
    */
   const finalFix = record !== null && record.fix.quality !== 'none' ? record.fix : null
 
+  /**
+   * What is attached, and the removal question a tile can open — owned here
+   * rather than inside `RecordedAffordances` because the spoken description
+   * two lines below has to say both. See `useRecordMedia`.
+   */
+  const media = useRecordMedia(db, record?.id ?? null, deviceId)
+
   return (
-    <Screen spokenDescription="A survey point has been recorded and its position is final. Where the capture got to, its capture number, final accuracy and how the wait ended, a name you can give it, and the ways onward: take another reading, or leave.">
+    <Screen
+      testID="capture-screen"
+      /*
+        Doctrine rule 16. This sentence used to name the capture number, the
+        accuracy, how the wait ended and the two ways onward — and stopped
+        there, which was a complete description of this state before this
+        branch and an incomplete one after it. Attaching media is the thing
+        this branch added to this state, and a spoken description that never
+        mentions the attachments, the strip they sit in, or an open
+        destructive question describes a screen that no longer exists.
+        Asserted in all three of those states by `capture.test.tsx`.
+      */
+      spokenDescription={describeRecordedScreen(media)}
+    >
       {/*
         This state scrolls for the same reason the acquiring one does: rotation
         is unlocked, a phone in landscape has roughly 360dp of height, and this
@@ -984,7 +1052,7 @@ function RecordedState({
           )}
 
           {record === null ? null : (
-            <RecordedAffordances record={record} db={db} deviceId={deviceId} />
+            <RecordedAffordances record={record} db={db} deviceId={deviceId} media={media} />
           )}
 
           {/*
@@ -1101,47 +1169,48 @@ function RecordedSummary({ record }: { record: FieldRecord }) {
 }
 
 /**
- * What can still be attached to a recorded point (spec §9.6), and what is
- * already there.
+ * What is attached to a recorded point, and the removal question one of its
+ * tiles can open.
  *
- * `InputAffordanceRow` (`@corymbia/ui`, Task 6) renders the four tiles this
- * used to hand-roll one at a time: title, notes, voice, photo — none of them
- * disabled, because none of them is unbuilt any more. Location is not among
- * them: it is not an input on this screen, it is the fix the capture just
- * made (spec §9.6), and that is shown by the dial and the accuracy readout
- * above, not by a fifth tile that would do nothing when pressed.
+ * **A hook, rather than state inside `RecordedAffordances`, and that is
+ * forced rather than tidy.** Doctrine rule 16 asks the recorded state's
+ * spoken description to describe that state, and since this branch the state
+ * includes what is attached, that there is a strip of it, and whether a
+ * destructive question is currently open. That description is a prop on
+ * `Screen`, which `RecordedState` renders — one level above the affordances
+ * that used to own the media. Two components cannot each own the same fact
+ * without one of them going stale, so the fact lives here and both read it.
  *
- * Title and notes are written here, through `renameRecord` — the only
- * setter for either, appending an `'edited'` event the same way everything
- * else that happens to a record does (spec §8.5). Photo and voice are not
- * written here at all: pressing either tile pushes to `/camera` or `/voice`
- * with this record's id, and `useAttachMedia` — called from those screens,
- * not this one — is the whole of what writes the file and the row (Task 10).
- * This component's part with them is narrower: fetch what is already
- * attached, through `listMedia`, so the tiles can say how many and
- * `MediaStrip` can show them.
+ * `recordId` is nullable because `RecordedState` renders before a record
+ * exists (a capture whose insert has not come back yet, which it draws as
+ * POINT RECORDED with no summary) and a hook cannot be called conditionally.
+ * With no record there is nothing to read and every operation below is a
+ * no-op.
  */
-function RecordedAffordances({
-  record,
-  db,
-  deviceId,
-}: {
-  record: FieldRecord
-  db: Database
-  deviceId: string
-}) {
-  const router = useRouter()
-  const { theme } = useTheme()
+type RecordMedia = {
+  items: MediaStripItem[]
+  photoCount: number
+  voiceCount: number
+  /** The attachment a confirmation is open for, `null` when none is. */
+  pendingRemovalId: string | null
+  /**
+   * How that attachment is named — `Photo 3 of 10` — from `@corymbia/ui`'s
+   * own strip labelling, so the question and the tile it marks cannot drift
+   * apart. `null` when no removal is pending, and also when the pending id
+   * no longer names anything in `items` (a refresh that landed underneath
+   * the question), which the screen renders as no question at all rather
+   * than as a question about nothing.
+   */
+  removalLabel: string | null
+  removing: boolean
+  removeError: string | null
+  onTilePress: (id: string) => void
+  onRequestRemoval: (id: string) => void
+  onCancelRemoval: () => void
+  onConfirmRemoval: () => void
+}
 
-  const [editing, setEditing] = useState<{ kind: 'title' | 'description'; draft: string } | null>(
-    null,
-  )
-  const [title, setTitle] = useState<string | null>(record.title)
-  const [description, setDescription] = useState<string | null>(record.description)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<{ kind: 'title' | 'description'; message: string } | null>(
-    null,
-  )
+function useRecordMedia(db: Database, recordId: string | null, deviceId: string): RecordMedia {
   const [media, setMedia] = useState<Attachment[]>([])
 
   /**
@@ -1154,10 +1223,11 @@ function RecordedAffordances({
    * `camera.tsx`'s own error is inline): a modal that dismisses takes the
    * question, and the answer, with it.
    *
-   * `removeError` is kept separate from `error` above (the title/notes save
-   * failure) rather than reusing it — the two are shown in different places
-   * on the screen, next to what they are about, and clearing one must never
-   * clear the other.
+   * `removeError` is kept separate from the title/notes save failure rather
+   * than sharing one slot with it — the two are shown in different places on
+   * the screen, next to what they are about, and clearing one must never
+   * clear the other. That is also why the save failure stayed in
+   * `RecordedAffordances` when the media state moved up here.
    */
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null)
   const [removing, setRemoving] = useState(false)
@@ -1176,10 +1246,9 @@ function RecordedAffordances({
   const player = useAudioPlayer(null)
 
   /**
-   * Guards the `setState`s that follow an await. She can leave the screen, or
-   * take another reading, while `renameRecord` is still in a transaction or
-   * `listMedia` is still reading, and nothing may write into a component that
-   * has gone.
+   * Guards the `setState`s that follow an await: she can leave the screen, or
+   * take another reading, while `listMedia` is still reading or
+   * `softDeleteMedia` is still in a transaction.
    */
   const mounted = useRef(true)
   useEffect(() => {
@@ -1227,9 +1296,10 @@ function RecordedAffordances({
    * writers into `media`.
    */
   const refresh = useCallback((): Promise<void> => {
+    if (recordId === null) return Promise.resolve()
     generation.current += 1
     const ticket = generation.current
-    return listMedia(db, record.id)
+    return listMedia(db, recordId)
       .then((rows) => {
         if (mounted.current && ticket === generation.current) setMedia(rows)
       })
@@ -1238,7 +1308,7 @@ function RecordedAffordances({
         // simply carry on showing no count until the next successful fetch,
         // which is honester than inventing a number that was never read.
       })
-  }, [db, record.id])
+  }, [db, recordId])
 
   useFocusEffect(
     useCallback(() => {
@@ -1255,9 +1325,15 @@ function RecordedAffordances({
     durationMs: item.durationMs,
   }))
 
-  /** The attachment a removal is pending for, when one is. */
-  const removalTarget =
-    pendingRemoval === null ? null : (media.find((item) => item.id === pendingRemoval) ?? null)
+  /**
+   * How the attachment a removal is pending for is named in the strip —
+   * `Photo 3 of 10`. `mediaStripLabel` is `MediaStrip`'s own labelling,
+   * imported rather than restated: the confirmation names the tile the strip
+   * marks, and two independent numbering schemes drifting apart would point
+   * her at the wrong thumbnail on a strip of near-identical thumbnails with
+   * no undo behind it.
+   */
+  const removalLabel = pendingRemoval === null ? null : mediaStripLabel(mediaItems, pendingRemoval)
 
   /**
    * A voice tile's press (this task). `MediaStrip` takes one `onPress` for
@@ -1289,8 +1365,9 @@ function RecordedAffordances({
       // happen, which the early return here guarantees.
       return
     }
+    if (recordId === null) return
     void appendEvent(db, {
-      recordId: record.id,
+      recordId,
       action: 'played',
       deviceId,
       fix: ambientFixOrNone(ambientCache),
@@ -1356,6 +1433,86 @@ function RecordedAffordances({
       if (mounted.current) setRemoving(false)
     }
   }
+
+  return {
+    items: mediaItems,
+    photoCount,
+    voiceCount,
+    pendingRemovalId: pendingRemoval,
+    removalLabel,
+    removing,
+    removeError,
+    onTilePress: handleMediaPress,
+    onRequestRemoval: requestRemoval,
+    onCancelRemoval: cancelRemoval,
+    onConfirmRemoval: () => {
+      void confirmRemoval()
+    },
+  }
+}
+
+/**
+ * What can still be attached to a recorded point (spec §9.6), and what is
+ * already there.
+ *
+ * `InputAffordanceRow` (`@corymbia/ui`, Task 6) renders the four tiles this
+ * used to hand-roll one at a time: title, notes, voice, photo — none of them
+ * disabled, because none of them is unbuilt any more. Location is not among
+ * them: it is not an input on this screen, it is the fix the capture just
+ * made (spec §9.6), and that is shown by the dial and the accuracy readout
+ * above, not by a fifth tile that would do nothing when pressed.
+ *
+ * Title and notes are written here, through `renameRecord` — the only
+ * setter for either, appending an `'edited'` event the same way everything
+ * else that happens to a record does (spec §8.5). Photo and voice are not
+ * written here at all: pressing either tile pushes to `/camera` or `/voice`
+ * with this record's id, and `useAttachMedia` — called from those screens,
+ * not this one — is the whole of what writes the file and the row (Task 10).
+ * This component's part with them is narrower: fetch what is already
+ * attached, through `listMedia`, so the tiles can say how many and
+ * `MediaStrip` can show them.
+ */
+function RecordedAffordances({
+  record,
+  db,
+  deviceId,
+  media,
+}: {
+  record: FieldRecord
+  db: Database
+  deviceId: string
+  /**
+   * Owned by `RecordedState` (see `useRecordMedia`), not by this component,
+   * because `Screen`'s `spokenDescription` up there has to say what is
+   * attached and whether a removal question is open — doctrine rule 16.
+   */
+  media: RecordMedia
+}) {
+  const router = useRouter()
+  const { theme } = useTheme()
+
+  const [editing, setEditing] = useState<{ kind: 'title' | 'description'; draft: string } | null>(
+    null,
+  )
+  const [title, setTitle] = useState<string | null>(record.title)
+  const [description, setDescription] = useState<string | null>(record.description)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<{ kind: 'title' | 'description'; message: string } | null>(
+    null,
+  )
+  /**
+   * Guards the `setState`s that follow an await. She can leave the screen, or
+   * take another reading, while `renameRecord` is still in a transaction, and
+   * nothing may write into a component that has gone. (`useRecordMedia` keeps
+   * its own, for the reads and the removal it owns.)
+   */
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   const completed: InputAffordanceKind[] = [
     ...(title !== null ? (['title'] as const) : []),
@@ -1435,7 +1592,13 @@ function RecordedAffordances({
       const verb = kind === 'title' ? 'was' : 'were'
       setError({
         kind,
-        message: `The ${subject} ${verb} not saved: ${detail}. The point itself is safe.`,
+        // The trailing stop is stripped off `detail` for the same reason
+        // the removal failure beside it does so, and `camera.tsx` and
+        // `voice.tsx` do: a cause that already ends in punctuation
+        // ("database is locked!") otherwise renders "…was not saved:
+        // database is locked!. The point itself is safe." This was the one
+        // error sentence on the branch still interpolating a raw `${detail}.`
+        message: `The ${subject} ${verb} not saved: ${detail.replace(/[.?!…]+$/, '')}. The point itself is safe.`,
       })
     } finally {
       if (mounted.current) setSaving(false)
@@ -1444,26 +1607,57 @@ function RecordedAffordances({
 
   return (
     <View style={{ gap: spacing.sm }}>
-      <Type variant="label" dim>
-        ADD TO THIS POINT
-      </Type>
+      {/*
+        Doctrine rule 7, and the pre-commitment that rule's own row in
+        `docs/ui-doctrine.md` made: the recorded state's help exemption held
+        only for as long as everything it asked for explained itself, and
+        that row named "attaching media" in advance as the change that would
+        end it. This branch made that change, so this is the affordance it
+        said would come with it. What a `?` has to say here that the tiles
+        cannot: that an attachment belongs to this point rather than to the
+        trip, and — the one thing she cannot see anywhere — that removing an
+        attachment does not give the storage back.
+      */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+        <Type variant="label" dim>
+          ADD TO THIS POINT
+        </Type>
+        <HelpAffordance
+          testID="capture-media-help"
+          title="Photos and voice notes"
+          // Plain language for the process (doctrine rule 6). No "purge",
+          // no "soft delete", no "orphan" — and no promise of a clean-up
+          // this application cannot perform.
+          body={
+            'A photo or a voice note belongs to this one point, not to the trip. It carries ' +
+            'where and when it was taken, and it travels with the point wherever the point is ' +
+            'filed later.\n\n' +
+            'Photo and Voice open the camera and the recorder. What you take comes back here as ' +
+            'a small tile below these four buttons, and tapping a voice tile plays it back.\n\n' +
+            'Removing a tile takes the attachment off this point, and asks first, because ' +
+            'nothing here can put it back. The file itself stays on the device: this app has ' +
+            'nothing that deletes it, so removing an attachment does not free up any space.'
+          }
+        />
+      </View>
 
       <InputAffordanceRow
         testID="capture-affordances"
         onPress={handlePress}
         completed={completed}
-        counts={{ photo: photoCount, voice: voiceCount }}
+        counts={{ photo: media.photoCount, voice: media.voiceCount }}
         busy={busy}
       />
 
       <MediaStrip
         testID="capture-media-strip"
-        items={mediaItems}
-        onPress={handleMediaPress}
-        onRemove={requestRemoval}
+        items={media.items}
+        onPress={media.onTilePress}
+        onRemove={media.onRequestRemoval}
+        pendingRemovalId={media.pendingRemovalId}
       />
 
-      {removalTarget === null ? null : (
+      {media.removalLabel === null ? null : (
         <View
           style={{
             gap: spacing.sm,
@@ -1476,8 +1670,26 @@ function RecordedAffordances({
             backgroundColor: theme.colors.surfaceRaised,
           }}
         >
+          {/*
+            NAMED, not "this photo". Ten photos in a horizontal strip of
+            near-identical 64dp thumbnails, roughly five of them visible, the
+            strip back at offset 0 after every refresh, and no undo anywhere
+            in the app: "Remove this photo?" leaves her to guess which one is
+            about to go. The ordinal is the strip's own
+            (`mediaStripLabel`), and the tile it names is marked in the strip
+            at the same time, so the question and its subject are visibly one
+            thing.
+
+            And NO promise of a purge. There is no purge — no settings
+            route, no reconciliation, nothing anywhere in this application
+            that deletes a media file (see `docs/media-storage.md` §5). The
+            duplicate-pin warning above this panel is careful in exactly the
+            same way, and for the same reason: it stopped offering a deletion
+            the app cannot perform. "The file stays on the device" is the
+            whole of what is true, and it stops there.
+          */}
           <Type variant="body">
-            {`Remove this ${KIND_LABEL[removalTarget.kind].toLowerCase()}? The file stays on the device until a purge.`}
+            {`Remove ${media.removalLabel.toLowerCase()}? It comes off this point. The file stays on the device.`}
           </Type>
           <View style={{ flexDirection: 'row', gap: spacing.sm }}>
             {/*
@@ -1490,29 +1702,27 @@ function RecordedAffordances({
             */}
             <Button
               testID="media-remove-confirm"
-              label={removing ? 'REMOVING…' : 'REMOVE'}
-              spokenLabel={`Remove this ${KIND_LABEL[removalTarget.kind].toLowerCase()}`}
+              label={media.removing ? 'REMOVING…' : 'REMOVE'}
+              spokenLabel={`Remove ${media.removalLabel.toLowerCase()}`}
               kind="danger"
-              disabled={removing}
-              onPress={() => {
-                void confirmRemoval()
-              }}
+              disabled={media.removing}
+              onPress={media.onConfirmRemoval}
             />
             <Button
               testID="media-remove-cancel"
               label="KEEP IT"
               spokenLabel="Keep this attachment"
               kind="secondary"
-              disabled={removing}
-              onPress={cancelRemoval}
+              disabled={media.removing}
+              onPress={media.onCancelRemoval}
             />
           </View>
         </View>
       )}
 
-      {removeError === null ? null : (
+      {media.removeError === null ? null : (
         <Type variant="small" testID="media-remove-error">
-          {removeError}
+          {media.removeError}
         </Type>
       )}
 
