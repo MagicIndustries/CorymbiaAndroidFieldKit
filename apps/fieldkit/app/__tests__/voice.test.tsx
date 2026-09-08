@@ -39,6 +39,19 @@ import { field } from '@corymbia/tokens'
  * does — every interruption test below therefore fires through a closure
  * captured before the recording it is interrupting even started.
  *
+ * **AND THE SALVAGE PATH IS NOT REACHABLE ON THE SHIPPED ANDROID PRESET.**
+ * Every test below that hands the listener a non-null `url` is testing the
+ * public contract and iOS, not what a Galaxy S25 will do this week: with
+ * `RecordingPresets.HIGH_QUALITY`, `onError` emits `url: null`
+ * unconditionally (`AudioRecorder.kt:345-353`), `onInfo`'s url-bearing branch
+ * cannot fire because `setMaxFileSize` is only called when the options carry
+ * a `maxFileSize` and that preset carries none
+ * (`expo-audio/build/RecordingConstants.js`), and `stopRecording`'s
+ * url-bearing emit belongs to a stop this screen asked for and is turned away
+ * by the guards. `voice.tsx`'s own handler comment says the same, and says
+ * why the branch is kept. The weight of this file therefore sits on the
+ * `url: null` path, which is the one a device actually takes.
+ *
  * `stop()` is a REAL promise that resolves on a later tick, not a bare
  * `jest.fn()` returning `undefined`: a synchronous mock cannot tell an
  * awaited `stop()` from an unawaited one, and unawaited is exactly the bug
@@ -295,21 +308,48 @@ async function renderScreen() {
  *
  * The defaults are the shape Android's `onError` emits: finished, an error,
  * and no url, because the abandoned `.m4a` was never finalised.
+ *
+ * `id` is present because the type says it is — and it is the one field no
+ * test may lean on. `RecordingStatus.id` is `string`, not optional, but only
+ * `stopRecording()` actually puts one in the map (`AudioRecorder.kt:195-206`);
+ * `onError` (`:345`) and `onInfo` (`:374`) emit no `id` key at all, which is
+ * exactly the pair of paths an interruption arrives on. Every fixture below
+ * spells the same `'session-1'` for that reason: it carries no information,
+ * and a screen that arbitrated on it would be arbitrating on `undefined` on a
+ * device.
  */
 async function emitStatus(patch: Partial<MockRecordingStatus> = {}) {
+  await act(async () => {
+    emitStatusSync(patch)
+  })
+}
+
+/**
+ * The same delivery, WITHOUT its own `act` — for the one thing an awaited
+ * `emitStatus` cannot reproduce: an event arriving in the microtask window
+ * between the toggle writing a phase and React committing the render that
+ * would show it. Called from inside a caller's `act`, alongside an unawaited
+ * `fireEvent.press`, exactly the way the double-press test lands two taps in
+ * one frame.
+ *
+ * On a device that window is not theoretical. `stopRecording()` schedules its
+ * `recordingStatusUpdate` on `appContext.mainQueue`
+ * (`AudioRecorder.kt:195-206`), decoupled from the Bundle it returns — so the
+ * report is not sequenced against the promise `stop()` resolves, and it can
+ * reach JS while `toggle` is still suspended on that promise.
+ */
+function emitStatusSync(patch: Partial<MockRecordingStatus> = {}) {
   const listener = mockStatusListener
   if (listener === undefined) {
     throw new Error('the screen never subscribed to recordingStatusUpdate')
   }
-  await act(async () => {
-    listener({
-      id: 'session-1',
-      isFinished: true,
-      hasError: true,
-      error: 'The media server has crashed',
-      url: null,
-      ...patch,
-    })
+  listener({
+    id: 'session-1',
+    isFinished: true,
+    hasError: true,
+    error: 'The media server has crashed',
+    url: null,
+    ...patch,
   })
 }
 
@@ -893,11 +933,21 @@ describe('VoiceScreen', () => {
     // audio-focus listener iterates playables only, and
     // `getAudioRecorderStatus()` never writes `mediaServicesDidReset` at all.
     // This drives the push event the device actually emits.
+    //
+    // The payload is the one shape that carries no cause at all — the
+    // `cause === null` arm of `interruptionNotSaved`, which nothing else
+    // reaches. Android's `onError` always names a cause and `onInfo` always
+    // carries a url, so on this platform and this preset that arm is
+    // currently unreachable; `error` is `string | null` in the public type
+    // beside a `hasError` this screen does not set, and the sentence it
+    // produces has to be a sentence rather than "…was not saved: null."
     await renderScreen()
     await startRecording(4000)
-    await emitStatus()
+    await emitStatus({ hasError: false, error: null, url: null })
     expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Record')
-    expect(screen.getByTestId('voice-interrupted')).toHaveTextContent(/stopped on its own/i)
+    expect(screen.getByTestId('voice-interrupted')).toHaveTextContent(
+      'The recording stopped on its own, probably an interruption such as a call, and it was not saved. Record it again.',
+    )
   })
 
   it('says an abandoned recording was not saved, rather than that it may not have been', async () => {
@@ -907,9 +957,13 @@ describe('VoiceScreen', () => {
     // either to hunt for a note that is not there or to assume one might be
     // and not record it again. Both halves are asserted: the definite
     // sentence is present AND the hedge is gone.
+    //
+    // `onError`'s other message (`AudioRecorder.kt:340-343`), so this is not
+    // a third copy of the media-server fixture two tests down: what is being
+    // asserted here is the wording around the cause, not the cause.
     await renderScreen()
     await startRecording(4000)
-    await emitStatus({ url: null })
+    await emitStatus({ hasError: true, error: 'An unknown recording error occurred' })
     const message = screen.getByTestId('voice-interrupted')
     expect(message).toHaveTextContent(/was not saved/i)
     // A RegExp substring-matches; `toHaveTextContent` with a string is an
@@ -925,7 +979,23 @@ describe('VoiceScreen', () => {
     // Dropping it leaves her with a sentence that fits every cause equally.
     await renderScreen()
     await startRecording(4000)
-    await emitStatus({ hasError: true, error: 'The media server has crashed' })
+    await emitStatus()
+    expect(screen.getByTestId('voice-interrupted')).toHaveTextContent(
+      'The recording stopped on its own and was not saved: The media server has crashed. Record it again.',
+    )
+  })
+
+  it('does not double the full stop when the native cause already ends in one', async () => {
+    // `interruptionNotSaved` runs the cause through
+    // `withoutTrailingPunctuation` before adding its own full stop, and
+    // nothing exercised that: both of `onError`'s two messages end in a
+    // letter, so the call could be deleted and every other test stayed
+    // green. `error` is whatever the platform put in the map — iOS's own
+    // wording, or a future Android string — and glued together unstripped it
+    // reads "…has crashed.. Record it again."
+    await renderScreen()
+    await startRecording(4000)
+    await emitStatus({ hasError: true, error: 'The media server has crashed.' })
     expect(screen.getByTestId('voice-interrupted')).toHaveTextContent(
       'The recording stopped on its own and was not saved: The media server has crashed. Record it again.',
     )
@@ -936,9 +1006,16 @@ describe('VoiceScreen', () => {
     // more than a stray tap, and the status hands over the finished file's
     // url. Dropping it — which is what this screen used to do — loses two
     // minutes of speech to an event she never asked for.
+    //
+    // `hasError: true, error: null, url: <path>` is the exact map
+    // `onInfo`'s max-filesize branch emits (`AudioRecorder.kt:374-382`) —
+    // the ONE shape a platform would really send down this branch, and until
+    // this test nothing used it. See the salvage note in this file's header:
+    // on Android with `HIGH_QUALITY` that branch cannot fire, so this is the
+    // contract being tested, not the shipped preset.
     await renderScreen()
     await startRecording(134_000)
-    await emitStatus({ hasError: false, error: null, url: 'file:///tmp/interrupted.m4a' })
+    await emitStatus({ hasError: true, error: null, url: 'file:///tmp/interrupted.m4a' })
     expect(attachVoice).toHaveBeenCalledWith(
       expect.objectContaining({
         recordId: 'rec_a',
@@ -1020,11 +1097,20 @@ describe('VoiceScreen', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
-  it('survives a forced stop that rejects, the way a recorder that has already errored does', async () => {
-    // `MediaRecorder.stop()` on a recorder in an error state throws, and
-    // Kotlin runs `reset()` in its own `finally` anyway — so the rejection is
-    // expected and must not surface as an unhandled one on a screen that is
-    // still open.
+  it('survives a forced stop that rejects, and still says what happened', async () => {
+    // The premise this test used to state was wrong about which layer
+    // rejects. `MediaRecorder.stop()` on a recorder in an error state does
+    // throw — and Kotlin catches that `RuntimeException` itself, resets in
+    // its own `finally`, and returns a Bundle regardless
+    // (`AudioRecorder.kt:174-208`), so the JS promise RESOLVES. What can
+    // actually reject is the module never reaching `stopRecording()` at all:
+    // a recorder released underneath this screen, or RECORD_AUDIO revoked
+    // mid-recording. The guard is right; the reason had to be.
+    //
+    // Two things are asserted because two things break. An unhandled
+    // rejection surfaces on a screen that is still open; and a rejection
+    // swallowed too eagerly would abandon the sentence that tells her the
+    // note is gone, which is the only thing she has to go on.
     const rejections: unknown[] = []
     const onUnhandledRejection = (reason: unknown) => {
       rejections.push(reason)
@@ -1051,8 +1137,11 @@ describe('VoiceScreen', () => {
     // `isFinished: true` a crash does. Without the phase guard the listener
     // would take the toggle's own note a second time — a duplicate voice note
     // on the record, or a second attach of a file the first one already
-    // moved. `phaseRef` is what tells the two apart, and it is written
-    // synchronously inside `toggle` before any await.
+    // moved. This is the easy half of that: the report arrives after the stop
+    // branch has finished, so the phase says 'idle' and no arbitration is
+    // subtle. The two halves that are — the report arriving before React has
+    // committed, and the report arriving a whole cycle late — are the two
+    // tests below.
     setRecorderState({ isRecording: true, durationMillis: 8200 })
     uri.mockReturnValue('file:///tmp/note.m4a')
     await renderScreen()
@@ -1061,6 +1150,172 @@ describe('VoiceScreen', () => {
     await emitStatus({ hasError: false, error: null, url: 'file:///tmp/note.m4a' })
     expect(attachVoice).toHaveBeenCalledTimes(1)
     expect(screen.queryByTestId('voice-interrupted')).toBeNull()
+  })
+
+  it('decides on the phase ref, not on a phase React has not committed yet', async () => {
+    // The test above fires its status AFTER `await fireEvent.press` has run
+    // the stop branch to completion, when React has already committed
+    // 'idle'. That is not the window the ref exists for, and it is not a
+    // window React state would get wrong: swap `phaseRef.current` for the
+    // React `phase` and that test stays green.
+    //
+    // The real window is narrower. `toggle` writes 'saving' synchronously and
+    // then suspends on `recorder.stop()`; Kotlin's report for that stop is
+    // queued on `appContext.mainQueue` independently of the promise
+    // (`AudioRecorder.kt:195-206`), so it can arrive while React still has
+    // 'recording' committed and the listener's closure still reads
+    // 'recording'. Both statuses are therefore delivered inside the SAME
+    // `act` as the press, with no await between them — the same technique the
+    // double-press test uses to land two taps in one frame.
+    //
+    // Two statuses, because the arbitration has two guards and this is about
+    // the second one. The first — an interruption landing in the same turn as
+    // the stop she asked for — accounts for the pending stop; the second is
+    // that stop's own report, arriving with nothing left to account for it.
+    // At that point `phaseRef` is the only thing that knows the toggle still
+    // owns this note. Read through React state instead, the handler takes it:
+    // attaches the same file a second time and force-stops on top of the stop
+    // already in flight.
+    await renderScreen()
+    await startRecording(8200)
+    let releaseStop: () => void = () => {}
+    stop.mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseStop = () => {
+          setLive({ isRecording: false })
+          resolve()
+        }
+      }),
+    )
+    uri.mockReturnValue('file:///tmp/note.m4a')
+    const toggle = screen.getByTestId('voice-toggle')
+    await act(async () => {
+      fireEvent.press(toggle)
+      emitStatusSync({ hasError: true, error: 'The media server has crashed', url: null })
+      emitStatusSync({ hasError: false, error: null, url: 'file:///tmp/note.m4a' })
+    })
+    await act(async () => {
+      releaseStop()
+    })
+    expect(attachVoice).toHaveBeenCalledTimes(1)
+    expect(stop).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('voice-interrupted')).toBeNull()
+  })
+
+  it('does not hand the next recording a file the last stop already deleted', async () => {
+    // The sequence, all of it reachable on a device. She stops a 300 ms
+    // stray tap; the stop branch discards the note, DELETES the file, and
+    // tells her to record again. `stopRecording()`'s report for that stop is
+    // still in flight — queued on Kotlin's main queue, decoupled from the
+    // promise `stop()` resolved — and it carries a non-null url, because
+    // `reset()` (`AudioRecorder.kt:211-222`) clears everything about the
+    // recorder EXCEPT `filePath`. She records again, as instructed. The
+    // report lands: finished, a url, and a screen that is recording.
+    //
+    // Judged on phase alone that reads as an interruption of the note she is
+    // in the middle of speaking, and the handler attaches a deleted file
+    // under the NEW recording's length, tells her it was saved, and
+    // force-stops the recording that was actually running. Nothing in the
+    // payload can tell the two apart — `id` is absent on the paths that
+    // matter — so the count of outstanding stops is kept on this side.
+    uri.mockReturnValue('file:///tmp/stray.m4a')
+    await renderScreen()
+    await startRecording(300)
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(screen.getByTestId('voice-too-short')).toBeTruthy()
+    expect(fileDelete).toHaveBeenCalledTimes(1)
+
+    await startRecording(45_000)
+    await emitStatus({ hasError: false, error: null, url: 'file:///tmp/stray.m4a' })
+    expect(attachVoice).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('voice-interrupted')).toBeNull()
+    // Still recording, and still the recording she started.
+    expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Stop')
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not hand the next recording a file whose salvage already failed', async () => {
+    // The same shape, reached the other way. A salvage whose attach fails
+    // leaves the handler's own forced `stop()` unreported: it says so, sets
+    // the phase back to 'idle', and the queued report arrives after she has
+    // started the next note — carrying the previous file's url for exactly
+    // the reason above.
+    attachVoice.mockRejectedValue(new Error('disk full'))
+    await renderScreen()
+    await startRecording(134_000)
+    await emitStatus({ hasError: true, error: null, url: 'file:///tmp/interrupted.m4a' })
+    expect(screen.getByTestId('voice-error')).toBeTruthy()
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    attachVoice.mockReset()
+    await startRecording(30_000)
+    await emitStatus({ hasError: false, error: null, url: 'file:///tmp/interrupted.m4a' })
+    expect(attachVoice).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('voice-interrupted')).toBeNull()
+    expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Stop')
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('holds the screen until the forced stop has actually reset the recorder', async () => {
+    // The forced stop used to be fired and forgotten, which released
+    // `busyRef` and the phase while Kotlin's `reset()` was still in flight.
+    // Her next tap would then race it: `prepareRecording` throws
+    // `AudioRecorderAlreadyPreparedException` while `recorder != null`
+    // (`AudioRecorder.kt:83-86`), and whether it got there first was left to
+    // the module's own queue ordering. Awaiting it makes the ordering this
+    // screen's decision rather than the module's, and the cost — the
+    // sentence below waiting on a native call — is what this pins.
+    let releaseStop: () => void = () => {}
+    stop.mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseStop = () => {
+          setLive({ isRecording: false })
+          resolve()
+        }
+      }),
+    )
+    await renderScreen()
+    await startRecording(4000)
+    await emitStatus()
+    expect(stop).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('voice-interrupted')).toBeNull()
+    expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Saving…')
+    // And the toggle is genuinely shut while that reset runs — this is what
+    // the await is for, not the message ordering.
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      releaseStop()
+    })
+    expect(screen.getByTestId('voice-interrupted')).toHaveTextContent(/was not saved/i)
+    expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Record')
+  })
+
+  it('deletes the file behind a salvage whose attach failed, instead of orphaning it', async () => {
+    // The message says "Try recording again", so nothing will ever come back
+    // for this file: `attachVoice` copies from `sourceUri` rather than moving
+    // it, and on this path it did not finish even that. Left alone it sits in
+    // the recorder's cache directory for the life of the install, the same
+    // way a discarded stray tap's used to.
+    attachVoice.mockRejectedValue(new Error('disk full'))
+    await renderScreen()
+    await startRecording(134_000)
+    await emitStatus({ hasError: true, error: null, url: 'file:///tmp/interrupted.m4a' })
+    expect(fileConstructed).toHaveBeenCalledWith('file:///tmp/interrupted.m4a')
+    expect(fileDelete).toHaveBeenCalledTimes(1)
+  })
+
+  it('deletes the file behind a stopped note whose attach failed', async () => {
+    // The stop branch had the same gap, for the same reason.
+    setRecorderState({ isRecording: true, durationMillis: 5000 })
+    uri.mockReturnValue('file:///tmp/note.m4a')
+    attachVoice.mockRejectedValue(new Error('disk full'))
+    await renderScreen()
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(screen.getByTestId('voice-error')).toBeTruthy()
+    expect(fileConstructed).toHaveBeenCalledWith('file:///tmp/note.m4a')
+    expect(fileDelete).toHaveBeenCalledTimes(1)
   })
 
   it('ignores a status that is not final, so a mid-recording update does not end the note', async () => {
@@ -1079,9 +1334,14 @@ describe('VoiceScreen', () => {
     // `getAudioRecorderDurationMillis()` goes on adding `now - startTime` and
     // the 500 ms poller goes on committing a bigger number — a timer still
     // counting up underneath a sentence saying the recording stopped.
+    //
+    // Driven on the `url: null` path deliberately: `onError` is the emitter
+    // that leaves the native duration climbing, and `url: null` is what
+    // `onError` sends. The url-bearing version of this test was exercising
+    // the freeze through a branch that emitter cannot reach.
     const view = await renderScreen()
     await startRecording(65_000)
-    await emitStatus({ hasError: false, error: null, url: 'file:///tmp/interrupted.m4a' })
+    await emitStatus()
     expect(screen.getByTestId('voice-elapsed')).toHaveTextContent('1:05')
     setPolled({ durationMillis: 130_000 })
     await rerenderScreen(view)
@@ -1106,13 +1366,19 @@ describe('VoiceScreen', () => {
     // A screen reader user gets this from the announcement, not by reading
     // `voice-interrupted` directly, so the two have to agree (doctrine rule
     // 16) — and colour cannot be what tells her either (rule 9).
+    //
+    // On the `url: null` path, which is the one a device takes: the
+    // announcement is built from `interruption.message` whichever branch set
+    // it, so this pins the same production line while testing the outcome she
+    // will actually get — and the outcome she most needs announced, because
+    // this is the one where the note is gone.
     await renderScreen()
     await startRecording(134_000)
-    await emitStatus({ hasError: false, error: null, url: 'file:///tmp/interrupted.m4a' })
+    await emitStatus()
     expect(spokenDescription()).toEqual(
       expect.stringContaining('Voice note. The recording stopped on its own'),
     )
-    expect(spokenDescription()).toEqual(expect.stringContaining('was saved to this record'))
+    expect(spokenDescription()).toEqual(expect.stringContaining('was not saved'))
   })
 
   it('acts on what the screen knows now, not on what it knew when it subscribed', async () => {

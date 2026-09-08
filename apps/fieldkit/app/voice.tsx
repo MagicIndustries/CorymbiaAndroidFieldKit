@@ -72,6 +72,15 @@ import { attachVoice } from '../src/media/attachVoice'
  * legitimately be slow, and a `record()` that never starts arrives as
  * `hasError` rather than as silence.
  *
+ * **AND THE STATUS DOES NOT SAY WHICH RECORDING IT IS ABOUT.** `RecordingStatus.id`
+ * is typed `string`, not `string | undefined` (`Audio.types.d.ts:252`), and it
+ * lies: `stopRecording()` is the only emitter that puts an `id` in the map
+ * (`AudioRecorder.kt:195-206`); `onError` (`:345`) and `onInfo` (`:374`) emit
+ * maps with no `id` key at all — exactly the two paths an interruption
+ * arrives on. Nothing in the payload distinguishes one recording session from
+ * the next, so the arbitration has to be kept on the JS side: see
+ * `pendingStopsRef` and `phaseRef` below.
+ *
  * One trap in that hook, and this screen is built around it: the effect that
  * subscribes is keyed on `[recorder.id]`, so the `statusListener` closure it
  * captures is **the one from the first render** and is never replaced. A
@@ -187,6 +196,20 @@ type Phase = 'idle' | 'starting' | 'recording' | 'saving'
  * this screen never pauses a recording, so for a note that ran to an
  * interruption the two agree. Taking the larger keeps the recorder's own
  * figure wherever the recorder still has one.
+ *
+ * **ON ANDROID WITH `HIGH_QUALITY` THE FLOOR IS CURRENTLY UNREACHABLE, AND IS
+ * KEPT ANYWAY.** It is reached only from the salvage path, and it can only
+ * change the answer there when native has already reset — which on this
+ * preset never happens. `setMaxFileSize` is called only when the options
+ * carry a `maxFileSize` (`AudioRecorder.kt` `setRecordingOptions`) and
+ * `RecordingPresets.HIGH_QUALITY` carries none
+ * (`expo-audio/build/RecordingConstants.js`), so `onInfo`'s max-filesize
+ * branch — the one emitter that calls `reset()` before it emits — never
+ * fires; and `onError`, the branch that does fire, never resets at all, so
+ * `getStatus().durationMillis` is the larger of the two every time. What this
+ * function protects against is a preset that does set a cap, and iOS's own
+ * reset — both of which would otherwise arrive here reporting 0 ms and be
+ * deleted as a stray tap by the path that exists to rescue them.
  */
 function longestProvenRun(fromRecorder: number, startedAtMs: number | null): number {
   if (startedAtMs === null) return fromRecorder
@@ -236,6 +259,16 @@ function interruptionTooShort(): string {
  * finalised. Handing that half-written container to `attachVoice` would put
  * a note on the record that cannot be played, which is worse than saying
  * plainly that it was lost.
+ *
+ * Both halves are written for the contract rather than for what Android
+ * happens to send today. `onError` always sets `hasError: true` and always
+ * names a cause — "The media server has crashed" or "An unknown recording
+ * error occurred" (`AudioRecorder.kt:339-354`) — so on this platform the
+ * cause is never `null` and never ends in punctuation. `error` is
+ * `string | null` in the public type beside a `hasError` this screen does not
+ * control, though, and `onInfo` already emits `error: null` with
+ * `hasError: true`; a sentence that read "…was not saved: null." or
+ * "…crashed.. Record it again." is not one to discover on a device.
  */
 function interruptionNotSaved(cause: string | null): string {
   if (cause === null) return `${INTERRUPTED}, and it was not saved. Record it again.`
@@ -284,6 +317,38 @@ export default function VoiceScreen() {
   // Wall-clock milliseconds at the moment `record()` returned; `null` when no
   // recording is under way. See `longestProvenRun`.
   const recordingStartedAtRef = useRef<number | null>(null)
+  /**
+   * How many `recorder.stop()` calls this screen has issued that have not yet
+   * been answered by a `recordingStatusUpdate` — the JS-side identity the
+   * event itself does not carry (see the `id` note in the header comment).
+   *
+   * Kotlin's `stopRecording()` schedules its emit on `appContext.mainQueue`
+   * (`AudioRecorder.kt:195`), decoupled from the promise the JS `stop()`
+   * resolves — which resolves as soon as the Bundle comes back. So the report
+   * for a stop can land arbitrarily later, in a cycle that has nothing to do
+   * with it, and it lands carrying a url: `reset()` (`:211`) clears the
+   * recorder and every counter but leaves `filePath` alone, so a
+   * `stopRecording()` on an already-reset recorder no-ops the native stop,
+   * takes `stopFailed = false`, and reports the *previous* file.
+   *
+   * That is the whole bug this counter exists for. She stops a 300 ms stray
+   * tap; the stop branch discards the note and deletes the file and tells her
+   * to record again; she does; and the first stop's report finally arrives
+   * with `isFinished: true` and the deleted file's url while the new
+   * recording is live. Judged on phase alone it reads as an interruption of
+   * the note she is in the middle of speaking — so the handler would attach a
+   * deleted file under the new note's length, tell her it was saved, and
+   * force-stop the recording that was actually running.
+   *
+   * Incremented immediately before every `stop()` this screen makes, and
+   * consumed by the first finished status that arrives while a recording is
+   * live. Rolled back when the `stop()` rejects, because a stop that never
+   * reached Kotlin emits nothing: the emit is scheduled inside
+   * `stopRecording()` and nothing after it can throw, so a rejected promise
+   * means no report is coming and a count left standing would swallow the
+   * next real interruption instead.
+   */
+  const pendingStopsRef = useRef(0)
   const { theme } = useTheme()
   const { deviceClass, orientation } = useLayout()
   const { settings } = useSettings()
@@ -305,14 +370,35 @@ export default function VoiceScreen() {
    * and takes some branch chosen by a recorder she has been told nothing
    * about.
    *
-   * Three things this must get right, in order.
+   * Four things this must get right, in order.
    *
-   * **It must not take the deliberate stop path's event.** `stopRecording()`
-   * emits `recordingStatusUpdate` too, with the same `isFinished: true`. The
-   * discriminator is `phaseRef`: `toggle` writes `'saving'` synchronously,
-   * before it awaits anything, so by the time any event is delivered a
-   * deliberate stop is no longer in `'recording'` and this returns. The
-   * toggle keeps sole ownership of the note it stopped.
+   * **It must not take an event belonging to a stop this screen asked for —
+   * this cycle's or an earlier one's.** Two guards, and they answer different
+   * questions.
+   *
+   * `phaseRef` answers "is one of my own actions in flight right now?".
+   * `toggle` writes `'saving'` synchronously, before it awaits anything, so
+   * by the time any event can be delivered a deliberate stop has already left
+   * `'recording'`. It has to be the ref and not the React `phase`: the emit is
+   * queued on Kotlin's main queue independently of the promise `stop()`
+   * resolves, so it can arrive in the microtask window after `toggle` has
+   * written `'saving'` and before React has committed the render that would
+   * make `phase` say so. Read through React state instead, this handler would
+   * take the toggle's own note a second time — attaching a file the toggle is
+   * already attaching, or force-stopping the recording it is in the middle of
+   * stopping.
+   *
+   * `pendingStopsRef` answers "is this the late report of a stop I asked for
+   * *earlier*?" — which phase cannot answer, because by then the phase has
+   * moved on and may legitimately be `'recording'` again. See that ref's own
+   * comment for the sequence; it is reachable from the discard branch, from a
+   * failed salvage attach, and from this handler's own forced stop.
+   *
+   * Order matters. Phase is checked first and *clears* the count rather than
+   * decrementing it: a report that arrives while nothing is live has been
+   * accounted for by definition, and clearing there is what keeps the count
+   * from drifting upward over a session. The count is only spent while a
+   * recording is live, which is the one moment a stale report can do harm.
    *
    * **It must read the length before it stops anything.** `stop()` reaches
    * Kotlin's `reset()`, which zeroes the duration; see `longestProvenRun`.
@@ -326,21 +412,58 @@ export default function VoiceScreen() {
    * were a note — and had it taken the start branch instead,
    * `prepareRecording` throws `AudioRecorderAlreadyPreparedException`
    * because `recorder != null`. `stop()` is the only JS call that reaches
-   * `reset()`, so this issues one. Its own `recordingStatusUpdate` is then
-   * ignored by the `phaseRef` guard above, which by then reads `'saving'`.
+   * `reset()`, so this issues one, and *awaits* it: `busyRef` and `phase` are
+   * the only things standing between that reset and her next
+   * `prepareToRecordAsync()`, and releasing them with the reset still in
+   * flight would leave the ordering to the module's own queue — a prepare
+   * that got there first would throw. The cost is that the sentence below
+   * waits on a native call that returns in a frame, which is the right way
+   * round.
    *
-   * The salvage itself is the point. An interruption at the end of a
-   * two-minute note is not a stray tap, and the status carries the finished
-   * file's `url`: if the run clears `MINIMUM_NOTE_MS` it is attached exactly
-   * as the stop branch would attach it, and if it does not the file is
-   * deleted exactly as `discardFile` deletes a stray tap's. Either way she
-   * is told which — see `Interruption`.
+   * **THE SALVAGE BRANCH IS UNREACHABLE ON ANDROID TODAY, AND IS KEPT.** It
+   * is not describing something that happens here; it is describing something
+   * the contract permits and one platform already does. On Android with
+   * `RecordingPresets.HIGH_QUALITY` every route to a non-null `url` is
+   * closed: `onError` emits `url: null` unconditionally
+   * (`AudioRecorder.kt:345-353`); `onInfo`'s max-filesize branch does carry
+   * the url but cannot fire, because `setMaxFileSize` is only called when the
+   * options carry a `maxFileSize` and that preset carries none; and
+   * `stopRecording`'s url-bearing emit belongs to a stop this screen asked
+   * for, so the two guards above turn it away. What reaches this handler on
+   * the shipped preset is always the `finishedUri === null` branch.
+   *
+   * It stays because `url` is `string | null` in the public contract, because
+   * the branch is live on iOS, and because `onError` returning the path it
+   * abandoned is a one-line change upstream — and because deleting a branch
+   * and re-adding it later is precisely the churn that produced this file's
+   * first three passes. An interruption at the end of a two-minute note is
+   * not a stray tap: if the run clears `MINIMUM_NOTE_MS` the file is attached
+   * exactly as the stop branch would attach it, and if it does not it is
+   * deleted exactly as `discardFile` deletes a stray tap's. Either way she is
+   * told which — see `Interruption`.
    */
   const handleRecordingStatus = useCallback(
     async (status: RecordingStatus) => {
       if (!status.isFinished) return
-      if (phaseRef.current !== 'recording') return
-      if (busyRef.current) return
+      if (phaseRef.current !== 'recording') {
+        pendingStopsRef.current = 0
+        return
+      }
+      if (pendingStopsRef.current > 0) {
+        pendingStopsRef.current -= 1
+        return
+      }
+      // No `busyRef` guard here, deliberately. `busyRef` and `phase` are
+      // written as a pair with no await between them in either writer, so
+      // `busyRef === true` while `phaseRef === 'recording'` is not a state
+      // this screen can be in and the guard could never fire. Left in place
+      // it would stop being dead the moment an await appeared between those
+      // two writes — and what it would do then is suppress a genuine
+      // interruption arriving during a live recording, which is the failure
+      // this handler exists to prevent. Re-entrancy is already covered: this
+      // handler leaves `'recording'` synchronously below, so a second status
+      // is turned away by the phase guard above.
+      //
       // The same type-level backstop `toggle` keeps, for the same reason: an
       // `undefined` foreign key must never reach `attachVoice`.
       if (recordId === undefined) return
@@ -354,13 +477,19 @@ export default function VoiceScreen() {
       setPhase('saving')
       setError(null)
       setTooShort(false)
-      // `.catch` because `MediaRecorder.stop()` on a recorder that has
-      // already errored throws — and Kotlin runs `reset()` in its own
-      // `finally` regardless, so the call has done the job it is here for
-      // whether or not it resolves.
-      void recorder.stop().catch(() => {
-        // The recording is already over; there is nothing further to say.
-      })
+      pendingStopsRef.current += 1
+      try {
+        await recorder.stop()
+      } catch {
+        // Kotlin does not make this reachable: `stopRecording()` catches its
+        // own `RuntimeException` from `MediaRecorder.stop()`, resets in
+        // `finally`, and returns a Bundle either way, so the promise
+        // resolves. The guard is for the case above that: the module never
+        // reaching `stopRecording()` at all — a recorder released underneath
+        // this screen, or RECORD_AUDIO revoked mid-recording. Nothing was
+        // emitted then, so the count above has to come back down.
+        if (pendingStopsRef.current > 0) pendingStopsRef.current -= 1
+      }
       try {
         if (finishedUri === null) {
           setInterruption({
@@ -389,6 +518,14 @@ export default function VoiceScreen() {
         }
         setPhase('idle')
       } catch (cause) {
+        // The attach is the only thing that can throw in here, and it has:
+        // the message below tells her to record again, so nothing will ever
+        // come back for this file. `attachVoice` copies from `sourceUri`
+        // rather than moving it (Task 10), which leaves the temporary file
+        // the caller's to clean up on both outcomes — and on this one nobody
+        // else knows it exists. Same best-effort silence as `discardFile`
+        // everywhere else: the sentence that matters is the error.
+        discardFile(finishedUri)
         setError(messageFor(cause))
         setPhase('idle')
       } finally {
@@ -440,6 +577,11 @@ export default function VoiceScreen() {
   // so by the time this runs the native recorder may already be released and
   // reject. Unhandled, that surfaces as a crash-adjacent warning on a screen
   // that has already gone.
+  //
+  // No `pendingStopsRef` claim for this one: `useAudioRecorder` unsubscribes
+  // its `recordingStatusUpdate` listener in the same unmount, so the report
+  // this stop queues has nowhere to be delivered and no later cycle to
+  // confuse — this screen's refs die with it.
   useEffect(() => {
     return () => {
       if (recorder.isRecording) {
@@ -468,6 +610,11 @@ export default function VoiceScreen() {
     setError(null)
     setTooShort(false)
     setInterruption(null)
+    // The stop branch's finished file, hoisted so the catch below can clean
+    // it up: an attach that failed leaves a temporary file nothing
+    // downstream has ever heard of, under a message telling her to record
+    // again. `null` on every path that never got as far as a file.
+    let finishedUri: string | null = null
     try {
       if (!wasRecording) {
         await recorder.prepareToRecordAsync()
@@ -482,11 +629,24 @@ export default function VoiceScreen() {
         // reported as 900 ms and silently discarded.
         const ranForMs = recorder.getStatus().durationMillis
         recordingStartedAtRef.current = null
+        // Claimed before the call, not after: the report for this stop is
+        // queued on Kotlin's main queue and is not tied to the promise below,
+        // so it can outlive this whole cycle. See `pendingStopsRef`.
+        pendingStopsRef.current += 1
         // `stop()` must resolve before `recorder.uri` means anything —
         // reading it earlier attaches the previous recording, or nothing,
         // with a straight face.
-        await recorder.stop()
-        const finishedUri = recorder.uri
+        try {
+          await recorder.stop()
+        } catch (cause) {
+          // Nothing was emitted for a stop that never reached Kotlin; the
+          // claim above has to come back down before this rethrows into the
+          // screen's own error handling. See the same rollback in
+          // `handleRecordingStatus`.
+          if (pendingStopsRef.current > 0) pendingStopsRef.current -= 1
+          throw cause
+        }
+        finishedUri = recorder.uri
         if (ranForMs < MINIMUM_NOTE_MS) {
           setTooShort(true)
           discardFile(finishedUri)
@@ -499,6 +659,10 @@ export default function VoiceScreen() {
         setPhase('idle')
       }
     } catch (cause) {
+      // Whatever the attach did or did not manage, the message below sends
+      // her back to record again — so this file is nobody's from here on.
+      // See the same cleanup in `handleRecordingStatus`.
+      discardFile(finishedUri)
       // On screen, not an Alert (doctrine rule 3): a modal that dismisses
       // takes the message with it, and a voice screen that closes on
       // failure loses the note and the explanation together.
