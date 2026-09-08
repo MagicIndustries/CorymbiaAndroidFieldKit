@@ -39,6 +39,12 @@ export function InputAffordanceRow({
    * `Photo ✓` after four of them is a worse answer than `Photo · 4` — a
    * kind that can only happen once (a title) carries no count, so it stays
    * `Title ✓` rather than the noise of `Title · 1`.
+   *
+   * This component does not enforce that: nothing stops a caller passing
+   * `counts={{ title: 3 }}` and getting `Title · 3` rendered. "A kind that
+   * can only happen once shows no count" is caller discipline, not a
+   * guarantee made here — callers are relying on a convention, not a
+   * constraint.
    */
   counts?: Partial<Record<InputAffordanceKind, number>>
   /**
@@ -57,18 +63,34 @@ export function InputAffordanceRow({
         const done = completed.includes(a.kind)
         const isBusy = busy.includes(a.kind)
         const count = counts[a.kind]
-        const label =
-          count !== undefined && count > 0
+        // Doctrine rule 9: busy must read from the label wording, not only
+        // from the `opacity` dim below — a dim is one channel, and the one
+        // most likely to be lost in field glare. `isBusy` takes precedence
+        // over `count`/`done` because it is the freshest fact: a save in
+        // flight is more relevant than a count that hasn't caught up with it
+        // yet.
+        const label = isBusy
+          ? `${a.label} · Saving`
+          : count !== undefined && count > 0
             ? `${a.label} · ${count}`
             : done
               ? `${a.label} ✓`
               : a.label
+        // The spoken name mirrors the same two facts the visible label
+        // carries — a save in flight, or how many are already attached — so
+        // a screen-reader user isn't left with `accessibilityState.disabled`
+        // as its only, AT-only, signal.
+        const accessibilityLabel = isBusy
+          ? `${a.spoken}, saving`
+          : count !== undefined && count > 0
+            ? `${a.spoken}, ${count} attached`
+            : a.spoken
         return (
           <Pressable
             key={a.kind}
             testID={`affordance-${a.kind}`}
             accessibilityRole="button"
-            accessibilityLabel={a.spoken}
+            accessibilityLabel={accessibilityLabel}
             accessibilityState={{ selected: done, disabled: isBusy }}
             disabled={isBusy}
             onPress={() => onPress(a.kind)}
