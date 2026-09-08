@@ -1113,12 +1113,23 @@ message names the removed attachment.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd packages/data && npx jest src/repositories/__tests__/media.test.ts`
-Expected: PASS, 14 tests.
+Expected: PASS. Count the `it(` blocks above rather than trusting a number here — an earlier
+draft said 14 where the describes total 13, and the response to that slip should be to report
+it, never to invent a test to reach the number.
 
 - [ ] **Step 5: Prove the transaction boundary can fail**
 
-Move the `appendEvent` call outside the transaction, re-run, and confirm
-`writes nothing at all when the row is refused` fails. Restore. Quote both outputs.
+**Append the event BEFORE the INSERT, inside the transaction.** The unit is atomic either
+way, and only this order makes the rollback observable: with the event written first, a
+refused insert must roll it back, and `writes nothing at all when the row is refused` fails
+the moment rollback stops working.
+
+With the event appended last, that test proves almost nothing — every failure the suite can
+produce fires before `appendEvent` is reached, so lifting it out of the transaction entirely
+leaves the test green.
+
+Then prove it: move `appendEvent` after the transaction, re-run, watch the test fail, restore.
+Quote both outputs verbatim.
 
 - [ ] **Step 6: Export and commit**
 
