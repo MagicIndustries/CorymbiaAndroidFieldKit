@@ -1083,6 +1083,55 @@ describe('VoiceScreen', () => {
     expect(fileDelete).not.toHaveBeenCalled()
   })
 
+  it('turns away the second of two late stop reports, having only consumed the first', async () => {
+    /*
+     * The case the guard order gets wrong. Two stops can be outstanding at
+     * once — stop, start, stop, with the first report still queued — because
+     * `stopRecording()` emits through `mainQueue` rather than with the JS
+     * promise, so a report can arrive arbitrarily late. That is the same
+     * premise the whole counter rests on.
+     *
+     * An earlier version CLEARED the count when a report arrived while idle,
+     * which reads as tidy self-healing. It is not: clearing discards both
+     * claims, so the second late report lands during a live recording with
+     * nothing left to turn it away and is taken as an interruption — the
+     * PREVIOUS file attached under THIS note's duration, and this recording
+     * force-stopped. Every other test here carries at most one outstanding
+     * claim, which is exactly why all of them passed either way.
+     */
+    const view = await renderScreen()
+
+    // Both stops are stray taps, because a stop that ATTACHES navigates away
+    // and there would be no screen left to reach the second claim on. This is
+    // also the sequence a person actually performs: the too-short message
+    // tells her to record again, so she does — twice.
+    await startRecording(300)
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(screen.getByTestId('voice-too-short')).toBeTruthy()
+
+    // Stop #2, with #1's report still in flight.
+    await startRecording(300)
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+
+    attachVoice.mockClear()
+    stop.mockClear()
+
+    // Report #1, delivered while idle. It must consume ONE claim, not both.
+    await emitStatus({ hasError: false, error: null, url: null })
+
+    // A third recording is now genuinely under way.
+    await startRecording(6000)
+    await rerenderScreen(view)
+
+    // Report #2 — still a late echo of stop #2, not an interruption of this
+    // recording. Nothing may be attached and this recording must keep running.
+    await emitStatus({ hasError: false, error: null, url: 'file:///tmp/second.m4a' })
+
+    expect(attachVoice).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('voice-interruption')).toBeNull()
+  })
+
   it('puts the wedged native recorder back into a usable state after an interruption', async () => {
     // Android's `onError` emits and returns WITHOUT calling `reset()`, so
     // `recorder` stays non-null, `isPrepared` stays set and `isRecording`

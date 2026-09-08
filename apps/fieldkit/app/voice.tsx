@@ -446,7 +446,18 @@ export default function VoiceScreen() {
     async (status: RecordingStatus) => {
       if (!status.isFinished) return
       if (phaseRef.current !== 'recording') {
-        pendingStopsRef.current = 0
+        // Consume ONE claim, never clear the lot. Clearing looks like tidy
+        // self-healing and is not: the two orderings diverge the moment two
+        // stops are outstanding at once, which `toggle` reaches as stop →
+        // start → stop with the first report still in flight. Clearing there
+        // discards both claims, so the second late report lands during the
+        // live recording with nothing left to turn it away, and is taken as an
+        // interruption — the previous file attached under this note's duration
+        // and this recording force-stopped. That is the exact defect this
+        // counter exists to prevent, restored by the cleanup meant to protect
+        // it. A claim left standing only wedges the display until the next
+        // status; a claim dropped loses a note, and those costs are not equal.
+        if (pendingStopsRef.current > 0) pendingStopsRef.current -= 1
         return
       }
       if (pendingStopsRef.current > 0) {
@@ -520,8 +531,13 @@ export default function VoiceScreen() {
       } catch (cause) {
         // The attach is the only thing that can throw in here, and it has:
         // the message below tells her to record again, so nothing will ever
-        // come back for this file. `attachVoice` copies from `sourceUri`
-        // rather than moving it (Task 10), which leaves the temporary file
+        // come back for this file. Safe whatever Task 10's `attachVoice` does
+        // with the source, because `discardFile` targets `sourceUri` and is
+        // guarded on the file still existing: `MediaStore.save` MOVES, so
+        // after a successful move there is nothing left at `sourceUri` and
+        // this is a no-op; before the move the source is still there and
+        // deleting it is exactly right. Source and destination are never the
+        // same path. This leaves the temporary file
         // the caller's to clean up on both outcomes — and on this one nobody
         // else knows it exists. Same best-effort silence as `discardFile`
         // everywhere else: the sentence that matters is the error.
