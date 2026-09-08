@@ -40,10 +40,10 @@ export type MediaStripItem = {
  * mapping is written down; `capture.tsx` lowercases it the same way this
  * file's own `accessibilityLabel` does, rather than keeping a second map.
  */
-export const KIND_LABEL: Record<MediaKind, string> = {
+export const KIND_LABEL: Readonly<Record<MediaKind, string>> = Object.freeze({
   photo: 'Photo',
   voice: 'Voice note',
-}
+})
 
 /**
  * A minimal microphone glyph, drawn as SVG rather than as an emoji `Text`

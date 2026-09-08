@@ -235,10 +235,16 @@ jest.mock('../../src/media/store', () => ({
  * never started" test makes throw.
  *
  * `replace` is different and typed accordingly: `AudioPlayer.replace(source:
- * AudioSource): void` takes an argument, and "plays a voice note when its
- * tile is pressed" below asserts exactly what it was called with — an
- * untyped `jest.fn()` would let that assertion be handed a payload the real
- * method would never accept.
+ * AudioSource): void` takes an argument, unlike `play`/`pause`. The typing
+ * does not make "plays a voice note when its tile is pressed" below any
+ * safer — this repo is on `@types/jest@^29.5.14`, whose
+ * `toHaveBeenCalledWith<E extends any[]>(...params: E)` is unconstrained by
+ * the mock's own parameter type, so a wrong payload passed to `expect(...)
+ * .toHaveBeenCalledWith(...)` would be accepted whether `replace` were typed
+ * or not. What the generic does buy is `mockImplementation`: an untyped
+ * `jest.fn()` would let one be written to accept any shape, silently
+ * drifting from `AudioSource` as the real method's signature changes; typed,
+ * a wrong implementation fails to compile instead.
  */
 const play = jest.fn()
 const pause = jest.fn()
@@ -1967,18 +1973,42 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
     )
   })
 
+  it('paints REMOVE and KEEP IT differently, not just labels them differently', async () => {
+    // Doctrine rule 9: colour never alone. `kind="danger"` on REMOVE versus
+    // `kind="secondary"` on KEEP IT is what makes the destructive control
+    // read differently by *colour*, not merely by the word printed on it —
+    // nothing above this test would notice `kind="danger"` being reverted to
+    // `kind="secondary"`, since both still render, both still say what they
+    // say, and every other assertion in this file passes either way.
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+
+    const confirmBg = screen.getByTestId('media-remove-confirm').props.style.backgroundColor
+    const cancelBg = screen.getByTestId('media-remove-cancel').props.style.backgroundColor
+    expect(confirmBg).toBe(darkTheme.colors.statusPoor)
+    expect(cancelBg).toBe(darkTheme.colors.surfaceRaised)
+    expect(confirmBg).not.toBe(cancelBg)
+  })
+
   it('stops showing a removed attachment', async () => {
-    // The initial fetch (on focus) sees the photo; `confirmRemoval` routes
-    // its own refresh through the SAME ticketed `refresh()` a focus return
-    // uses (`capture.tsx`'s own doc comment on `refresh`), rather than
-    // computing the new list itself by filtering the removed id out of
-    // `media` locally. The `toHaveBeenCalledTimes(2)` below is what actually
-    // pins that: a local filter would leave the strip and the count exactly
-    // as they are asserted below while `listMedia` was called only once —
-    // this is the assertion that fails on that shortcut and only on it, since
-    // a local filter renders an identical screen to a real refetch when
-    // `listMedia`'s second answer agrees with what the filter would have
-    // produced anyway (as it does here, both being "the photo is gone").
+    // The initial fetch (on focus) sees the photo; `confirmRemoval` calls
+    // `listMedia` again to refresh, rather than computing the new list
+    // itself by filtering the removed id out of `media` locally. (This does
+    // not, on its own, prove that second call is the SAME ticketed
+    // `refresh()` a focus return uses — `capture.tsx`'s own doc comment on
+    // `refresh` — since a hand-rolled `setMedia(await listMedia(...))` also
+    // calls `listMedia` twice and would pass the assertion below, while
+    // dropping the generation ticket and the mounted guard.) The
+    // `toHaveBeenCalledTimes(2)` below is what actually pins that: a local
+    // filter would leave the strip and the count exactly as they are
+    // asserted below while `listMedia` was called only once — this is the
+    // assertion that fails on that shortcut and only on it, since a local
+    // filter renders an identical screen to a real refetch when `listMedia`'s
+    // second answer agrees with what the filter would have produced anyway
+    // (as it does here, both being "the photo is gone").
     listMedia.mockResolvedValueOnce([photoRow('med_a')])
     await renderRecorded()
     await settle()
@@ -2038,6 +2068,27 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
     // never show her.
     listMedia.mockResolvedValue([photoRow('med_a')])
     softDeleteMedia.mockRejectedValue(new Error('database locked!'))
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+    await fireEvent.press(screen.getByTestId('media-remove-confirm'))
+    await settle()
+
+    expect(screen.getByTestId('media-remove-error')).toHaveTextContent(
+      'The attachment was not removed: database locked. It is still attached.',
+    )
+  })
+
+  it('strips a run of trailing punctuation, not just a single mark', async () => {
+    // The fixture above ("database locked!") carries exactly one trailing
+    // mark, which `/[.?!…]+$/` and a narrower `/[.!]$/` both strip — the `+`
+    // quantifier is not exercised by a single character. "database locked?!"
+    // is: unstripped, or stripped by only one character, it renders as
+    // "database locked?!. It is still attached." or "database locked?. It is
+    // still attached." — either still a doubled, ungrammatical stop.
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    softDeleteMedia.mockRejectedValue(new Error('database locked?!'))
     await renderRecorded()
     await settle()
 

@@ -92,6 +92,24 @@ describe('MediaStrip', () => {
     expect(onRemove).toHaveBeenCalledWith('c')
   })
 
+  it('names the remove control to a screen reader by kind, not always "photo"', async () => {
+    // `MediaStrip`'s own remove control builds its `accessibilityLabel` from
+    // `KIND_LABEL` the same way the tile label above does, but nothing here
+    // had read it: hardcoding `"Remove photo"` would pass every other test in
+    // this file, including the five above that press the remove control
+    // without ever inspecting what it says. A screen reader announcing
+    // "Remove photo" over a voice tile is the same defect `capture.tsx`'s
+    // removal confirmation was fixed for, one layer up from where it is
+    // fixed here.
+    await wrap(
+      <MediaStrip items={[photo('a'), voice('b', 4000)]} onRemove={() => {}} testID="strip" />,
+    )
+    expect(screen.getByTestId('media-remove-a').props.accessibilityLabel).toBe('Remove photo')
+    expect(screen.getByTestId('media-remove-b').props.accessibilityLabel).toBe(
+      'Remove voice note',
+    )
+  })
+
   it('paints the remove control as a small badge, not a lid over the photo', async () => {
     // A 48dp painted circle in a 64dp tile's corner covers 56% of the
     // thumbnail — a coloured square standing in for the photo it is meant
