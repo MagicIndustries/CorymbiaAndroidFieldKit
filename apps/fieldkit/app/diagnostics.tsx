@@ -32,7 +32,7 @@ import { field, radii, spacing } from '@corymbia/tokens'
 import { Button, Card, Screen, Type, useTheme } from '@corymbia/ui'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
 import { ambientCache, type AmbientCache } from '../src/geo/ambient'
-import { buildAmbientFix } from '../src/media/ambientFix'
+import { buildAmbientFix } from '../src/geo/ambientFix'
 
 /**
  * The project and activity this screen owns, found by name.
@@ -1641,7 +1641,7 @@ function DiagnosticsBody(props: BodyProps) {
     // the cached reading never reported a mocked flag. No cast and no `??
     // false` — the verdict is a string union precisely so this line has to
     // state what it does about "never said". The field-by-field construction
-    // itself lives in `buildAmbientFix` (`../src/media/ambientFix.ts`),
+    // itself lives in `buildAmbientFix` (`../src/geo/ambientFix.ts`),
     // shared with `useAttachMedia.ts`'s own ambient save — see that
     // function's doc comment for why this screen's refusal above and that
     // hook's downgrade-to-`'none'` are both kept as they are.

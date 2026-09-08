@@ -6,10 +6,16 @@ import type { Fix } from '@corymbia/data'
  * §8.1).
  *
  * Extracted because, until this extraction, this was a verbatim third copy:
- * `useAttachMedia.ts`'s rollback pipeline and `diagnostics.tsx`'s own
- * ambient save each built the same nine fields the same way (this repo's own
- * doctrine — three statements of one fact, all three changing together —
+ * `src/media/useAttachMedia.ts`'s rollback pipeline and `diagnostics.tsx`'s
+ * own ambient save each built the same nine fields the same way (this repo's
+ * own doctrine — three statements of one fact, all three changing together —
  * argues against leaving that as it was).
+ *
+ * Lives beside `ambient.ts`, not under `src/media`, for the same reason the
+ * cache itself does: `diagnostics.tsx` is a GPS diagnostics screen with
+ * nothing to do with the photo pipeline, and importing this mapping from
+ * `src/media` was that exact inversion repeated a second time (see
+ * `ambient.ts`'s own doc comment).
  *
  * **What is deliberately NOT shared: the policy over `isMocked ===
  * 'notReported'`.** The two callers disagree on purpose, and both are

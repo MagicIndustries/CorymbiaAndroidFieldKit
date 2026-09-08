@@ -203,3 +203,49 @@ describe('rejects an unusable accuracy — not a poor measurement, but the absen
     })
   })
 })
+
+describe('the default clock', () => {
+  // `now: () => number = Date.now` — the bare function reference — is
+  // resolved to whatever `Date.now` names at the moment `createAmbientCache`
+  // is CALLED, and captured into the closure from then on. For a caller that
+  // constructs its cache once, at import (as
+  // `apps/fieldkit/src/geo/ambient.ts`'s module-level singleton does), that
+  // moment is long before any test gets to install a fake timer — so every
+  // age computed afterwards silently reads the real wall clock no matter what
+  // the test's fake clock says. `now: () => () => Date.now()` does not
+  // capture a function reference at all; each call to `now()` looks up
+  // whatever `Date.now` currently is, which is exactly what
+  // `jest.useFakeTimers` replaces. The distinction only shows up when
+  // construction happens before the fake timer is installed — that ordering
+  // is the whole test.
+  it('reads whatever clock is in force when an age is computed, even when the cache was built before that clock existed', () => {
+    // No `now` argument — this is the default the fix in `ambient-cache.ts`
+    // has to protect, not a scripted clock this test supplies itself. Built
+    // with the real `Date.now`, exactly as the module-level singleton is.
+    const cache = createAmbientCache(createFakeLocationSource({}))
+    cache.record(reading({ timestampMs: Date.now() }))
+
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] })
+    try {
+      // Jump the fake clock forward ninety seconds from whenever the reading
+      // above was actually stamped.
+      jest.setSystemTime(Date.now() + 90_000)
+
+      expect(cache.read()?.ageSeconds).toBe(90)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+})
+
+describe('reset()', () => {
+  it('forgets the cached position', () => {
+    const cache = createAmbientCache(createFakeLocationSource({}))
+    cache.record(reading())
+    expect(cache.read()).not.toBeNull()
+
+    cache.reset()
+
+    expect(cache.read()).toBeNull()
+  })
+})

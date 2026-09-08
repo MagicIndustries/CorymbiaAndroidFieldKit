@@ -28,7 +28,7 @@ import {
   type InputAffordanceKind,
 } from '@corymbia/ui'
 import { renameRecord, type Database, type FieldRecord, type StoredFix } from '@corymbia/data'
-import { feedingAmbientCache } from '../src/geo/ambient'
+import { ambientCache, feedingAmbientCache } from '../src/geo/ambient'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useSteadyGrade } from '../src/capture/steadyGrade'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
@@ -315,6 +315,24 @@ function CaptureBody() {
   const source: LocationSource = (sourceRef.current ??= feedingAmbientCache(
     createExpoLocationSource(),
   ))
+
+  /**
+   * The other half of spec §8.2's "refreshes opportunistically" (see
+   * `src/geo/ambient.ts`'s doc comment for the half this is not — the
+   * low-frequency refresh while an activity is running, which needs Plan 5's
+   * activity machinery and is not built yet).
+   *
+   * A cold app launch has no `watch` reading yet: the countdown has not
+   * started, so `feedingAmbientCache` above has fed the cache nothing, and a
+   * photo taken in the first seconds after opening the app would be stamped
+   * `{ quality: 'none' }` even though the device may already know a perfectly
+   * good last-known position. `void` because this must not, and cannot,
+   * block or gate anything the screen does — nothing awaits it, and every
+   * other read of the cache stays synchronous.
+   */
+  useEffect(() => {
+    void ambientCache.refresh()
+  }, [])
 
   const capture = useCapture({ db, device, source })
   const acquiring = capture.phase === 'acquiring'

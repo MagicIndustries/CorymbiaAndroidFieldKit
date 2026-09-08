@@ -41,12 +41,27 @@ export type AmbientFix = {
  * never be mistaken for a current one.
  */
 export function createAmbientCache(
-  source: LocationSource,
-  now: () => number = Date.now,
+  // Only `getLastKnown` is ever called on this — `refresh()` below is the one
+  // caller, and it does not touch permission or a live watch. A full
+  // `LocationSource` is still what every caller has on hand (the real
+  // adapter, or a scripted fake), so this only narrows what the cache
+  // *asks for*, not what a caller may pass.
+  source: Pick<LocationSource, 'getLastKnown'>,
+  // The bare `Date.now` a default parameter would otherwise capture is
+  // resolved once, at the call — which for this function is at import,
+  // long before a test can install a fake timer. Wrapping it in an arrow
+  // defers that lookup to each call to `now()` instead, so it reads
+  // whatever clock is in force when an age is actually computed. Every
+  // caller that omits the argument gets this for free; see
+  // `packages/geo/src/__tests__/ambient-cache.test.ts`'s "the default clock"
+  // suite.
+  now: () => number = () => Date.now(),
 ): {
   record(reading: Reading): void
   read(): AmbientFix | null
   refresh(): Promise<AmbientFix | null>
+  /** Test-only: forgets the cached position. Not called by the app itself. */
+  reset(): void
 } {
   let cached: Reading | null = null
 
@@ -114,6 +129,10 @@ export function createAmbientCache(
         cached = lastKnown
       }
       return cached ? toFix(cached) : null
+    },
+
+    reset() {
+      cached = null
     },
   }
 }

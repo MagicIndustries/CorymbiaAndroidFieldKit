@@ -176,6 +176,9 @@ jest.mock('../../src/db/provider', () => ({
 
 // Imported after the mocks so it picks them up.
 import CaptureScreen, { VERDICT_SENTENCE } from '../capture'
+// The real module — only `@corymbia/geo`'s `createExpoLocationSource` is
+// mocked above. Used solely for `.reset()` in `afterEach`, below.
+import { ambientCache } from '../../src/geo/ambient'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -299,6 +302,19 @@ afterEach(() => {
   // jest.setup.js are installed once for the whole file, and restoring them
   // after the first test would hand every later test the real
   // `AccessibilityInfo`, which in a headless environment never answers.
+
+  // `'../src/geo/ambient'` is the real module (only `@corymbia/geo`'s
+  // location factory is mocked above), so every test that mounts
+  // `CaptureScreen` writes a position into the real, app-wide singleton —
+  // both from the countdown readings `arriveWithAFix`/`emit` deliver and, as
+  // of Task 10b's review, from the mount effect's own `refresh()`. Nothing in
+  // this file reads the cache back, so a stale position has cost nothing yet
+  // — but leaving it uncleared would silently hand a future test here
+  // whatever position the previous one left behind. `.reset()` only forgets
+  // the position; it deliberately leaves `src/geo/ambient.ts`'s own
+  // `platformSource` alone, which the "constructed once" test below depends
+  // on staying a stable, already-built singleton across this whole file.
+  ambientCache.reset()
 })
 
 // ---------------------------------------------------------------------------

@@ -263,6 +263,19 @@ async function attachAPhotoAndReadItsFix(): Promise<Fix | undefined> {
   return mockAttachMedia.mock.calls[0]?.[1].fix
 }
 
+/** The voice counterpart to `attachAPhotoAndReadItsFix`, above. */
+async function attachAVoiceNoteAndReadItsFix(): Promise<Fix | undefined> {
+  const { result } = await renderHook(() => useAttachMedia())
+  await act(async () => {
+    await result.current.attachVoice({
+      recordId: 'rec_a',
+      sourceUri: 'file:///tmp/n.m4a',
+      durationMs: 4200,
+    })
+  })
+  return mockAttachMedia.mock.calls[0]?.[1].fix
+}
+
 /**
  * The whole assertion, in one place because both tests make exactly it: the
  * event carries an ambient fix, at the coordinates the screen under test
@@ -293,6 +306,39 @@ function thirtySecondsAgo(): number {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/**
+ * A cold start: nothing has watched a reading yet, only `capture.tsx`'s
+ * mount effect calling `ambientCache.refresh()` (Plan 4, Task 10b review).
+ *
+ * Deliberately its own describe block, placed first in the file. `refresh()`
+ * reaches `src/geo/ambient.ts`'s `platformSource` — a module singleton for
+ * the life of this test FILE, lazily built from `createExpoLocationSource()`
+ * (mocked above) the first time anything calls `refresh()`. Once built it is
+ * never rebuilt, so a test after this one in the file would find it already
+ * pointing at THIS test's `mockSource` rather than its own. Running first is
+ * what lets this test build it from the `lastKnown` it scripts below.
+ */
+describe('a cold start, before any reading has arrived from a watch', () => {
+  it('stamps a photo with the last-known position, without waiting for a watched reading', async () => {
+    mockSource = createFakeLocationSource({
+      permission: 'granted',
+      readings: [],
+      lastKnown: reading(-37.9, 145.05, thirtySecondsAgo()),
+    })
+
+    await render(
+      <ThemeProvider initial="dark">
+        <CaptureScreen />
+      </ThemeProvider>,
+    )
+    await settle()
+
+    // No `mockSource.emit(...)` anywhere above — the only thing that can have
+    // put a position in the cache is the mount effect's `refresh()`.
+    expectAmbientAt(await attachAPhotoAndReadItsFix(), -37.9, 145.05)
+  })
+})
 
 describe('the ambient cache, from the screen that fills it to the event that carries it', () => {
   it('stamps a photo with the position the capture screen was watching', async () => {
@@ -330,5 +376,25 @@ describe('the ambient cache, from the screen that fills it to the event that car
     })
 
     expectAmbientAt(await attachAPhotoAndReadItsFix(), -38.1042, 145.2117)
+  })
+
+  it('stamps a voice note with an ambient position too, not just a photo', async () => {
+    // `attachPhoto` and `attachVoice` share the same `ambientFix()` mapping
+    // in `useAttachMedia.ts`, so the risk of this ever diverging is low — but
+    // until this test, nothing end-to-end exercised the voice half at all.
+    // `voice.tsx` has no producer of its own (unlike `capture.tsx`), so this
+    // reuses the capture screen to fill the cache and reads back what
+    // `attachVoice` actually stamped.
+    await render(
+      <ThemeProvider initial="dark">
+        <CaptureScreen />
+      </ThemeProvider>,
+    )
+    await settle()
+    await act(async () => {
+      mockSource.emit(reading(-37.5622, 143.8503, thirtySecondsAgo()))
+    })
+
+    expectAmbientAt(await attachAVoiceNoteAndReadItsFix(), -37.5622, 143.8503)
   })
 })

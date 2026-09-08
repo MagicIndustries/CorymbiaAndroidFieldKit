@@ -9,8 +9,20 @@ import {
 import { mediaFileName, type MediaKind } from '@corymbia/media'
 import { useDatabase, useDevice } from '../db/provider'
 import { mediaStore } from './store'
-import { ambientCache } from '../geo/ambient'
-import { buildAmbientFix } from './ambientFix'
+import { ambientCache, type AmbientReader } from '../geo/ambient'
+import { buildAmbientFix } from '../geo/ambientFix'
+
+/**
+ * Typed as the narrow read-only view, not the full `AmbientCache` —
+ * `ambientCache` itself still exposes `record` and `refresh` (`diagnostics.tsx`
+ * needs both), but this module must only ever call `.read()`. Assigning it
+ * once, to a binding of the narrower type, turns "an attach never waits or
+ * writes" from a rule this file has to remember into one the compiler
+ * enforces: `ambientReader.record(...)` or `ambientReader.refresh()` below
+ * would not type-check. See `AmbientReader`'s own doc comment
+ * (`../geo/ambient.ts`) for why the wide type still exists at all.
+ */
+const ambientReader: AmbientReader = ambientCache
 
 /**
  * The pipeline that attaches a photo (`app/camera.tsx`) or a voice note
@@ -60,11 +72,12 @@ export type AttachVoiceInput = {
  * the `media_added` event (spec §8.1: every event carries where it
  * happened).
  *
- * Never reads a live position — `ambientCache.read()` only ever returns what
- * is already cached, so attaching a photo can never wait on the GPS. The
- * cache's other method, `refresh()`, reaches for a live position and is
- * exactly the wait this must not take; the screens that watch a GPS are what
- * feed it (`src/geo/ambient.ts`).
+ * Never reads a live position — `ambientReader.read()` only ever returns what
+ * is already cached, so attaching a photo can never wait on the GPS. The full
+ * cache's other methods, `record()` and `refresh()`, are not reachable
+ * through `ambientReader`'s type at all — `refresh()` reaches for a live
+ * position and is exactly the wait this must not take; the screens that watch
+ * a GPS are what feed the cache (`src/geo/ambient.ts`).
  *
  * `{ quality: 'none' }` covers two cases, not one: the cache holding nothing
  * at all, and the cache holding a reading whose mocked status was never
@@ -79,13 +92,13 @@ export type AttachVoiceInput = {
  * function refuse to do.
  *
  * The field-by-field construction of a positioned reading lives in
- * `buildAmbientFix` (`./ambientFix.ts`) — shared with `diagnostics.tsx`'s own
- * ambient save, which resolves the same `'notReported'` question the
+ * `buildAmbientFix` (`../geo/ambientFix.ts`) — shared with `diagnostics.tsx`'s
+ * own ambient save, which resolves the same `'notReported'` question the
  * opposite way; see that function's doc comment for why both answers are
  * kept.
  */
 function ambientFix(): Fix {
-  const cached = ambientCache.read()
+  const cached = ambientReader.read()
   if (cached === null || cached.isMocked === 'notReported') {
     return { quality: 'none' }
   }
