@@ -287,6 +287,20 @@ describe('CameraScreen', () => {
     expect(screen.getByTestId('camera-shutter')).toBeTruthy()
   })
 
+  it('does not double the full stop when the cause already ends in one', async () => {
+    // `attachPhoto`'s own message ends in a period, and glued to this
+    // sentence uncorrected it read "...implements this seam.. Try the
+    // shutter again." — the same defect `voice.tsx` carried.
+    takePictureAsync.mockResolvedValue({ uri: 'file:///tmp/shot.jpg' })
+    attachPhoto.mockRejectedValue(new Error('Task 10 implements this seam.'))
+    setPermission({ granted: true, canAskAgain: false, status: 'granted' })
+    await renderScreen()
+    await fireEvent.press(screen.getByTestId('camera-shutter'))
+    expect(screen.getByTestId('camera-error')).toHaveTextContent(
+      'The photo could not be saved: Task 10 implements this seam. Try the shutter again.',
+    )
+  })
+
   it('does not attach and does not navigate back when saving fails', async () => {
     // The other half of "stays open when saving fails": a test that only
     // checked for the error text would still pass if the screen attached AND

@@ -27,10 +27,15 @@ import { attachPhoto } from '../src/media/attachPhoto'
  * and a native camera failure will be equally raw — so this is what stands
  * between that text and a field ecologist who needs to know what happened
  * and what to do, not what threw.
+ *
+ * The trailing full stop is stripped from the cause before this sentence
+ * adds its own: `attachPhoto`'s message ends in one, and glued together
+ * uncorrected they read "...implements this seam.. Try the shutter again."
+ * (`voice.tsx` strips it the same way, for the same message).
  */
 function messageFor(cause: unknown): string {
   const detail = cause instanceof Error ? cause.message : String(cause)
-  return `The photo could not be saved: ${detail}. Try the shutter again.`
+  return `The photo could not be saved: ${detail.replace(/\.+$/, '')}. Try the shutter again.`
 }
 
 export default function CameraScreen() {
