@@ -82,11 +82,14 @@ export function newMediaId(): string {
  * highest live ordinal, or 1 when it has none.
  *
  * Deliberately excludes soft-deleted rows — `idx_media_record_ordinal` is a
- * partial unique index over live rows only, exactly so a removed attachment's
- * position can be reused rather than leaving a permanent gap. Read inside the
- * same transaction that inserts with it: reading it beforehand and passing it
- * in is how two attachments made in quick succession would land on the same
- * ordinal, since nothing would serialise the read against a concurrent write.
+ * partial unique index over live rows only, exactly so the highest live
+ * position is reused once the attachment holding it is removed. That is
+ * narrower than "no hole is ever left": removing the middle of three
+ * attachments leaves 1, 3, 4, a permanent gap, because only the highest
+ * position is ever handed out again. Read inside the same transaction that
+ * inserts with it: reading it beforehand and passing it in is how two
+ * attachments made in quick succession would land on the same ordinal, since
+ * nothing would serialise the read against a concurrent write.
  */
 async function nextOrdinal(db: Database, recordId: string): Promise<number> {
   const row = await db.first<{ next: number }>(
@@ -147,6 +150,22 @@ export async function attachMedia(
 
     const ordinal = await nextOrdinal(db, input.recordId)
     const at = nowIso()
+    // The event is appended BEFORE the insert, not after. Every failure this
+    // insert can produce — the UNIQUE file-name collision `writes nothing at
+    // all when the row is refused` exercises, chief among them — fires while
+    // the insert runs, and this order is the only one under which that
+    // failure's rollback is observable: the event is written, the insert is
+    // refused, and only a working ROLLBACK keeps the event count flat. With
+    // the event appended after the insert instead, every failure the suite
+    // can produce happens strictly before it runs, so the transaction being
+    // atomic at all is not actually exercised by anything here.
+    await appendEvent(db, {
+      recordId: input.recordId,
+      action: 'media_added',
+      deviceId: input.deviceId,
+      fix: input.fix,
+      detail: `${input.kind} ${input.fileName}`,
+    })
     await db.execute(
       `INSERT INTO media (id, record_id, kind, file_name, byte_size, duration_ms, ordinal,
                           captured_at, created_at, updated_at)
@@ -164,13 +183,6 @@ export async function attachMedia(
         at,
       ],
     )
-    await appendEvent(db, {
-      recordId: input.recordId,
-      action: 'media_added',
-      deviceId: input.deviceId,
-      fix: input.fix,
-      detail: `${input.kind} ${input.fileName}`,
-    })
   })
 
   const attachment = await db.first<MediaRow>(`${SELECT} WHERE id = ?`, [input.mediaId])

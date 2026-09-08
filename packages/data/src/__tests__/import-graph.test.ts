@@ -435,6 +435,26 @@ describe("the public entry point's import graph", () => {
   it('contains no reachable Node-only global — Buffer, __dirname, __filename, require(), or any process.<member> other than process.env', () => {
     expect(walk.globals.map(describeGlobalHit)).toEqual([])
   })
+
+  it('does not reach @corymbia/media as a value import', () => {
+    // media.ts imports MediaKind from '@corymbia/media' with `import type`,
+    // specifically so nothing at runtime crosses that package boundary — a
+    // type-only import is erased before Metro ever sees it, so it cannot pull
+    // expo-file-system into this package's bundle. Neither
+    // consistent-type-imports nor verbatimModuleSyntax is enabled repo-wide,
+    // so nothing stops that import losing its `type` keyword, or a future
+    // caller value-importing `mediaFileName` per its own doc comment's
+    // invitation — and NODE_ONLY_PACKAGES above doesn't cover it either,
+    // because @corymbia/media is a workspace package resolved by
+    // resolveWorkspace, not an external one. This walks the barrel exactly
+    // as the assertions above do and asserts the one thing they don't: that
+    // @corymbia/media's own entry point is never among the files reached.
+    const mediaEntry = path.relative(
+      PACKAGE_ROOT,
+      path.resolve(PACKAGE_ROOT, '..', 'media', 'src', 'index.ts'),
+    )
+    expect(walk.files).not.toContain(mediaEntry)
+  })
 })
 
 /**

@@ -7,7 +7,7 @@ import { registerDevice } from '../devices'
 import { listEvents } from '../events'
 import { createRecord, softDeleteRecord } from '../records'
 import type { Fix } from '../records'
-import { attachMedia, listMedia, softDeleteMedia } from '../media'
+import { attachMedia, listMedia, newMediaId, softDeleteMedia } from '../media'
 
 // The one attribute this test file cares about is that a fix is positioned —
 // which fix stamps the events is asserted against `fix` below, not against
@@ -31,10 +31,17 @@ const fix: Fix = {
   gpsTime: '2026-02-11T09:14:03+11:00',
 }
 
+// `.rejects.toThrow()` with no matcher passes on a column typo, a renamed
+// table or a dropped constraint alike — migration-005.test.ts's doc comment
+// spells this out and pins the real form of a SQLite UNIQUE error, which
+// never names an index: `UNIQUE constraint failed: media.file_name`.
+const UNIQUE_FILE_NAME = /UNIQUE constraint failed: media\.file_name/
+
 describe('media', () => {
   let db: Database
   let RECORD: string
   let DEVICE: string
+  let ACTIVITY: string
 
   const photoInput = (
     overrides: Partial<Parameters<typeof attachMedia>[1]> = {},
@@ -84,10 +91,10 @@ describe('media', () => {
       })
     ).id
     const project = await createProject(db, { name: 'Yarra Flats' })
-    const activityId = (
+    ACTIVITY = (
       await createActivity(db, { projectId: project.id, kind: 'survey', name: 'Survey 3' })
     ).id
-    RECORD = (await createRecord(db, { activityId, kind: 'pin', fix, deviceId: DEVICE })).id
+    RECORD = (await createRecord(db, { activityId: ACTIVITY, kind: 'pin', fix, deviceId: DEVICE })).id
   })
 
   afterEach(async () => {
@@ -106,7 +113,12 @@ describe('media', () => {
       expect(second.ordinal).toBe(2)
     })
 
-    it('reuses the position of a removed attachment rather than leaving a hole', async () => {
+    it('reuses the highest live position once the attachment holding it is removed', async () => {
+      // MAX(ordinal) + 1 over live rows only reuses a position when the
+      // removed attachment was the LAST one — delete the middle of three and
+      // the result is 1, 3, 4: a permanent hole. What is guaranteed is
+      // narrower than "no hole ever", which is why this fixture keeps to the
+      // one case where the claim is actually true.
       await attachMedia(db, photoInput({ mediaId: 'med_one' }))
       await attachMedia(db, photoInput({ mediaId: 'med_two' }))
       await softDeleteMedia(db, 'med_two', DEVICE, fix)
@@ -114,10 +126,46 @@ describe('media', () => {
       expect(third.ordinal).toBe(2)
     })
 
-    it('logs a media_added event', async () => {
+    it('gives two simultaneous attaches on the same record distinct positions', async () => {
+      // The house pattern from records.test.ts's "gives two simultaneous
+      // Inbox captures distinct capture numbers": two un-awaited attachMedia
+      // calls fired through Promise.all. nextOrdinal's read-then-write
+      // (MAX(ordinal) + 1, then INSERT) is exactly the shape two interleaved
+      // transactions could both resolve to 1 if the ordinal were read outside
+      // attachMedia's own transaction — nothing here serialises that read
+      // against a concurrent write unless the allocation stays inside it.
+      const [first, second] = await Promise.all([
+        attachMedia(db, photoInput({ mediaId: 'med_one' })),
+        attachMedia(db, photoInput({ mediaId: 'med_two' })),
+      ])
+      expect([first.ordinal, second.ordinal].sort((a, b) => a - b)).toEqual([1, 2])
+    })
+
+    it('starts a second record’s ordinals at 1, independently of the first', async () => {
+      // The fixture above creates exactly one record, so a `nextOrdinal` whose
+      // WHERE clause dropped `record_id = ? AND` would still pass every test
+      // there — ordinals would simply be global, and the first photo on a
+      // second record would silently land on ordinal 2. No unique index
+      // catches that: idx_media_record_ordinal is scoped to (record_id,
+      // ordinal), so a global-ordinal bug is invisible to the schema too.
+      await attachMedia(db, photoInput({ mediaId: 'med_one' }))
+      const other = (
+        await createRecord(db, { activityId: ACTIVITY, kind: 'pin', fix, deviceId: DEVICE })
+      ).id
+      const first = await attachMedia(db, photoInput({ mediaId: 'med_two', recordId: other }))
+      expect(first.ordinal).toBe(1)
+    })
+
+    it('logs a media_added event naming the device, fix and attachment, exactly once', async () => {
+      // `toContain('media_added')` alone passes if the event carried the
+      // wrong device, no detail, or were appended twice — none of which this
+      // repository's contract allows.
       await attachMedia(db, photoInput({ mediaId: 'med_one' }))
       const events = await listEvents(db, RECORD)
-      expect(events.map((e) => e.action)).toContain('media_added')
+      expect(events.filter((e) => e.action === 'media_added')).toHaveLength(1)
+      const added = events.find((e) => e.action === 'media_added')
+      expect(added?.deviceId).toBe(DEVICE)
+      expect(added?.detail).toBe('photo med_one.jpg')
     })
 
     it('stamps the event with the fix it was given', async () => {
@@ -133,6 +181,14 @@ describe('media', () => {
       await expect(attachMedia(db, photoInput({ mediaId: 'med_one' }))).rejects.toThrow(/deleted/i)
     })
 
+    it('refuses to attach to a record that does not exist', async () => {
+      // The house style from records.test.ts: the message names the id, not
+      // just "not found" — /rec_missing does not exist/.
+      await expect(
+        attachMedia(db, photoInput({ mediaId: 'med_one', recordId: 'rec_missing' })),
+      ).rejects.toThrow(/rec_missing does not exist/)
+    })
+
     it('writes nothing at all when the row is refused', async () => {
       // The transaction must not leave an event behind for an attachment that
       // does not exist — the log would then claim media the record never had.
@@ -140,7 +196,7 @@ describe('media', () => {
       const before = (await listEvents(db, RECORD)).length
       await expect(
         attachMedia(db, photoInput({ mediaId: 'med_two', fileName: 'med_one.jpg' })),
-      ).rejects.toThrow()
+      ).rejects.toThrow(UNIQUE_FILE_NAME)
       expect((await listEvents(db, RECORD)).length).toBe(before)
       expect(await listMedia(db, RECORD)).toHaveLength(1)
     })
@@ -148,9 +204,25 @@ describe('media', () => {
 
   describe('listMedia', () => {
     it('returns attachments in display order', async () => {
+      // Ordinals 1 and 2 inserted in that order would leave rowid order and
+      // ordinal order coinciding, which passes whether or not `ORDER BY
+      // ordinal ASC` is even there. A third attachment plus a direct SQL
+      // swap of two ordinals (nothing in this repository writes an UPDATE
+      // ... SET ordinal, so this reaches for raw SQL the way records.test.ts
+      // does to build state the API can't) makes insertion order and ordinal
+      // order genuinely disagree, so the ORDER BY is what the assertion is
+      // actually about.
       await attachMedia(db, photoInput({ mediaId: 'med_one' }))
       await attachMedia(db, voiceInput({ mediaId: 'med_two' }))
-      expect((await listMedia(db, RECORD)).map((m) => m.id)).toEqual(['med_one', 'med_two'])
+      await attachMedia(db, photoInput({ mediaId: 'med_three' }))
+      await db.execute('UPDATE media SET ordinal = 99 WHERE id = ?', ['med_three'])
+      await db.execute('UPDATE media SET ordinal = 3 WHERE id = ?', ['med_two'])
+      await db.execute('UPDATE media SET ordinal = 2 WHERE id = ?', ['med_three'])
+      expect((await listMedia(db, RECORD)).map((m) => m.id)).toEqual([
+        'med_one',
+        'med_three',
+        'med_two',
+      ])
     })
 
     it('leaves out what has been removed', async () => {
@@ -159,12 +231,47 @@ describe('media', () => {
       expect(await listMedia(db, RECORD)).toHaveLength(0)
     })
 
+    it('returns only the requested record’s attachments, not another record’s', async () => {
+      // The one-record fixture leaves listMedia's `record_id = ?` filter free:
+      // deleting it from the WHERE clause would still pass every other test
+      // here, because there is only ever one record's worth of media to
+      // return. A second record is what makes the filter's absence visible —
+      // every attachment would otherwise show up on both.
+      await attachMedia(db, photoInput({ mediaId: 'med_one' }))
+      const other = (
+        await createRecord(db, { activityId: ACTIVITY, kind: 'pin', fix, deviceId: DEVICE })
+      ).id
+      await attachMedia(db, photoInput({ mediaId: 'med_two', recordId: other }))
+
+      expect((await listMedia(db, RECORD)).map((m) => m.id)).toEqual(['med_one'])
+      expect((await listMedia(db, other)).map((m) => m.id)).toEqual(['med_two'])
+    })
+
     it('returns a voice note with its duration and a photo without one', async () => {
       await attachMedia(db, photoInput({ mediaId: 'med_one' }))
       await attachMedia(db, voiceInput({ mediaId: 'med_two', durationMs: 8200 }))
       const [photo, voice] = await listMedia(db, RECORD)
       expect(photo?.durationMs).toBeNull()
       expect(voice?.durationMs).toBe(8200)
+    })
+
+    it('maps every column of the row onto the attachment it returns', async () => {
+      // The test above only ever inspects durationMs. A transposed field in
+      // toAttachment — kind and fileName swapped, say, or byteSize read from
+      // the wrong column — would be invisible to anything here otherwise.
+      const attached = await attachMedia(
+        db,
+        voiceInput({ mediaId: 'med_one', fileName: 'med_one.m4a', byteSize: 51200 }),
+      )
+      const [only] = await listMedia(db, RECORD)
+      expect(only).toEqual(attached)
+      expect(only).toMatchObject({
+        id: 'med_one',
+        recordId: RECORD,
+        kind: 'voice',
+        fileName: 'med_one.m4a',
+        byteSize: 51200,
+      })
     })
   })
 
@@ -178,7 +285,10 @@ describe('media', () => {
         'SELECT deleted_at FROM media WHERE id = ?',
         ['med_one'],
       )
-      expect(row).toBeDefined()
+      // db.first returns T | null, never undefined, so `toBeDefined()` cannot
+      // fail — it (and `not.toBeNull()` on an optional-chained read) both pass
+      // just as well for a row entirely absent from the table.
+      expect(row).not.toBeNull()
       expect(row?.deleted_at).not.toBeNull()
     })
 
@@ -186,13 +296,17 @@ describe('media', () => {
       // There is no 'media_removed' action, and adding one would mean rebuilding
       // the event table's CHECK — which its own append-only triggers forbid. An
       // `edited` event naming what was removed is honest and needs no migration.
-      await attachMedia(db, photoInput({ mediaId: 'med_one' }))
+      await attachMedia(db, photoInput({ mediaId: 'med_one', fileName: 'med_one.jpg' }))
       await softDeleteMedia(db, 'med_one', DEVICE, fix)
       const events = await listEvents(db, RECORD)
       const removal = events.filter((e) => e.action === 'edited').at(-1)
       // The brief's test names this field `message`; `appendEvent`'s actual
       // parameter — and the column `listEvents` reads back — is `detail`.
+      // `detail: 'removed'` alone would pass /removed/i while destroying the
+      // one thing that makes an 'edited' event an acceptable substitute for a
+      // dedicated media_removed action: naming WHAT was removed.
       expect(removal?.detail).toMatch(/removed/i)
+      expect(removal?.detail).toContain('med_one.jpg')
     })
 
     it('is refused for an attachment that is already gone', async () => {
@@ -200,19 +314,29 @@ describe('media', () => {
       await softDeleteMedia(db, 'med_one', DEVICE, fix)
       await expect(softDeleteMedia(db, 'med_one', DEVICE, fix)).rejects.toThrow(/already/i)
     })
+
+    it('is refused for an attachment that does not exist', async () => {
+      await expect(softDeleteMedia(db, 'med_missing', DEVICE, fix)).rejects.toThrow(
+        /med_missing does not exist/,
+      )
+    })
   })
 
-  it('holds a soft-deleted attachment’s filename so it can never be reused', async () => {
-    // idx_media_file_name is unique across every row, deleted included — the
-    // removed file is still on disk under that name. A repository that
-    // allocated ordinals without regard to the file-name index would still
-    // pass every test above; this one pins the schema-level guarantee that
-    // attachMedia must not attempt to defeat by, say, reusing a soft-deleted
-    // row's file name for a new attachment.
-    await attachMedia(db, photoInput({ mediaId: 'med_one', fileName: 'shared.jpg' }))
-    await softDeleteMedia(db, 'med_one', DEVICE, fix)
-    await expect(
-      attachMedia(db, photoInput({ mediaId: 'med_two', fileName: 'shared.jpg' })),
-    ).rejects.toThrow()
+  describe('newMediaId', () => {
+    it('mints a distinct id on every call, prefixed for the kind of thing it names', async () => {
+      const first = newMediaId()
+      const second = newMediaId()
+      expect(first).not.toBe(second)
+      expect(first).toMatch(/^med_/)
+      expect(second).toMatch(/^med_/)
+    })
   })
+
+  // No 'holds a soft-deleted attachment's filename so it can never be reused'
+  // test here. It duplicated migration-005.test.ts's 'refuses a new
+  // attachment claiming a soft-deleted attachment's file name' — same
+  // scenario, same fixture, same ids — while asserting less (a bare
+  // `.rejects.toThrow()` where that test pins the exact UNIQUE constraint).
+  // It tested migration 005, not this repository: no line of media.ts
+  // controls file names, which arrive from the caller.
 })
