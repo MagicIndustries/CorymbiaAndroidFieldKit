@@ -145,6 +145,25 @@ Both are currently untracked on feature branches — they land on `main` via a s
 
 Use `design/logo/logo.svg` for anything that needs a scalable mark; prefer the transparent PNGs for raster use.
 
+## Design reviews and mockups
+
+`docs/design-review/` holds the dated record of design decisions — screenshots, field-check
+notes, and interactive mockups as standalone HTML.
+
+**Build mockups and any other visual artefact as an HTML file in this repo. Do not publish
+them to claude.ai as artifacts.** They belong in version control beside the code they
+describe: reviewable in a diff, present in a fresh clone, and readable without an account.
+An HTML file here opens in a browser with no server and no build step, which is all a mockup
+ever needed.
+
+Write them self-contained — inline the CSS and JS, embed images as data URIs. A webfont link
+is acceptable; anything else that fails offline is not.
+
+A mockup is a record of a decision, not a specification. When one is superseded, say so in
+the file rather than deleting or silently editing it — see
+`2026-09-07-capture-dial-mockup.html`, which keeps a retracted claim visible with its
+retraction beside it.
+
 ## Agent skills
 
 Skills are vendored, not installed globally. `.agents/skills/` holds the actual skill directories (mostly from the `mattpocock/skills` GitHub repo), `skills-lock.json` pins each one by source path and content hash, and `.claude/skills/` contains symlinks pointing back into `.agents/skills/` so Claude Code picks them up.

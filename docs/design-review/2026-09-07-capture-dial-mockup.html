@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stopwatch Capture Control — capture dial mockup, 7 September 2026</title>
+<!--
+  ARCHIVED DESIGN REVIEW. Open this file in a browser; it needs no server and
+  no build. Everything but the webfont link works offline.
+
+  This is the interactive mockup the capture dial was settled against on
+  7 September 2026, after the first countdown-ring build was judged on the S25
+  and rejected ("not what I expected"). It was originally published to
+  claude.ai as a private artifact and moved here so the repo carries its own
+  design record.
+
+  It is a RECORD OF A DECISION, not a live specification. Where it and the code
+  disagree, the code and spec §9.2 win. One thing in it is now known to be
+  wrong and has been left in place rather than quietly edited, because the
+  wrongness is part of the history:
+
+    The footer claims "a good fix lands exactly on the target". Spec §9.2.1
+    retracted that. The crosshair is pinned to 1.4 m — this hardware's measured
+    floor — while `gradeAccuracy` calls anything under 5 m good, so a green
+    circle resting well outside the crosshair is what a NORMAL capture looks
+    like. That gap is exactly why the two completion levels (settled and
+    locked) exist. The true statement is: a fix that reaches the hardware floor
+    lands on the crosshair; one that stops short draws outside it.
+
+  What shipped differs from this mockup in ways the device forced:
+    - the dial is 300dp, raised from 260 after judging it at arm's length
+    - the crosshair arms run 6px past their ring, so it reads as a reticule
+      rather than a plus somebody might try to tap
+    - reduced motion renders the locked state with no animation started at all,
+      rather than a mid-capture still
+-->
+<style>
+  :root {
+    --ground: #F2F4F3;
+    --raised: #FFFFFF;
+    --sunken: #E4E9E7;
+    --rule: #CBD5D1;
+    --ink: #14201C;
+    --dim: #5C6F69;
+    --good: #10836A;
+    --fair: #9A6B10;
+    --poor: #B23A21;
+    --action: #4E9B22;
+
+    /* The device face keeps the product's dark palette in both page themes:
+       this is a mockup of a screen, and that screen is dark. */
+    --dev-ground: #0E1519;
+    --dev-sunken: #1E2C36;
+    --dev-rule: #2C3E4A;
+    --dev-ink: #E6EDEA;
+    --dev-dim: #8FA3AD;
+    --dev-action: #98D455;
+    --dev-action-ink: #0B2A05;
+
+    --sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0B1114;
+      --raised: #131C22;
+      --sunken: #1A252D;
+      --rule: #2C3E4A;
+      --ink: #E6EDEA;
+      --dim: #8FA3AD;
+      --good: #30CF9F;
+      --fair: #E8B33D;
+      --poor: #E86A4D;
+      --action: #98D455;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0B1114;
+    --raised: #131C22;
+    --sunken: #1A252D;
+    --rule: #2C3E4A;
+    --ink: #E6EDEA;
+    --dim: #8FA3AD;
+    --good: #30CF9F;
+    --fair: #E8B33D;
+    --poor: #E86A4D;
+    --action: #98D455;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground); color: var(--ink);
+    font-family: var(--sans); line-height: 1.55;
+    margin: 0; padding: 28px 20px 72px;
+  }
+  img { max-width: 100%; }
+  [hidden] { display: none !important; }
+
+  .wrap { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 30px; }
+
+  header { display: flex; flex-direction: column; gap: 10px; }
+  h1 { font-size: 27px; font-weight: 700; letter-spacing: -0.5px; margin: 0; text-wrap: balance; }
+  .standfirst { color: var(--dim); font-size: 15px; margin: 0; max-width: 52ch; }
+
+  .archived {
+    margin: 0; padding: 12px 14px; font-size: 13px; color: var(--dim);
+    background: var(--raised); border: 1px solid var(--rule);
+    border-left: 3px solid var(--poor); border-radius: 8px;
+  }
+  .archived strong { color: var(--ink); }
+
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 12px; background: var(--raised);
+    border: 1px solid var(--rule); border-radius: 10px;
+  }
+  .controls .label {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 1.4px;
+    text-transform: uppercase; color: var(--dim); margin-right: 2px;
+  }
+  button.chip {
+    font-family: var(--sans); font-size: 13px; font-weight: 600;
+    color: var(--ink); background: var(--sunken);
+    border: 1px solid var(--rule); border-radius: 999px;
+    padding: 7px 14px; cursor: pointer;
+  }
+  button.chip[aria-pressed="true"] { background: var(--ink); color: var(--ground); border-color: var(--ink); }
+  button.chip:focus-visible { outline: 2px solid var(--action); outline-offset: 2px; }
+
+  .motion-note {
+    margin: 0; padding: 12px 14px; font-size: 14px; color: var(--ink);
+    background: var(--raised); border: 1px solid var(--rule);
+    border-left: 3px solid var(--fair); border-radius: 8px;
+  }
+
+  .device {
+    background: var(--dev-ground); border: 1px solid var(--dev-rule);
+    border-radius: 22px; padding: 18px 16px 20px;
+    display: flex; flex-direction: column; gap: 14px; color: var(--dev-ink);
+  }
+
+  .coords {
+    font-family: var(--mono); font-size: 12px; color: var(--dev-dim);
+    display: flex; justify-content: space-between; gap: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dial { display: flex; justify-content: center; }
+  .dial svg { display: block; width: 300px; height: 300px; max-width: 100%; }
+
+  .centre { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .grade { font-family: var(--mono); font-size: 11px; letter-spacing: 1.8px; text-transform: uppercase; }
+  .accuracy {
+    font-size: 48px; font-weight: 700; letter-spacing: -1.4px;
+    font-variant-numeric: tabular-nums; line-height: 1.05;
+  }
+  .unit { font-size: 20px; font-weight: 600; color: var(--dev-dim); }
+
+  .readout {
+    display: flex; justify-content: space-between; gap: 10px;
+    font-family: var(--mono); font-size: 12px; color: var(--dev-dim);
+    font-variant-numeric: tabular-nums;
+    border-top: 1px solid var(--dev-rule); padding-top: 10px;
+  }
+  .readout b { color: var(--dev-ink); font-weight: 600; }
+
+  .verdict-row { min-height: 22px; display: flex; align-items: center; justify-content: center; }
+  .verdict { font-size: 14px; color: var(--dev-ink); text-align: center; margin: 0; }
+
+  .accept {
+    font-family: var(--sans); font-size: 16px; font-weight: 700; letter-spacing: 0.3px;
+    text-align: center; background: var(--dev-action); color: var(--dev-action-ink);
+    border: none; border-radius: 12px; padding: 20px; cursor: pointer;
+  }
+  .accept:focus-visible { outline: 2px solid var(--dev-ink); outline-offset: 2px; }
+
+  .ask {
+    background: var(--raised); border: 1px solid var(--rule);
+    border-left: 3px solid var(--action); border-radius: 10px;
+    padding: 16px 18px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .ask h2 { font-size: 16px; font-weight: 600; margin: 0; }
+  .ask ul { margin: 0; padding-left: 18px; color: var(--dim); font-size: 14px; }
+  .ask li { margin-bottom: 6px; }
+  .ask li:last-child { margin-bottom: 0; }
+
+  footer { color: var(--dim); font-size: 13px; border-top: 1px solid var(--rule); padding-top: 16px; }
+  footer p { margin: 0 0 6px; }
+  footer .retracted { color: var(--poor); }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <h1>Closing on the point</h1>
+    <p class="standfirst">
+      The ring is the clock. The filled circle is the accuracy itself — a real radius, shrinking
+      onto the crosshair as the fix converges. Driven by the series measured on the S25:
+      7.5&nbsp;m down to 1.4&nbsp;m at one reading a second.
+    </p>
+    <p class="archived">
+      <strong>Archived, 7 September 2026.</strong> The mockup the capture dial was settled
+      against. Kept as a record of the decision, not as a specification — where this and the
+      code disagree, the code and spec §9.2 win. See the note in this file's source for what
+      shipped differently and for the one claim below that was later retracted.
+    </p>
+  </header>
+
+  <div class="controls">
+    <span class="label">Fix</span>
+    <button class="chip" data-grade="good" aria-pressed="true">Good</button>
+    <button class="chip" data-grade="fair" aria-pressed="false">Fair</button>
+    <button class="chip" data-grade="poor" aria-pressed="false">Poor</button>
+    <button class="chip" id="freeze" style="margin-left:auto">Freeze</button>
+    <button class="chip" id="replay">Play</button>
+  </div>
+
+  <p class="motion-note" id="motion-note" hidden>
+    Your system asks for reduced motion, so this is showing a still frame from mid-capture.
+    <strong>Play</strong> runs it anyway — the motion is the thing being judged.
+  </p>
+
+  <div class="device">
+    <div class="coords"><span>&minus;38.036378</span><span>147.600743</span></div>
+
+    <div class="dial">
+      <svg viewBox="0 0 300 300" role="img" aria-label="Countdown ring with an accuracy circle closing onto a crosshair">
+        <!-- The clock -->
+        <circle cx="150" cy="150" r="130" fill="none" stroke="#1E2C36" stroke-width="11"/>
+        <circle id="ring" cx="150" cy="150" r="130" fill="none" stroke-width="11"
+                stroke-linecap="round" transform="rotate(-90 150 150)"/>
+
+        <!-- The accuracy, as a real radius -->
+        <circle id="blob" cx="150" cy="150" r="110" fill-opacity="0.15"/>
+        <circle id="halo" cx="150" cy="150" r="110" fill="none" stroke-width="1.75" opacity="0.5"/>
+
+        <!-- The confirming ripple: two rings out, the second trailing the first -->
+        <circle id="flare2" cx="150" cy="150" r="26" fill="none" stroke-width="3" opacity="0"/>
+        <circle id="flare" cx="150" cy="150" r="26" fill="none" stroke-width="3" opacity="0"/>
+
+        <!-- The target: sized to the sharpest this hardware reaches -->
+        <g id="reticle" stroke="#8FA3AD" stroke-width="1.5" fill="none">
+          <circle cx="150" cy="150" r="26"/>
+          <line x1="150" y1="112" x2="150" y2="136"/>
+          <line x1="150" y1="164" x2="150" y2="188"/>
+          <line x1="112" y1="150" x2="136" y2="150"/>
+          <line x1="164" y1="150" x2="188" y2="150"/>
+          <circle id="reticle-dot" cx="150" cy="150" r="2.25" fill="#8FA3AD" stroke="none"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="centre">
+      <span class="grade" id="grade">GOOD FIX</span>
+      <span class="accuracy">&plusmn;<span id="acc">7.5</span><span class="unit"> m</span></span>
+    </div>
+
+    <div class="readout">
+      <span><b id="secs">15</b> s left</span>
+      <span><b id="n">1</b> readings</span>
+      <span><b id="imp">0.0</b> m sharper</span>
+    </div>
+
+    <div class="verdict-row"><p class="verdict" id="verdict">Still improving — keep standing still.</p></div>
+    <button class="accept">ACCEPT NOW</button>
+  </div>
+
+  <section class="ask">
+    <h2>What to judge, at arm's length</h2>
+    <ul>
+      <li>The lock: the crosshair lights, one flare goes out, and the label reads
+          <strong>LOCKED ON</strong>. Is it unmistakable at a glance — and is it too much?</li>
+      <li>Do the ring and the circle read as one thing converging, or two things racing?</li>
+      <li>Switch to <strong>Poor</strong>: the circle stops short and never locks. Is that
+          legible as &ldquo;this one never settled&rdquo;?</li>
+      <li>Anything drawing the eye before the accuracy and the seconds is too loud.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <p>The crosshair is sized to 1.4&nbsp;m — the sharpest the S25 reached outdoors on 7 September,
+       clear sky. So the radius always means metres,
+       <span class="retracted">and a good fix lands exactly on the target while a worse one stops
+       outside it</span>.</p>
+    <p class="retracted"><strong>Retracted.</strong> Spec §9.2.1 corrected that sentence: the
+       crosshair is at 1.4&nbsp;m while anything under 5&nbsp;m grades as good, so a green circle
+       resting well outside the crosshair is what a normal capture looks like — which is why the
+       settled and locked completion levels exist. A fix that reaches the <em>hardware floor</em>
+       lands on the crosshair; one that stops short draws outside it.</p>
+    <p>Fifteen seconds of capture, replayed in about seven.</p>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    // The real thing, from the field transcript: averaged accuracy per reading.
+    var SERIES = [7.5,5.2,4.2,3.5,3.1,2.7,2.5,2.3,2.1,2.0,1.8,1.7,1.7,1.6,1.6,1.5,1.5,1.5,1.4,1.4,1.4];
+    var CAP = 15, DURATION = 7000, R = 130, CIRC = 2 * Math.PI * R;
+
+    // The crosshair's radius, and the accuracy it stands for: the floor this
+    // hardware actually reaches. Everything else is scaled against that pair,
+    // so a drawn radius always means the same number of metres.
+    var TARGET_R = 26, TARGET_M = 1.4, OUTER_R = 118, OUTER_M = 7.5;
+
+    var GRADES = {
+      good: { colour: '#30CF9F', word: 'GOOD FIX', floor: 1.4 },
+      fair: { colour: '#E8B33D', word: 'FAIR FIX', floor: 5.0 },
+      poor: { colour: '#E86A4D', word: 'POOR FIX', floor: 12.0 }
+    };
+
+    var grade = 'good';
+    var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var rafId = null, gapId = null, startedAt = null, frozenAt = null;
+
+    /* The lock. The circle reaching the crosshair means the fix has converged as
+       far as this receiver takes it, so the target stops being something aimed
+       at and becomes something hit: the reticle lights in the grade colour, one
+       flare is thrown, and the word says so — colour never carries it alone
+       (doctrine rule 9). A poor fix never gets here, which is the point. */
+    var LOCK_TOLERANCE_PX = 1.5, FLARE_MS = 940;
+    var RIPPLE_STAGGER_MS = 190, RIPPLE_REACH_PX = 84;
+    var lockedSince = null;
+
+    // One ring of the ripple. `delay` staggers the second behind the first.
+    function ripple(el, age, delay, colour) {
+      var a = age - delay;
+      if (a < 0 || a >= FLARE_MS) { el.setAttribute('opacity', '0'); return; }
+      var p = a / FLARE_MS;
+      var out = 1 - Math.pow(1 - p, 2.2);       // fast out, easing as it goes
+      el.setAttribute('r', TARGET_R + out * RIPPLE_REACH_PX);
+      el.setAttribute('stroke', colour);
+      el.setAttribute('stroke-width', String(6.5 - out * 5));
+      // Hold near full for the first third, then fall away.
+      el.setAttribute('opacity', String(p < 0.32 ? 0.95 : 0.95 * Math.pow(1 - (p - 0.32) / 0.68, 1.4)));
+    }
+
+    var $ = function (id) { return document.getElementById(id); };
+
+    // Scale the measured curve so each grade settles where its name says.
+    function accuracyAt(t) {
+      var i = Math.min(SERIES.length - 1, Math.floor(t * (SERIES.length - 1)));
+      var scale = GRADES[grade].floor / SERIES[SERIES.length - 1];
+      return SERIES[i] * scale;
+    }
+
+    // Metres to pixels, on a log scale anchored so TARGET_M lands exactly on
+    // the crosshair. A fix that reaches the floor therefore arrives on the
+    // target; a worse one stops outside it, which is the honest reading of
+    // what happened.
+    function radiusFor(metres) {
+      var span = Math.log(OUTER_M / TARGET_M);
+      var f = Math.log(Math.max(metres, 0.2) / TARGET_M) / span;
+      return Math.max(6, Math.min(OUTER_R + 12, TARGET_R + f * (OUTER_R - TARGET_R)));
+    }
+
+    function paint(t) {
+      var g = GRADES[grade];
+      var acc = accuracyAt(t);
+      var secs = Math.max(0, Math.ceil(CAP - t * CAP));
+      var n = Math.max(1, Math.round(t * (SERIES.length - 1)) + 1);
+      var improved = Math.max(0, accuracyAt(0) - acc);
+      var r = radiusFor(acc);
+
+      var ring = $('ring');
+      ring.setAttribute('stroke', g.colour);
+      ring.setAttribute('stroke-dasharray', CIRC);
+      ring.setAttribute('stroke-dashoffset', CIRC * t);
+
+      $('blob').setAttribute('fill', g.colour);
+      $('halo').setAttribute('stroke', g.colour);
+
+      // Locked once the circle has closed onto the crosshair.
+      var locked = r <= TARGET_R + LOCK_TOLERANCE_PX;
+      if (locked && lockedSince === null) lockedSince = performance.now();
+      if (!locked) lockedSince = null;
+
+      var reticleColour = locked ? g.colour : '#8FA3AD';
+      $('reticle').setAttribute('stroke', reticleColour);
+      $('reticle').setAttribute('stroke-width', locked ? 2.25 : 1.5);
+      $('reticle-dot').setAttribute('fill', reticleColour);
+
+      var age = lockedSince === null ? Infinity : performance.now() - lockedSince;
+      var settle = locked ? Math.min(1, age / FLARE_MS) : 0;
+      var ease = 1 - Math.pow(1 - settle, 3);
+
+      /* The circle answers for itself as it lands: it snaps briefly inside the
+         crosshair like something catching, then fills and firms. Arriving at the
+         right size and doing nothing was the whole complaint — the moment has to
+         be visible from peripheral vision, not inferred from a radius. */
+      var snap = locked ? 4.5 * Math.sin(Math.PI * Math.min(1, age / 260)) : 0;
+      $('blob').setAttribute('r', Math.max(4, r - snap));
+      $('halo').setAttribute('r', Math.max(4, r - snap));
+      $('blob').setAttribute('fill-opacity', String(0.15 + 0.34 * ease));
+      $('halo').setAttribute('stroke-width', String(1.75 + 2.25 * ease));
+      $('halo').setAttribute('opacity', String(0.5 + 0.5 * ease));
+
+      /* Two rings out as it lands, the second trailing the first. A single ring
+         read as a flicker; a pair reads as a ripple, because the eye gets a
+         second chance at it. It still happens once and then stops — a
+         confirmation, not an alarm on a screen someone watches all day. */
+      ripple($('flare'), age, 0, g.colour);
+      ripple($('flare2'), age, RIPPLE_STAGGER_MS, g.colour);
+
+      $('grade').textContent = locked ? g.word + ' · LOCKED ON' : g.word;
+      $('grade').style.color = g.colour;
+      $('acc').textContent = acc.toFixed(1);
+      $('secs').textContent = secs;
+      $('n').textContent = n;
+      $('imp').textContent = improved.toFixed(1);
+      $('verdict').textContent = locked
+        ? 'Locked on — this is as sharp as it gets here.'
+        : (t > 0.82 ? 'About as sharp as it gets here.'
+                    : 'Still improving — keep standing still.');
+    }
+
+    function stop() {
+      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+      if (gapId !== null) { clearTimeout(gapId); gapId = null; }
+    }
+
+    function frame(now) {
+      if (startedAt === null) startedAt = now;
+      var t = Math.min(1, (now - startedAt) / DURATION);
+      paint(t);
+      if (t < 1) {
+        rafId = requestAnimationFrame(frame);
+      } else {
+        rafId = null; startedAt = null;
+        gapId = setTimeout(function () {
+          gapId = null; rafId = requestAnimationFrame(frame);
+        }, 1400);
+      }
+    }
+
+    // `force` is an explicit request to see the motion. Reduced motion stops
+    // this page animating *at* someone on load; it does not mean refusing an
+    // animation they have just asked for, on a page that exists to judge one.
+    function play(force) {
+      stop();
+      frozenAt = null; startedAt = null;
+      $('freeze').textContent = 'Freeze';
+      if (reduced && !force) { paint(0.55); return; }
+      rafId = requestAnimationFrame(frame);
+    }
+
+    function freeze(t) {
+      stop();
+      frozenAt = t;
+      paint(t);
+      $('freeze').textContent = 'Resume';
+    }
+
+    function elapsed() {
+      if (frozenAt !== null) return frozenAt;
+      if (startedAt === null) return 0;
+      return Math.min(1, (performance.now() - startedAt) / DURATION);
+    }
+
+    document.querySelectorAll('.chip[data-grade]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        grade = b.dataset.grade;
+        document.querySelectorAll('.chip[data-grade]').forEach(function (o) {
+          o.setAttribute('aria-pressed', String(o === b));
+        });
+        if (frozenAt !== null) paint(frozenAt);
+        else if (reduced && rafId === null && gapId === null) paint(0.55);
+      });
+    });
+
+    $('replay').addEventListener('click', function () { play(true); });
+
+    $('freeze').addEventListener('click', function () {
+      if (frozenAt === null) freeze(elapsed());
+      else play(true);
+    });
+
+    // ACCEPT NOW ends the wait where it stands, exactly as the real control does.
+    document.querySelectorAll('.accept').forEach(function (b) {
+      b.addEventListener('click', function () { freeze(elapsed()); });
+    });
+
+    if (reduced) $('motion-note').hidden = false;
+    play(false);
+  })();
+</script>
+
+</body>
+</html>
