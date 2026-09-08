@@ -1167,8 +1167,16 @@ instructions and data aloud.
 
 ### 12.1 Storage
 
-Files live in **app-owned storage** under a project directory, named by record UUID plus an
+Files live in **app-owned storage** in one flat media directory, named by record UUID plus an
 index.
+
+**Flat, not under a project directory.** An earlier draft put files under the project they
+belonged to. That cannot hold once records are refilable: filing an Inbox record, or moving
+one between activities, would have to move its files too, and a half-finished move on a dying
+battery leaves rows pointing at files that are no longer there. It is the same failure §12.1
+already rejects below for naming files by title — a stored path that depends on mutable
+metadata — arrived at one level up. The record UUID never changes, so the path never has to.
+Project structure is applied at export time, where human-readable naming already happens.
 
 **Not a public shared folder.** Scoped storage on Android 10+ prevents free writes to
 arbitrary public directories, and anything placed there is swept into the gallery and cloud
