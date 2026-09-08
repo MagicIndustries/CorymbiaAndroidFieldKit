@@ -175,6 +175,21 @@ export const field = {
    * short of what the device can do.
    */
   dialSettledGap: 7,
+  /**
+   * The side of a square media tile in `MediaStrip`, in dp — the ergonomic
+   * question it answers is "how big does an attached photo's thumbnail need
+   * to be to actually be *recognisable* as that photo, at arm's length,
+   * while staying a control she can hit one-handed and gloved without
+   * looking closely." `touch.comfortable` (56dp) covers the second half of
+   * that alone — it is where `InputAffordanceRow`'s glyph-and-label tiles
+   * stop, and a bare label needs no more — but a photo shrunk to 56dp reads
+   * as a coloured square, not a photo, which defeats the reason `MediaStrip`
+   * shows a thumbnail at all rather than a filename. Sized above
+   * `touch.comfortable`, short of `field.control` (72dp, reserved for the
+   * primary capture boxes) so a row of these never reads as more capture
+   * controls.
+   */
+  mediaTile: 64,
 } as const
 
 /**

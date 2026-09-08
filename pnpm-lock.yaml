@@ -212,6 +212,9 @@ importers:
 
   packages/ui:
     dependencies:
+      '@corymbia/media':
+        specifier: workspace:*
+        version: link:../media
       '@corymbia/tokens':
         specifier: workspace:*
         version: link:../tokens
