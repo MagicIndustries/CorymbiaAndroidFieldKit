@@ -1,13 +1,13 @@
 import { openTestDatabase } from '../../db/better-sqlite3'
 import { migrate } from '../../db/migrate'
-import type { Database } from '../../db/port'
+import type { Database, SqlValue } from '../../db/port'
 import { createActivity } from '../activities'
 import { createProject } from '../projects'
 import { registerDevice } from '../devices'
 import { listEvents } from '../events'
 import { createRecord, softDeleteRecord } from '../records'
 import type { Fix } from '../records'
-import { attachMedia, listMedia, newMediaId, softDeleteMedia } from '../media'
+import { AttachmentPersistError, attachMedia, listMedia, newMediaId, softDeleteMedia } from '../media'
 
 // The one attribute this test file cares about is that a fix is positioned —
 // which fix stamps the events is asserted against `fix` below, not against
@@ -36,6 +36,65 @@ const fix: Fix = {
 // spells this out and pins the real form of a SQLite UNIQUE error, which
 // never names an index: `UNIQUE constraint failed: media.file_name`.
 const UNIQUE_FILE_NAME = /UNIQUE constraint failed: media\.file_name/
+
+/**
+ * The rejection a call produced, as a value to make assertions about.
+ *
+ * `.rejects.toThrow(AttachmentPersistError)` would do for the two positive
+ * cases below, but not for the negative one: the whole property being pinned
+ * is that a PRE-commit refusal is *not* that class, and `.rejects` has no
+ * form that asserts the class of a rejection it must still require to
+ * happen. Capturing the value is the one shape that says both things —
+ * "this rejected" and "with something that is not an AttachmentPersistError"
+ * — without a cast or a non-null assertion.
+ */
+async function rejectionOf(call: Promise<unknown>): Promise<unknown> {
+  const outcome: { rejected: false } | { rejected: true; error: unknown } = await call.then(
+    (): { rejected: false } => ({ rejected: false }),
+    (error: unknown): { rejected: true; error: unknown } => ({ rejected: true, error }),
+  )
+  if (!outcome.rejected) {
+    throw new Error('Expected the call to reject, but it resolved.')
+  }
+  return outcome.error
+}
+
+/**
+ * `base`, with `attachMedia`'s post-commit confirming re-read — and only that
+ * read — made to fail.
+ *
+ * `attachMedia` runs three `first` queries: the record lookup and
+ * `nextOrdinal`'s `MAX(ordinal)`, both inside the transaction, and then the
+ * `SELECT ... FROM media WHERE id = ?` that runs after it has committed. Only
+ * the last one carries `captured_at` in its projection (see `SELECT` in
+ * `media.ts`), so matching on that column is what picks out the post-commit
+ * read without also catching either in-transaction one — or
+ * `softDeleteMedia`'s own `... FROM media WHERE id = ?`, whose projection
+ * has no `captured_at` either.
+ *
+ * Everything else delegates to the real database, so the transaction really
+ * commits: the row and its event are genuinely on disk when the failure is
+ * raised, which is the whole state these tests exist to describe.
+ */
+function withFailingReadBack(base: Database, outcome: 'throws' | 'returns nothing'): Database {
+  const isConfirmingReadBack = (sql: string): boolean =>
+    sql.includes('FROM media') && sql.includes('WHERE id = ?') && sql.includes('captured_at')
+
+  return {
+    execute: (sql: string, params?: SqlValue[]) => base.execute(sql, params),
+    all: <T,>(sql: string, params?: SqlValue[]) => base.all<T>(sql, params),
+    first: <T,>(sql: string, params?: SqlValue[]): Promise<T | null> => {
+      if (isConfirmingReadBack(sql)) {
+        return outcome === 'throws'
+          ? Promise.reject(new Error('disk I/O error'))
+          : Promise.resolve(null)
+      }
+      return base.first<T>(sql, params)
+    },
+    transaction: <T,>(fn: () => Promise<T>) => base.transaction(fn),
+    close: () => base.close(),
+  }
+}
 
 describe('media', () => {
   let db: Database
@@ -200,6 +259,63 @@ describe('media', () => {
       expect((await listEvents(db, RECORD)).length).toBe(before)
       expect(await listMedia(db, RECORD)).toHaveLength(1)
     })
+
+    /**
+     * `AttachmentPersistError` is the only thing that carries, across the
+     * package boundary, the distinction the whole file-then-row ordering
+     * rests on: a failure from BEFORE the commit means the caller should
+     * delete the file it wrote, and a failure from AFTER it means the caller
+     * must not, because the row already exists and would be left naming
+     * bytes that no longer do.
+     *
+     * `useAttachMedia.ts`'s rollback is that caller, and it tells the two
+     * apart with `instanceof`. Nothing here used to assert the class at all:
+     * replacing both `throw new AttachmentPersistError(...)` in `media.ts`
+     * with `throw new Error(...)` left every suite in this repository green,
+     * while turning the consumer's check into a no-match — the catch would
+     * delete the file behind a committed row. The three cases below are what
+     * make that mutation fail, and the third is the one that actually pins
+     * the property rather than the two happy-path classes: a pre-commit
+     * refusal must NOT be this class, which today holds only because of
+     * where the `try` block happens to sit.
+     */
+    it('reports a committed attachment whose confirming re-read throws as an AttachmentPersistError', async () => {
+      const error = await rejectionOf(
+        attachMedia(withFailingReadBack(db, 'throws'), photoInput({ mediaId: 'med_one' })),
+      )
+
+      expect(error).toBeInstanceOf(AttachmentPersistError)
+      // And the row really is committed — which is what makes deleting the
+      // file behind it the wrong response, and this class the right one.
+      expect((await listMedia(db, RECORD)).map((m) => m.id)).toEqual(['med_one'])
+    })
+
+    it('reports a committed attachment whose confirming re-read comes back empty as an AttachmentPersistError', async () => {
+      const error = await rejectionOf(
+        attachMedia(withFailingReadBack(db, 'returns nothing'), photoInput({ mediaId: 'med_one' })),
+      )
+
+      expect(error).toBeInstanceOf(AttachmentPersistError)
+      expect((await listMedia(db, RECORD)).map((m) => m.id)).toEqual(['med_one'])
+    })
+
+    it('does not report a refusal from before the commit as an AttachmentPersistError', async () => {
+      // The negative half, and the only one that pins the distinction as a
+      // property rather than as two hard-coded classes: this refusal happens
+      // inside the transaction, nothing is committed, and the caller MUST
+      // delete the file it already wrote. A build that raised
+      // `AttachmentPersistError` here — the plausible mistake of "this is
+      // attachMedia's error class, so this is what attachMedia throws" —
+      // would leave an orphaned file behind on every missing-record refusal,
+      // and every other test in this file would still pass.
+      const error = await rejectionOf(
+        attachMedia(db, photoInput({ mediaId: 'med_one', recordId: 'rec_missing' })),
+      )
+
+      expect(error).toBeInstanceOf(Error)
+      expect(error).not.toBeInstanceOf(AttachmentPersistError)
+      expect(await listMedia(db, RECORD)).toHaveLength(0)
+    })
   })
 
   describe('listMedia', () => {
@@ -277,8 +393,9 @@ describe('media', () => {
 
   describe('softDeleteMedia', () => {
     it('flags the row and leaves it in the table', async () => {
-      // The file is still on disk until a purge, and the row is what the purge
-      // finds it by.
+      // The file is still on disk — permanently, since the purge that would
+      // clear it is not built — and the row is the only thing that says which
+      // attachment those bytes were.
       await attachMedia(db, photoInput({ mediaId: 'med_one' }))
       await softDeleteMedia(db, 'med_one', DEVICE, fix)
       const row = await db.first<{ deleted_at: string | null }>(
