@@ -36,8 +36,10 @@ describe('the in-memory media store', () => {
   })
 
   it('is silent about deleting something that is already gone', async () => {
-    // Purge runs over rows, and a row can outlive its file (an interrupted
-    // save, a restored backup). Throwing there would strand every later row.
+    // A row can outlive its file (an interrupted save, a restored backup),
+    // so any caller walking rows and removing their files — the purge spec
+    // §12.1 describes, whenever it is built; `useAttachMedia`'s rollback
+    // today — must not be stranded by the first one that is already gone.
     const store = createMemoryStore({})
     await expect(store.remove('med_a1.jpg')).resolves.toBeUndefined()
   })

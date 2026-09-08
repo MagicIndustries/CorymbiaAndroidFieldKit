@@ -22,10 +22,14 @@ import type { Migration } from '../db/migrate'
  * no file's name depends on it.
  *
  * **Deletion is soft, and that is load-bearing.** The row is flagged and the
- * file survives until a deliberate purge in settings. `media_is_never_hard_deleted`
- * is what makes that true rather than conventional: a hard DELETE would lose
- * the only record that a file on disk was ever attached to anything, and the
- * purge would then have nothing to find it by. Both triggers here need
+ * file stays on disk. `media_is_never_hard_deleted` is what makes that true
+ * rather than conventional: a hard DELETE would lose the only record that a
+ * file on disk was ever attached to anything, and nothing could then find
+ * that file by anything but its bare name in a directory listing. That
+ * matters most for a purge — and the purge spec §12.1 puts in settings is
+ * **not yet built**, so for now the flagged row is what keeps a removed
+ * attachment's bytes accounted for at all, while nothing ever clears them
+ * (see `docs/media-storage.md` §5). Both triggers here need
  * `PRAGMA recursive_triggers = ON` for the same reason migration 003's do —
  * with it off, `INSERT OR REPLACE` deletes the conflicting row and SQLite
  * SKIPS the BEFORE DELETE trigger for that deletion.

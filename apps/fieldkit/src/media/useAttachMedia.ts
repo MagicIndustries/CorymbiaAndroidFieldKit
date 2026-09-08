@@ -31,14 +31,20 @@ const ambientReader: AmbientReader = ambientCache
  * **Ordering, and why it is this way round.** A row without its file is a
  * broken record: the strip shows a tile, the tile shows nothing, and export
  * produces a manifest entry pointing at a missing file. A file without its
- * row is garbage: invisible, harmless, cleanable by a purge. So this always
- * mints the media id, derives the filename, writes the bytes, and only then
- * inserts the row — and if the insert is refused, removes the file it just
- * wrote. If that removal also fails, the insert's own error is what gets
- * reported: a leaked file is recoverable by a purge, and the insert failure
- * is the one thing she needs to hear about right now. A crash between the
- * write and the insert leaves an orphaned file — the one failure mode this
- * ordering chooses, because the alternative (a row with no file) is worse.
+ * row is garbage: invisible, and damaging to nothing but free space. So this
+ * always mints the media id, derives the filename, writes the bytes, and only
+ * then inserts the row — and if the insert is refused, removes the file it
+ * just wrote. If that removal also fails, the insert's own error is what gets
+ * reported: a leaked file costs storage, and the insert failure is the one
+ * thing she needs to hear about right now. A crash between the write and the
+ * insert leaves an orphaned file — the one failure mode this ordering
+ * chooses, because the alternative (a row with no file) is worse.
+ *
+ * **Nothing ever collects those orphans.** Spec §12.1's purge is not built —
+ * no settings route, no reconciliation — so every file this path abandons,
+ * and every soft-deleted attachment's bytes, stay on the device for good.
+ * That is the accepted cost of the ordering above rather than a temporary
+ * one, and `docs/media-storage.md` §5 is where it is written down.
  *
  * `attachMedia` takes the media id rather than minting its own, precisely so
  * this can derive the filename and write the bytes before the row exists —
@@ -132,10 +138,11 @@ async function attachOne(
     try {
       await mediaStore.remove(fileName)
     } catch {
-      // A rollback failure here is a leaked file — recoverable later by a
-      // purge. `insertError`, thrown below, is the failure she needs to
-      // hear about now: a photo or voice note she believes was saved and
-      // was not.
+      // A rollback failure here leaks a file permanently — nothing collects
+      // it, because the purge is not built (see the top of this file).
+      // `insertError`, thrown below, is still the failure she needs to hear
+      // about now: a photo or voice note she believes was saved and was not.
+      // Storage she will not miss today outranks a record she will.
     }
     throw insertError
   }

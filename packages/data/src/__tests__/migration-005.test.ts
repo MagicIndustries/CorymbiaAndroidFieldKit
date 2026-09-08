@@ -314,7 +314,7 @@ describe('the media table', () => {
     // attachment at it is soft-deleted" below: the ordinal is display order
     // alone, so reusing one after a soft delete is correct. idx_media_file_name
     // must NOT get the same treatment — the file it names is still sitting on
-    // disk, awaiting a deliberate purge, and handing its name to a new capture
+    // disk, indefinitely (nothing clears it), and handing its name to a new capture
     // overwrites those bytes. One record's photo would silently become
     // another's, with both rows still looking correct. Adding
     // `WHERE deleted_at IS NULL` here — "make the two indexes consistent" — is
@@ -355,9 +355,10 @@ describe('the media table', () => {
   })
 
   it('refuses to let a media row be hard-deleted', async () => {
-    // Deletion is soft (spec §12.1): the row is flagged and the file survives
-    // until a deliberate purge. A hard DELETE loses the record that the file
-    // on disk was ever attached to anything, so the purge can never find it.
+    // Deletion is soft (spec §12.1): the row is flagged and the file stays on
+    // disk. A hard DELETE loses the record that the file on disk was ever
+    // attached to anything — so nothing, including the purge spec §12.1 puts
+    // in settings and this branch has not built, could ever find it again.
     await insertMedia(db, { id: 'med_one' })
     await expect(db.execute('DELETE FROM media WHERE id = ?', ['med_one'])).rejects.toThrow(
       /media_is_never_hard_deleted/,

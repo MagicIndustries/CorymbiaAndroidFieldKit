@@ -66,7 +66,7 @@ the OS reclaiming memory — leaves whichever step already ran and abandons the 
 first means that gap leaves an **orphaned file with no row**: bytes sitting in the media
 directory that nothing in the database points at. Row first would mean the opposite gap, a
 **row with no file behind it**. The two are not equally bad. An orphaned file is invisible and
-harmless — it costs a little storage until a deliberate purge finds and clears it, and nothing
+does no damage to the data — it costs storage, permanently for now (§5), and nothing
 that reads the database ever notices it exists. A row with no file is a broken record: the
 media strip renders a tile, the tile has nothing to show, and an export bundle produces a
 manifest entry pointing at a file that was never there. File-then-row is the ordering under
@@ -78,20 +78,29 @@ that if the insert is refused — the unique file-name collision, most obviously
 transaction's rollback is what a test can actually observe undoing. If the row insert on its
 own path is refused after the file has already been written, `attachOne`'s catch block removes
 the file it just wrote, restoring the orphan-free state; if that removal itself fails, the
-original insert failure is what gets reported, because a leaked file is recoverable later and
+original insert failure is what gets reported, because a leaked file costs only storage and
 the insert failure is the thing she needs to hear about right now.
+
+Which of the two failure classes `attachMedia` produced is not something a caller can infer:
+a refusal from _before_ the commit means the file must be rolled back, and one from _after_ it
+means the file must be left alone, because the row exists and deleting its bytes would
+manufacture exactly the row-with-no-file this ordering exists to prevent. That distinction is
+carried by one exported class, `AttachmentPersistError`
+(`packages/data/src/repositories/media.ts`), which `useAttachMedia.ts` tests for with
+`instanceof`. It is pinned in all three directions by `media.test.ts` — the post-commit re-read
+throwing, the post-commit re-read coming back empty, and a pre-commit refusal that must _not_
+be that class.
 
 ## 3. Deletion is soft, so a filename must never be reused
 
-Removing an attachment (`removeMedia`, same file) does not delete its row or its bytes. It
-flags the row's `deleted_at` column and leaves both exactly where they are. The file survives
-on disk until a deliberate purge, run later from settings, actually clears it — a decision
-that exists so a removal made in error, or a purge that never gets run because the device is
-never plugged into anything, does not silently cost her a photo she thought was safe.
+Removing an attachment (`softDeleteMedia`, same file) does not delete its row or its bytes. It
+flags the row's `deleted_at` column and leaves both exactly where they are, so a removal made
+in error does not silently cost her a photo she thought was safe. Nothing ever clears those
+bytes today — see §5.
 
 That has one consequence that is easy to get backwards: **a filename must never be handed to a
 second attachment, even after the first one that used it has been removed.** The bytes it
-names are still there, awaiting a purge that may be weeks away, and a new capture claiming
+names are still there, indefinitely, and a new capture claiming
 that name would silently overwrite them — one record's photo becoming another's, with both
 rows still looking correct until someone opens the file and finds the wrong image behind it.
 
@@ -113,9 +122,8 @@ same way, and why that difference is deliberate rather than an inconsistency to 
 Making these two indexes match each other — adding `WHERE deleted_at IS NULL` to the file-name
 index, on the reasoning that "the other one has it, so this one should too" — is the change
 that looks like tidying and is actually the bug: it would let a soft-deleted attachment's
-filename be reused by whatever gets captured next, silently overwriting bytes a purge has not
-yet had the chance to clear. The two indexes differ on purpose. Say so before someone
-"corrects" it.
+filename be reused by whatever gets captured next, silently overwriting bytes that are still
+sitting there. The two indexes differ on purpose. Say so before someone "corrects" it.
 
 ## 4. Why `Paths.document`, and not `Paths.cache`
 
@@ -136,3 +144,32 @@ the record later — most plausibly at export, at the end of the trip, the singl
 moment to discover a day's photos are gone. `Paths.document` is the one choice under which that
 failure cannot happen silently: the system does not reclaim it, so a row that names a file
 there can trust the file is still where it says.
+
+## 5. There is no purge, and nothing reclaims storage
+
+Earlier drafts of this document, and of most of the comments around this code, described the
+soft-delete rule as costing "a little storage until a deliberate purge finds and clears it".
+**No purge exists.** There is no settings route that runs one, no orphan reconciliation, and
+no code anywhere under `apps/` or `packages/` that deletes a media file other than
+`attachOne`'s own rollback of a save it just made. `grep -rn purge apps packages` returns
+comments and nothing else. Building one belongs to a later plan; this section exists so that
+until then the documents and the code say what is actually true.
+
+Three things therefore accumulate on the device, permanently:
+
+- **Every soft-deleted attachment's bytes.** §3's decision keeps them deliberately, and the
+  full unique index on `file_name` means the name is spent for the life of the database too.
+- **Every file orphaned by a crash between the save and the insert.** §2 chooses this failure
+  on purpose, on the reasoning that an orphan is the recoverable one of the two — which is
+  true of the _data_, and is not yet true of the _storage_.
+- **Every file orphaned when the rollback's own `remove` fails.** `attachOne` reports the
+  insert failure rather than the removal failure, so nothing records that a file was left
+  behind.
+
+None of this corrupts a record, and that is exactly why it is easy to leave undone. But the
+likely real-world failure on a field tablet is not a corrupt record: it is a device that fills
+up over a season of photos and voice notes until a capture throws for lack of space, at which
+point the app has no way to tell her what is taking the room or to reclaim any of it.
+Nothing user-facing may promise otherwise — `capture.tsx`'s removal confirmation says the file
+stays on the device, and deliberately stops there, the same way the duplicate-pin warning
+beside it refuses to offer a deletion the app cannot perform.

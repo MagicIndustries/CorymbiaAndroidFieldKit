@@ -9,9 +9,11 @@ import { createExpoMediaStore, type MediaStore } from '@corymbia/media'
  * A store built per call would still point at the same `media/` directory —
  * `createExpoMediaStore` carries no per-instance state of its own — so this
  * is not about correctness of a single call. It matters the moment two
- * callers exist: `useAttachMedia`'s rollback and a future purge-on-delete
- * both call `remove`, and a settings-screen purge will one day list the same
- * directory this store writes into. Two independently constructed stores
+ * caller is `useAttachMedia`'s rollback today, and a purge — the settings
+ * screen spec §12.1 describes, which is NOT built (see
+ * `docs/media-storage.md` §5) — is the second one this module is waiting for,
+ * since it would list and remove from the same directory this store writes
+ * into. Two independently constructed stores
  * would still agree on paths, but importing this one module-level instance
  * everywhere is what makes "the app's media store" a single, findable thing
  * rather than a convention every call site has to remember to follow.

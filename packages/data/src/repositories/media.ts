@@ -70,8 +70,13 @@ const SELECT = `SELECT id, record_id, kind, file_name, byte_size, duration_ms, o
  * two-phase write (insert a placeholder, then fill it in) or a rename once the
  * bytes land, and either is a step that can be interrupted by the app dying
  * mid-capture. Minting first and writing the file before the row means the
- * only failure mode is an orphaned file with no row — recoverable by a purge —
- * never a row with no file behind it.
+ * only failure mode is an orphaned file with no row — which costs storage and
+ * damages no record — never a row with no file behind it.
+ *
+ * "Costs storage" is the whole of it, and permanently: the purge that would
+ * clear such an orphan is **not built** (no settings route, no
+ * reconciliation, nothing anywhere under `apps/` or `packages/`). See
+ * `docs/media-storage.md` §5.
  */
 export function newMediaId(): string {
   return newId('med')
@@ -229,9 +234,10 @@ export async function attachMedia(
 /**
  * A record's live attachments, in display order.
  *
- * Soft-deleted rows are excluded (spec §12.1): the file they name still
- * exists on disk until a purge, but the attachment itself is gone from
- * anything she would see on the record.
+ * Soft-deleted rows are excluded (spec §12.1): the file they name is still on
+ * disk — and stays there, since nothing clears it (`docs/media-storage.md`
+ * §5) — but the attachment itself is gone from anything she would see on the
+ * record.
  */
 export async function listMedia(db: Database, recordId: string): Promise<Attachment[]> {
   const rows = await db.all<MediaRow>(
@@ -243,8 +249,15 @@ export async function listMedia(db: Database, recordId: string): Promise<Attachm
 
 /**
  * Removes an attachment, softly (spec §12.1): the row is flagged and stays in
- * the table, because the file it names is still on disk until a deliberate
- * purge in settings, and the purge needs the row to find it by.
+ * the table, because the file it names is still on disk and the row is the
+ * only thing that says which attachment those bytes were.
+ *
+ * Spec §12.1 pairs that with a deliberate purge in settings, which would use
+ * exactly this row to find the file. **That purge is not built** — this
+ * repository has no counterpart that hard-deletes anything, and nothing under
+ * `apps/` removes a media file except `useAttachMedia`'s rollback of a save
+ * it has just made. So a removed attachment's bytes are kept indefinitely,
+ * not merely until later; `docs/media-storage.md` §5 says what that costs.
  *
  * There is no `media_removed` event action. Adding one would mean widening
  * `event_action_known` in migration 003's CHECK, which that table's own

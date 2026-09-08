@@ -7,10 +7,17 @@
  * never delete on a soft delete — live above this port, not inside it.
  *
  * `remove` is deliberately not called `delete`: deletion in this application is
- * SOFT (spec §12.1, the row is flagged and the file survives until a
- * deliberate purge in settings), and a store method named `delete` invites a
- * caller to reach for it when a user removes a photo. This one is for the
- * purge and for rolling back a half-finished save.
+ * SOFT (spec §12.1 — the row is flagged and the file stays on disk), and a
+ * store method named `delete` invites a caller to reach for it when a user
+ * removes a photo. Today this method has exactly one caller,
+ * `useAttachMedia`'s rollback of a save it has just made.
+ *
+ * The purge that spec §12.1 puts in settings **is not built** — no route, no
+ * reconciliation, nothing under `apps/` or `packages/` that would ever call
+ * this for a soft-deleted attachment. Until a later plan builds it, removed
+ * attachments' bytes and every crash-orphaned file accumulate on the device
+ * permanently. See `docs/media-storage.md` §5 for what that costs and why it
+ * matters more than it looks.
  */
 export type MediaStore = {
   /** Moves the captured file at `sourceUri` into app-owned storage. */
