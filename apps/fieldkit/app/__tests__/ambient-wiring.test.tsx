@@ -157,6 +157,24 @@ jest.mock('expo-router', () => ({
   useRouter: () => mockRouter,
 }))
 
+/**
+ * `expo-audio`, mocked whole — not because this file ever plays a voice note
+ * (no test here taps CAPTURE, so `capture.tsx` never reaches the `recorded`
+ * phase and `RecordedAffordances`'s `useAudioPlayer(null)` call never runs)
+ * but because `capture.tsx` imports `useAudioPlayer` statically at its top,
+ * the same as every other import in that file. `expo-audio`'s own entry
+ * point (`ExpoAudio.ts`) patches `AudioModule.AudioPlayer.prototype` at
+ * MODULE EVALUATION TIME, not inside any function — so merely importing
+ * `capture.tsx`, which this file does below, runs that patch regardless of
+ * whether anything here ever renders far enough to call the hook. Under
+ * jest-expo's native module registry `AudioModule.AudioPlayer` is
+ * `undefined`, so the unmocked real module throws on import. The same mock
+ * `voice.test.tsx` and `capture.test.tsx` already use, for the same reason.
+ */
+jest.mock('expo-audio', () => ({
+  useAudioPlayer: () => ({ play: jest.fn(), pause: jest.fn(), replace: jest.fn() }),
+}))
+
 // Imported after every mock above so they pick them up.
 import CaptureScreen from '../capture'
 import Diagnostics from '../diagnostics'

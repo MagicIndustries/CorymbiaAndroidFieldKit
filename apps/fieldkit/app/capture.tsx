@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { ScrollView, TextInput, View, type ViewStyle } from 'react-native'
 import { useFocusEffect, useRouter } from 'expo-router'
+import { useAudioPlayer } from 'expo-audio'
 import {
   createExpoLocationSource,
   distanceMetres,
@@ -17,6 +18,7 @@ import {
   CORNER_BLOCK_MAX_W,
   HelpAffordance,
   InputAffordanceRow,
+  KIND_LABEL,
   MediaStrip,
   Screen,
   Type,
@@ -37,12 +39,11 @@ import {
   type Attachment,
   type Database,
   type FieldRecord,
-  type Fix,
   type StoredFix,
 } from '@corymbia/data'
 import { mediaStore } from '../src/media/store'
 import { ambientCache, feedingAmbientCache } from '../src/geo/ambient'
-import { buildAmbientFix } from '../src/geo/ambientFix'
+import { ambientFixOrNone } from '../src/geo/ambientFix'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useSteadyGrade } from '../src/capture/steadyGrade'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
@@ -241,7 +242,9 @@ function positionOf(fix: StoredFix): Coordinate | null {
 /** How many readings went into the fix the record actually holds. */
 function describeRecordedSamples(fix: StoredFix): string {
   if (fix.quality !== 'deliberate') return 'no readings averaged'
-  return fix.sampleCount === 1 ? '1 reading averaged' : `${String(fix.sampleCount)} readings averaged`
+  return fix.sampleCount === 1
+    ? '1 reading averaged'
+    : `${String(fix.sampleCount)} readings averaged`
 }
 
 export default function CaptureScreen() {
@@ -1098,28 +1101,6 @@ function RecordedSummary({ record }: { record: FieldRecord }) {
 }
 
 /**
- * The `Fix` stamped on an event this screen appends after a record has
- * already been saved — a voice note played, or an attachment removed.
- *
- * Deliberately the same policy `useAttachMedia.ts`'s own (unexported)
- * `ambientFix()` uses, and deliberately re-implemented here rather than
- * imported: that function is private to the attach pipeline, and its own doc
- * comment is explicit that "what to do about an unreported mocked verdict" is
- * a decision each caller keeps for itself, not a shared policy —
- * `diagnostics.tsx` already answers it the other way. This screen answers it
- * the same way `useAttachMedia.ts` does, for the same reason: spec §8.2 will
- * not let an ordinary interaction with an attachment be refused over a
- * missing location annotation, so a cache with nothing usable in it degrades
- * the event to `{ quality: 'none' }` rather than blocking the play or the
- * removal.
- */
-function ambientEventFix(): Fix {
-  const cached = ambientCache.read()
-  if (cached === null || cached.isMocked === 'notReported') return { quality: 'none' }
-  return buildAmbientFix(cached, cached.isMocked === 'mocked')
-}
-
-/**
  * What can still be attached to a recorded point (spec §9.6), and what is
  * already there.
  *
@@ -1181,34 +1162,6 @@ function RecordedAffordances({
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null)
   const [removing, setRemoving] = useState(false)
   const [removeError, setRemoveError] = useState<string | null>(null)
-
-  /**
-   * `useAudioPlayer`, loaded with a runtime `require` rather than a module-top
-   * `import` — deliberately, and the one thing in this file that departs from
-   * its own convention.
-   *
-   * `expo-audio`'s own entry point (`ExpoAudio.ts`) patches
-   * `AudioModule.AudioPlayer.prototype` at MODULE EVALUATION TIME, not inside
-   * any function — so a static `import { useAudioPlayer } from 'expo-audio'`
-   * at the top of this file runs that patch the instant `capture.tsx` is
-   * loaded, for every importer, whether or not this component ever renders.
-   * `app/__tests__/ambient-wiring.test.tsx` is exactly such an importer: it
-   * renders `CaptureScreen` to prove the ambient-cache wiring and never taps
-   * CAPTURE, so it never reaches this component and rightly mocks nothing
-   * about audio — and under jest-expo's native module registry, that patch
-   * throws (`AudioModule.AudioPlayer` is `undefined`; `voice.test.tsx` avoids
-   * this the other way, by mocking `expo-audio` itself). A `require` here
-   * runs the same patch, but only the first time THIS component actually
-   * renders — which needs a capture already accepted, exactly what
-   * `ambient-wiring.test.tsx` never does. Typed by the destructuring
-   * assignment's own annotation, not a generic `require<T>()` call or an
-   * `as` — the ambient `require` this workspace's typecheck resolves to
-   * returns a bare `any` (Metro's own generic `require<T>()`, declared in
-   * `expo/types/metro-require.d.ts`, is wired in through a generated
-   * `expo-env.d.ts` this checkout does not have).
-   */
-  // eslint-disable-next-line @typescript-eslint/no-require-imports -- deliberately deferred, see above
-  const { useAudioPlayer }: typeof import('expo-audio') = require('expo-audio')
 
   /**
    * The one player this screen ever plays a voice note through.
@@ -1303,8 +1256,8 @@ function RecordedAffordances({
   }))
 
   /** The attachment a removal is pending for, when one is. */
-  const removalTarget = pendingRemoval === null ? null : media.find((item) => item.id === pendingRemoval) ?? null
-  const REMOVAL_NOUN: Record<Attachment['kind'], string> = { photo: 'photo', voice: 'voice note' }
+  const removalTarget =
+    pendingRemoval === null ? null : (media.find((item) => item.id === pendingRemoval) ?? null)
 
   /**
    * A voice tile's press (this task). `MediaStrip` takes one `onPress` for
@@ -1340,7 +1293,7 @@ function RecordedAffordances({
       recordId: record.id,
       action: 'played',
       deviceId,
-      fix: ambientEventFix(),
+      fix: ambientFixOrNone(ambientCache),
     })
   }
 
@@ -1389,7 +1342,7 @@ function RecordedAffordances({
     setRemoving(true)
     setRemoveError(null)
     try {
-      await softDeleteMedia(db, id, deviceId, ambientEventFix())
+      await softDeleteMedia(db, id, deviceId, ambientFixOrNone(ambientCache))
       if (!mounted.current) return
       setPendingRemoval(null)
       await refresh()
@@ -1431,7 +1384,10 @@ function RecordedAffordances({
     // `camera.tsx` and `voice.tsx` both read `recordId` off the route params
     // this way (`useLocalSearchParams<{ recordId?: string }>()`), and both
     // are what actually attach the file — nothing here writes media.
-    router.push({ pathname: kind === 'photo' ? '/camera' : '/voice', params: { recordId: record.id } })
+    router.push({
+      pathname: kind === 'photo' ? '/camera' : '/voice',
+      params: { recordId: record.id },
+    })
   }
 
   async function save(): Promise<void> {
@@ -1477,7 +1433,10 @@ function RecordedAffordances({
       const detail = caught instanceof Error ? caught.message : String(caught)
       const subject = kind === 'title' ? 'name' : 'notes'
       const verb = kind === 'title' ? 'was' : 'were'
-      setError({ kind, message: `The ${subject} ${verb} not saved: ${detail}. The point itself is safe.` })
+      setError({
+        kind,
+        message: `The ${subject} ${verb} not saved: ${detail}. The point itself is safe.`,
+      })
     } finally {
       if (mounted.current) setSaving(false)
     }
@@ -1518,14 +1477,22 @@ function RecordedAffordances({
           }}
         >
           <Type variant="body">
-            {`Remove this ${REMOVAL_NOUN[removalTarget.kind]}? The file stays on the device until a purge.`}
+            {`Remove this ${KIND_LABEL[removalTarget.kind].toLowerCase()}? The file stays on the device until a purge.`}
           </Type>
           <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+            {/*
+              `danger` here, `secondary` below (doctrine rule 9): the action
+              that cannot be undone from this screen and the one that costs
+              nothing must not read identically in glare. Two channels, not
+              one — a label difference alone ("REMOVE" vs. "KEEP IT") is
+              exactly what a colour-blind reader or a bright paddock erodes
+              first.
+            */}
             <Button
               testID="media-remove-confirm"
               label={removing ? 'REMOVING…' : 'REMOVE'}
-              spokenLabel={`Remove this ${REMOVAL_NOUN[removalTarget.kind]}`}
-              kind="secondary"
+              spokenLabel={`Remove this ${KIND_LABEL[removalTarget.kind].toLowerCase()}`}
+              kind="danger"
               disabled={removing}
               onPress={() => {
                 void confirmRemoval()
@@ -1565,12 +1532,16 @@ function RecordedAffordances({
         <View style={{ gap: spacing.sm }}>
           <TextInput
             testID={editing.kind === 'title' ? 'capture-title-input' : 'capture-description-input'}
-            accessibilityLabel={editing.kind === 'title' ? 'A name for this point' : 'Notes about this point'}
+            accessibilityLabel={
+              editing.kind === 'title' ? 'A name for this point' : 'Notes about this point'
+            }
             value={editing.draft}
             onChangeText={(text) => {
               setEditing({ kind: editing.kind, draft: text })
             }}
-            placeholder={editing.kind === 'title' ? 'A name for this point' : 'Notes about this point'}
+            placeholder={
+              editing.kind === 'title' ? 'A name for this point' : 'Notes about this point'
+            }
             placeholderTextColor={theme.colors.textDim}
             autoFocus
             multiline={editing.kind === 'description'}
@@ -1588,7 +1559,9 @@ function RecordedAffordances({
             testID={editing.kind === 'title' ? 'capture-title-save' : 'capture-description-save'}
             label={saving ? 'SAVING…' : editing.kind === 'title' ? 'SAVE NAME' : 'SAVE NOTES'}
             spokenLabel={
-              editing.kind === 'title' ? 'Save this name onto the point' : 'Save these notes onto the point'
+              editing.kind === 'title'
+                ? 'Save this name onto the point'
+                : 'Save these notes onto the point'
             }
             disabled={saving}
             onPress={() => {

@@ -12,6 +12,7 @@ import {
   type Reading,
 } from '@corymbia/geo'
 import type { Attachment, Fix, FieldRecord } from '@corymbia/data'
+import type { AudioPlayer } from 'expo-audio'
 
 /**
  * Tests for the capture screen (spec §9.1–§9.4).
@@ -226,16 +227,22 @@ jest.mock('../../src/media/store', () => ({
  * `useAudioPlayer(null)` once, at the top of `RecordedAffordances`, and
  * `replace`/`play` on whichever tile she presses.
  *
- * `play` and `replace`/`pause` are plain `jest.fn()`s rather than typed
- * against `AudioPlayer`'s own methods: both are `(): void`, so there is no
- * payload for an untyped mock to hide the shape of. `play` is what the
- * "plays a voice note" and "logs that a voice note was played" tests below
- * assert was called, and what the "does not log a play that never started"
- * test makes throw.
+ * `play` and `pause` are plain `jest.fn()`s: both are genuinely `(): void`
+ * on `AudioPlayer` (`node_modules/expo-audio/build/AudioModule.types.d.ts`),
+ * so there is no payload for an untyped mock to hide the shape of. `play` is
+ * what the "plays a voice note" and "logs that a voice note was played"
+ * tests below assert was called, and what the "does not log a play that
+ * never started" test makes throw.
+ *
+ * `replace` is different and typed accordingly: `AudioPlayer.replace(source:
+ * AudioSource): void` takes an argument, and "plays a voice note when its
+ * tile is pressed" below asserts exactly what it was called with — an
+ * untyped `jest.fn()` would let that assertion be handed a payload the real
+ * method would never accept.
  */
 const play = jest.fn()
 const pause = jest.fn()
-const replace = jest.fn()
+const replace = jest.fn<ReturnType<AudioPlayer['replace']>, Parameters<AudioPlayer['replace']>>()
 const mockPlayer = { play, pause, replace }
 
 jest.mock('expo-audio', () => ({
@@ -586,7 +593,12 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   const promise = new Promise<T>((settleWith) => {
     resolve = settleWith
   })
-  return { promise, resolve: (value: T) => { resolve(value) } }
+  return {
+    promise,
+    resolve: (value: T) => {
+      resolve(value)
+    },
+  }
 }
 
 /**
@@ -1325,10 +1337,7 @@ describe('the recorded state (spec §9.6, doctrine rule 17)', () => {
     // here through the real `averageReadings` over the same two readings the
     // countdown collected, so a screen that printed the tap's ±8.0 m — the
     // number that was on screen a moment earlier, and the easy mistake — fails.
-    const { accuracyM } = averageReadings([
-      reading(8, START_MS),
-      reading(6, START_MS + 1000),
-    ])
+    const { accuracyM } = averageReadings([reading(8, START_MS), reading(6, START_MS + 1000)])
     expect(readoutText('capture-recorded-accuracy')).toBe(`±${accuracyM.toFixed(1)} m`)
     expect(readoutText('capture-recorded-samples')).toBe('2 readings averaged')
 
@@ -1671,9 +1680,7 @@ describe('the affordances (spec §9.6, Task 11)', () => {
   })
 
   it('says the notes were not saved, and that the point itself is safe', async () => {
-    mockRepo.renameRecord.mockImplementation(() =>
-      Promise.reject(new Error('database is locked')),
-    )
+    mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('database is locked')))
 
     await renderRecorded()
 
@@ -1718,9 +1725,7 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     // is the one thing at risk, and "the name was not saved" and "the capture
     // was lost" are materially different sentences to read standing in a
     // paddock.
-    mockRepo.renameRecord.mockImplementation(() =>
-      Promise.reject(new Error('database is locked')),
-    )
+    mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('database is locked')))
 
     await renderRecorded()
 
@@ -1925,6 +1930,26 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
     expect(screen.getByText(/Remove this photo\?/)).toBeTruthy()
   })
 
+  it('names a voice note correctly, not as a photo', async () => {
+    // Every removal test above and below this one uses `photoRow` — a build
+    // that hardcoded 'photo' at both call sites of the kind→noun mapping
+    // would pass every one of them and still ask "Remove this photo?", in
+    // text and out loud, over a voice note. Both call sites of the mapping
+    // are asserted: the on-screen sentence, and the confirm button's own
+    // spoken label — a screen reader must not say the wrong noun even if the
+    // visible text somehow got it right.
+    listMedia.mockResolvedValue([voiceRow('med_v')])
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_v'))
+
+    expect(screen.getByText(/Remove this voice note\?/)).toBeTruthy()
+    expect(screen.getByTestId('media-remove-confirm').props.accessibilityLabel).toBe(
+      'Remove this voice note',
+    )
+  })
+
   it('removes it once confirmed', async () => {
     listMedia.mockResolvedValue([photoRow('med_a')])
     await renderRecorded()
@@ -1943,11 +1968,17 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
   })
 
   it('stops showing a removed attachment', async () => {
-    // The initial fetch (on focus) sees the photo; the refetch this screen
-    // makes after a successful removal sees the database as it now stands —
-    // without it, everything below still shows the photo (leaving her
-    // reading her own mis-tap's confirmation as fact and not what the
-    // database holds).
+    // The initial fetch (on focus) sees the photo; `confirmRemoval` routes
+    // its own refresh through the SAME ticketed `refresh()` a focus return
+    // uses (`capture.tsx`'s own doc comment on `refresh`), rather than
+    // computing the new list itself by filtering the removed id out of
+    // `media` locally. The `toHaveBeenCalledTimes(2)` below is what actually
+    // pins that: a local filter would leave the strip and the count exactly
+    // as they are asserted below while `listMedia` was called only once —
+    // this is the assertion that fails on that shortcut and only on it, since
+    // a local filter renders an identical screen to a real refetch when
+    // `listMedia`'s second answer agrees with what the filter would have
+    // produced anyway (as it does here, both being "the photo is gone").
     listMedia.mockResolvedValueOnce([photoRow('med_a')])
     await renderRecorded()
     await settle()
@@ -1957,6 +1988,7 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
     await fireEvent.press(screen.getByTestId('media-remove-confirm'))
     await settle()
 
+    expect(listMedia).toHaveBeenCalledTimes(2)
     expect(screen.queryByTestId('media-tile-med_a')).toBeNull()
     // And the count on the affordance tile agrees with it — the same two
     // channels asked of a save's own success below.
@@ -1991,6 +2023,28 @@ describe('playing a voice note back, and removing an attachment (Task 12)', () =
     await settle()
 
     expect(screen.getByTestId('media-tile-med_a')).toBeTruthy()
+    expect(screen.getByTestId('media-remove-error')).toHaveTextContent(
+      'The attachment was not removed: database locked. It is still attached.',
+    )
+  })
+
+  it('strips trailing punctuation from the failure detail, rather than doubling it', async () => {
+    // The one fixture above ("database locked") carries no trailing
+    // punctuation of its own, so it cannot tell `detail.replace(/[.?!…]+$/,
+    // '')` apart from a build that never called it at all — both produce the
+    // same sentence. A detail that already ends in punctuation is the only
+    // fixture that can: unstripped, it renders as "database locked!. It is
+    // still attached." — a doubled, ungrammatical stop this sentence must
+    // never show her.
+    listMedia.mockResolvedValue([photoRow('med_a')])
+    softDeleteMedia.mockRejectedValue(new Error('database locked!'))
+    await renderRecorded()
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('media-remove-med_a'))
+    await fireEvent.press(screen.getByTestId('media-remove-confirm'))
+    await settle()
+
     expect(screen.getByTestId('media-remove-error')).toHaveTextContent(
       'The attachment was not removed: database locked. It is still attached.',
     )

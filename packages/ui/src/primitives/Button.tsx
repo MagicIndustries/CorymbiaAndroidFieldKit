@@ -4,7 +4,7 @@ import { radii, spacing, touch, field } from '@corymbia/tokens'
 import { useTheme } from '../theme'
 import { Type } from './Type'
 
-export type ButtonKind = 'primary' | 'secondary' | 'fast' | 'accurate'
+export type ButtonKind = 'primary' | 'secondary' | 'fast' | 'accurate' | 'danger'
 
 export function Button({
   label,
@@ -32,6 +32,13 @@ export function Button({
     secondary: { bg: c.surfaceRaised, ink: c.textPrimary, border: c.border },
     fast: { bg: c.captureFast, ink: c.captureFastInk, border: c.captureFast },
     accurate: { bg: c.captureAccurate, ink: c.captureAccurateInk, border: c.accent },
+    // A destructive action that reads as `secondary` in glare is the failure
+    // doctrine rule 9 exists to name: the label is the only channel telling
+    // it apart from the safe control beside it. `statusPoor` is the one
+    // semantic token this system already uses for "this is the bad one" —
+    // borrowed here from GPS grading rather than adding a parallel red, so a
+    // destructive control and a poor fix read as the same colour on purpose.
+    danger: { bg: c.statusPoor, ink: c.statusPoorInk, border: c.statusPoor },
   }
   const p = palette[kind]
 

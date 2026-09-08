@@ -1,5 +1,6 @@
 import type { AmbientFix } from '@corymbia/geo'
 import type { Fix } from '@corymbia/data'
+import type { AmbientReader } from './ambient'
 
 /**
  * Maps a cached `AmbientFix` onto an `ambient`-quality `Fix` (spec §7.5,
@@ -61,4 +62,43 @@ export function buildAmbientFix(cached: AmbientFix, isMocked: boolean): Fix {
       ? { altitudeM: null, altitudeReference: null }
       : { altitudeM: cached.altitudeM, altitudeReference: 'wgs84Ellipsoid' }),
   }
+}
+
+/**
+ * `buildAmbientFix` plus the *downgrade-to-none* answer to "what about an
+ * unreported mocked verdict" — the policy `useAttachMedia.ts` and
+ * `capture.tsx` both need and `diagnostics.tsx` deliberately does not (spec
+ * §8.2 vs. that screen's stricter refusal; see `buildAmbientFix`'s own doc
+ * comment for why that disagreement is kept out of the shared function).
+ *
+ * Extracted for the same reason `buildAmbientFix` was: until this extraction,
+ * `useAttachMedia.ts`'s (unexported) `ambientFix()` and `capture.tsx`'s
+ * (unexported) `ambientEventFix()` were a byte-for-byte fourth copy of the
+ * ambient→`Fix` mapping — the exact "three statements of one fact" doctrine
+ * this file's own history is a warning against, now with a fourth. Both
+ * callers stamp a `Fix` onto an append-only event (`media_added` and
+ * `played`/`removed` respectively), so a divergence here is not a cosmetic
+ * bug — it is two rows of a tamper-evident log disagreeing about what
+ * "unlocated" means.
+ *
+ * Takes an `AmbientReader` rather than reading the module singleton
+ * directly, the same discipline `useAttachMedia.ts`'s own `ambientReader`
+ * binding already enforces: the only method this ever calls is `.read()`,
+ * so a caller cannot use this to reach for `.record()` or `.refresh()` by
+ * accident — an attach, a play or a removal must never wait on or feed a
+ * live position.
+ *
+ * `{ quality: 'none' }` covers two cases, not one: the cache holding nothing
+ * at all, and the cache holding a reading whose mocked status was never
+ * reported — see `buildAmbientFix`'s doc comment for why an unreported
+ * verdict cannot be defaulted to `false` rather than downgraded.
+ */
+export function ambientFixOrNone(reader: AmbientReader): Fix {
+  const cached = reader.read()
+  if (cached === null || cached.isMocked === 'notReported') {
+    return { quality: 'none' }
+  }
+  // No cast and no `?? false` — see the doc comment above for why: the only
+  // two verdicts reaching here are 'mocked' and 'notMocked', guarded above.
+  return buildAmbientFix(cached, cached.isMocked === 'mocked')
 }

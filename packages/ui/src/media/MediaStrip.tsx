@@ -30,7 +30,17 @@ export type MediaStripItem = {
   durationMs: number | null
 }
 
-const KIND_LABEL: Record<MediaKind, string> = {
+/**
+ * Exported (not merely module-local) because `capture.tsx`'s removal
+ * confirmation needs the same kind→noun mapping this strip's own remove
+ * control already uses in its `accessibilityLabel` two lines below — a
+ * removal confirmation that named a "photo" removed while its own tile still
+ * read `Remove voice note` would be an inconsistency inside one screen, not
+ * merely a duplicated fact across two files. This is the one place that
+ * mapping is written down; `capture.tsx` lowercases it the same way this
+ * file's own `accessibilityLabel` does, rather than keeping a second map.
+ */
+export const KIND_LABEL: Record<MediaKind, string> = {
   photo: 'Photo',
   voice: 'Voice note',
 }
@@ -209,7 +219,12 @@ export function MediaStrip({
             {removeControl}
           </Pressable>
         ) : (
-          <View key={item.id} testID={`media-tile-${item.id}`} accessibilityLabel={label} style={tileStyle}>
+          <View
+            key={item.id}
+            testID={`media-tile-${item.id}`}
+            accessibilityLabel={label}
+            style={tileStyle}
+          >
             {content}
             {removeControl}
           </View>

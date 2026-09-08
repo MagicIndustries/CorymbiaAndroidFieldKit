@@ -10,7 +10,7 @@ import { mediaFileName, type MediaKind } from '@corymbia/media'
 import { useDatabase, useDevice } from '../db/provider'
 import { mediaStore } from './store'
 import { ambientCache, type AmbientReader } from '../geo/ambient'
-import { buildAmbientFix } from '../geo/ambientFix'
+import { ambientFixOrNone } from '../geo/ambientFix'
 
 /**
  * Typed as the narrow read-only view, not the full `AmbientCache` —
@@ -79,33 +79,15 @@ export type AttachVoiceInput = {
  * position and is exactly the wait this must not take; the screens that watch
  * a GPS are what feed the cache (`src/geo/ambient.ts`).
  *
- * `{ quality: 'none' }` covers two cases, not one: the cache holding nothing
- * at all, and the cache holding a reading whose mocked status was never
- * reported. The first has no position to stamp. The second has a position
- * but nothing honest to say about `isMocked` — that field is a required
- * `boolean` on an ambient `Fix`, and defaulting an unknown answer to `false`
- * would assert "not spoofed" about a reading that never said so (the same
- * mistake `mockedVerdict`'s own doc comment, in `@corymbia/geo`, warns
- * against). Downgrading to `'none'` here costs the event its location
- * annotation, not the attachment itself — the photo or voice note is
- * attached either way, which is the one thing spec §8.2 will not let this
- * function refuse to do.
- *
- * The field-by-field construction of a positioned reading lives in
- * `buildAmbientFix` (`../geo/ambientFix.ts`) — shared with `diagnostics.tsx`'s
- * own ambient save, which resolves the same `'notReported'` question the
- * opposite way; see that function's doc comment for why both answers are
- * kept.
+ * The downgrade-to-`{ quality: 'none' }` policy — and the field-by-field
+ * construction of a positioned reading — live in `ambientFixOrNone`
+ * (`../geo/ambientFix.ts`), shared with `capture.tsx`'s own play/removal
+ * events. `diagnostics.tsx` resolves the same "what about an unreported
+ * mocked verdict" question the opposite way (a refusal, not a downgrade) and
+ * deliberately does not share this function — see `ambientFixOrNone`'s own
+ * doc comment for why both answers are kept.
  */
-function ambientFix(): Fix {
-  const cached = ambientReader.read()
-  if (cached === null || cached.isMocked === 'notReported') {
-    return { quality: 'none' }
-  }
-  // No cast and no `?? false` — see the doc comment above for why: the only
-  // two verdicts reaching here are 'mocked' and 'notMocked', guarded above.
-  return buildAmbientFix(cached, cached.isMocked === 'mocked')
-}
+const ambientFix = (): Fix => ambientFixOrNone(ambientReader)
 
 /**
  * The five steps, shared by both `attachPhoto` and `attachVoice`: mint the
@@ -185,8 +167,7 @@ export function useAttachMedia(): {
   const device = useDevice()
 
   const attachPhoto = useCallback(
-    (input: AttachPhotoInput) =>
-      attachOne(db, device.id, 'photo', { ...input, durationMs: null }),
+    (input: AttachPhotoInput) => attachOne(db, device.id, 'photo', { ...input, durationMs: null }),
     [db, device],
   )
 
