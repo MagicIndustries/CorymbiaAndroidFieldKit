@@ -1022,6 +1022,18 @@ default and §9.3's constants, and the transcript is what carried that evidence 
 stays for the same reason the chooser does — the numbers hold for one device under one sky
 and want re-measuring under another.
 
+**Landscape is currently survivable, not designed — and that is a deferral, not a
+finish.** All three capture states scroll, anchored to the bottom so the control is never
+the thing pushed off; on a phone in landscape that is what keeps the help affordance and
+the live coordinates reachable at all (doctrine rule 7). But reachable-by-scrolling is a
+fallback, and it fails this section's own premise: she is holding a phone still over a
+point with one hand, and a readout she has to scroll to is a readout she will not look at.
+The landscape capture screen wants a real layout — the dial and the readouts side by side
+rather than stacked, which is what the width is *for* — so that everything is on screen at
+once and nothing scrolls. Deferred to the tablet work, where `expanded` layouts are
+designed properly; the phone-in-landscape case is `expanded` by width and must be settled
+in the same pass rather than inheriting a tablet layout it has no height for (§5.2).
+
 ### 9.5 Duplicate guard
 
 A warning when a new pin lands within a configurable threshold of the previous one —
