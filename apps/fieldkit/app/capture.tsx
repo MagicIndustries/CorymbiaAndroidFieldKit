@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, TextInput, View, type ViewStyle } from 'react-native'
+import { ScrollView, TextInput, View, type ViewStyle } from 'react-native'
 import { useRouter } from 'expo-router'
 import {
   createExpoLocationSource,
@@ -16,7 +16,8 @@ import {
   CaptureDial,
   CORNER_BLOCK_MAX_W,
   HelpAffordance,
-  INPUT_AFFORDANCE_ORDER,
+  InputAffordanceRow,
+  MediaStrip,
   Screen,
   Type,
   isLocked,
@@ -26,8 +27,17 @@ import {
   useTheme,
   type FixGradeName,
   type InputAffordanceKind,
+  type MediaStripItem,
 } from '@corymbia/ui'
-import { renameRecord, type Database, type FieldRecord, type StoredFix } from '@corymbia/data'
+import {
+  listMedia,
+  renameRecord,
+  type Attachment,
+  type Database,
+  type FieldRecord,
+  type StoredFix,
+} from '@corymbia/data'
+import { mediaStore } from '../src/media/store'
 import { ambientCache, feedingAmbientCache } from '../src/geo/ambient'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useSteadyGrade } from '../src/capture/steadyGrade'
@@ -228,41 +238,6 @@ function positionOf(fix: StoredFix): Coordinate | null {
 function describeRecordedSamples(fix: StoredFix): string {
   if (fix.quality !== 'deliberate') return 'no readings averaged'
   return fix.sampleCount === 1 ? '1 reading averaged' : `${String(fix.sampleCount)} readings averaged`
-}
-
-/**
- * The four affordances of spec §9.6 — location (already complete), title, voice
- * note, photo — in the order that section pins them.
- *
- * The last three come from `INPUT_AFFORDANCE_ORDER`, the constant
- * `InputAffordanceRow` itself renders from, rather than being written out
- * again here. Doctrine rule 5's "identically everywhere, in the same order" is
- * a claim about the whole application, and a second literal list is precisely
- * how such a claim stops being true.
- *
- * `'description'` is filtered out because §9.6 does not count it among the
- * four: the row's fourth entry is notes, and this screen's is the location —
- * which is not an input at all here but the fix the capture has already made,
- * shown complete. That divergence is real and is worth knowing about before
- * changing either list.
- */
-type RecordedAffordanceKind = 'location' | Exclude<InputAffordanceKind, 'description'>
-
-function offeredHere(kind: InputAffordanceKind): kind is Exclude<InputAffordanceKind, 'description'> {
-  return kind !== 'description'
-}
-
-const RECORDED_AFFORDANCES: RecordedAffordanceKind[] = [
-  'location',
-  ...INPUT_AFFORDANCE_ORDER.filter(offeredHere),
-]
-
-/** The glyph and the words for each, matching `InputAffordanceRow`'s exactly. */
-const AFFORDANCE_FACE: Record<RecordedAffordanceKind, { glyph: string; label: string }> = {
-  location: { glyph: '◎', label: 'Location' },
-  title: { glyph: '✏️', label: 'Title' },
-  voice: { glyph: '🎙️', label: 'Voice' },
-  photo: { glyph: '📷', label: 'Photo' },
 }
 
 export default function CaptureScreen() {
@@ -836,104 +811,6 @@ function CaptureBody() {
 }
 
 /**
- * One of the four affordances of spec §9.6, in three states.
- *
- * ## Why this is not `InputAffordanceRow`
- *
- * It should be, and it will be. `InputAffordanceRow` (`@corymbia/ui`) is the
- * component that owns doctrine rule 5 — one visual signature per input kind,
- * used identically everywhere — and this screen deliberately borrows its
- * glyphs, its wording, its dashed-versus-solid border and its `affordance-*`
- * test handles rather than inventing a second look.
- *
- * What it does not yet have is an *unavailable* state, and this screen has two
- * of them: there is no media table in `@corymbia/data`, so a voice note and a
- * photo have nowhere to be stored. Present-and-disabled is the honest way to
- * show that (doctrine rule 3: every level of disclosure is a legitimate
- * stopping point, and a level that is not built must not pretend otherwise) —
- * a tile that looked live and did nothing would be worse than no tile.
- *
- * **PLAN 4 (media) attaches here.** When photo and voice capture land, the
- * right change is to teach `InputAffordanceRow` the disabled state — or to
- * find it no longer needs one — and replace this row with that component,
- * rather than to grow a third variant of the same four tiles. `location` stays
- * this screen's own: it is not an input, it is the fix the capture already
- * made, shown complete.
- */
-function AffordanceTile({
-  kind,
-  state,
-  spokenLabel,
-  onPress,
-}: {
-  kind: RecordedAffordanceKind
-  state: 'done' | 'available' | 'unavailable'
-  spokenLabel: string
-  onPress?: () => void
-}) {
-  const { theme } = useTheme()
-  const face = AFFORDANCE_FACE[kind]
-  const testID = `affordance-${kind}`
-
-  // Doctrine rule 9: the state is carried by the border style AND by the
-  // words, never by colour alone — the same two channels `InputAffordanceRow`
-  // uses, so a colour-vision-deficient user, or anyone in direct sunlight,
-  // reads it the same way.
-  const label =
-    state === 'done' ? `${face.label} ✓` : state === 'unavailable' ? `${face.label} · later` : face.label
-
-  const style: ViewStyle = {
-    flex: 1,
-    minHeight: touch.comfortable,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radii.md,
-    borderWidth: 2,
-    borderStyle: state === 'done' ? 'solid' : 'dashed',
-    borderColor: state === 'done' ? theme.colors.accent : theme.colors.border,
-    backgroundColor: theme.colors.surfaceRaised,
-    paddingVertical: spacing.sm,
-    opacity: state === 'unavailable' ? 0.45 : 1,
-  }
-
-  const faceContent = (
-    <>
-      <Type variant="heading">{face.glyph}</Type>
-      <Type variant="label" dim testID={`${testID}-label`}>
-        {label}
-      </Type>
-    </>
-  )
-
-  // A statement rather than a control. The location is already recorded, so
-  // there is nothing to press and no `accessibilityRole="button"` to claim.
-  if (onPress === undefined && state === 'done') {
-    return (
-      <View testID={testID} accessible accessibilityLabel={spokenLabel} style={style}>
-        {faceContent}
-      </View>
-    )
-  }
-
-  // Deliberately no `onPress` in the unavailable case — not an empty handler.
-  // There is nothing for it to call, and a stub is how a screen ends up with a
-  // control that silently does nothing once someone removes the `disabled`.
-  return (
-    <Pressable
-      testID={testID}
-      accessibilityRole="button"
-      accessibilityLabel={spokenLabel}
-      accessibilityState={{ disabled: state === 'unavailable', selected: state === 'done' }}
-      disabled={state === 'unavailable'}
-      onPress={onPress}
-      style={style}
-    >
-      {faceContent}
-    </Pressable>
-  )
-}
-
-/**
  * The `recorded` phase (spec §9.6, doctrine rule 17): the point that was saved,
  * what it is worth, what can still be attached to it, and the two ways onward.
  *
@@ -1217,15 +1094,25 @@ function RecordedSummary({ record }: { record: FieldRecord }) {
 }
 
 /**
- * The four affordances, and the one of them that is real.
+ * What can still be attached to a recorded point (spec §9.6), and what is
+ * already there.
  *
- * Spec §9.6 requires all four to be present, in the same order, everywhere in
- * the application — which is why voice and photo are rendered at all when
- * neither can do anything. `renameRecord` is the whole of what Plan 3
- * completes here: it is the only setter for a record's title, and it writes
- * the change through the same append-only event log as everything else that
- * happens to a record (spec §8.5), because a title is part of the observation
- * rather than incidental metadata.
+ * `InputAffordanceRow` (`@corymbia/ui`, Task 6) renders the four tiles this
+ * used to hand-roll one at a time: title, notes, voice, photo — none of them
+ * disabled, because none of them is unbuilt any more. Location is not among
+ * them: it is not an input on this screen, it is the fix the capture just
+ * made (spec §9.6), and that is shown by the dial and the accuracy readout
+ * above, not by a fifth tile that would do nothing when pressed.
+ *
+ * Title and notes are written here, through `renameRecord` — the only
+ * setter for either, appending an `'edited'` event the same way everything
+ * else that happens to a record does (spec §8.5). Photo and voice are not
+ * written here at all: pressing either tile pushes to `/camera` or `/voice`
+ * with this record's id, and `useAttachMedia` — called from those screens,
+ * not this one — is the whole of what writes the file and the row (Task 10).
+ * This component's part with them is narrower: fetch what is already
+ * attached, through `listMedia`, so the tiles can say how many and
+ * `MediaStrip` can show them.
  */
 function RecordedAffordances({
   record,
@@ -1236,17 +1123,25 @@ function RecordedAffordances({
   db: Database
   deviceId: string
 }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(record.title ?? '')
-  const [title, setTitle] = useState<string | null>(record.title)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const router = useRouter()
   const { theme } = useTheme()
 
+  const [editing, setEditing] = useState<{ kind: 'title' | 'description'; draft: string } | null>(
+    null,
+  )
+  const [title, setTitle] = useState<string | null>(record.title)
+  const [description, setDescription] = useState<string | null>(record.description)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<{ kind: 'title' | 'description'; message: string } | null>(
+    null,
+  )
+  const [media, setMedia] = useState<Attachment[]>([])
+
   /**
-   * Guards the two `setState`s that follow the write. She can leave the screen,
-   * or take another reading, while `renameRecord` is still in a transaction,
-   * and nothing may write into a component that has gone.
+   * Guards the `setState`s that follow an await. She can leave the screen, or
+   * take another reading, while `renameRecord` is still in a transaction or
+   * `listMedia` is still reading, and nothing may write into a component that
+   * has gone.
    */
   const mounted = useRef(true)
   useEffect(() => {
@@ -1256,25 +1151,83 @@ function RecordedAffordances({
     }
   }, [])
 
+  // What is already attached, fetched once for the record this state is
+  // about. There is nowhere on this screen that writes a photo or a voice
+  // note — that happens on `/camera` and `/voice` — so this read is the whole
+  // of this component's part in showing them.
+  useEffect(() => {
+    listMedia(db, record.id)
+      .then((rows) => {
+        if (mounted.current) setMedia(rows)
+      })
+      .catch(() => {
+        // The record itself is unaffected by a read that fails; the tiles
+        // simply carry on showing no count until the next successful fetch,
+        // which is honester than inventing a number that was never read.
+      })
+  }, [db, record.id])
+
+  const photoCount = media.filter((item) => item.kind === 'photo').length
+  const voiceCount = media.filter((item) => item.kind === 'voice').length
+  const mediaItems: MediaStripItem[] = media.map((item) => ({
+    id: item.id,
+    kind: item.kind,
+    uri: mediaStore.uriFor(item.fileName),
+    durationMs: item.durationMs,
+  }))
+
+  const completed: InputAffordanceKind[] = [
+    ...(title !== null ? (['title'] as const) : []),
+    ...(description !== null ? (['description'] as const) : []),
+  ]
+
+  // Only the tile whose edit is actually in flight is busy — not both, and
+  // not the ones that only navigate, which never enter a saving state on
+  // this screen at all.
+  const busy: InputAffordanceKind[] = saving && editing !== null ? [editing.kind] : []
+
+  function openEditor(kind: 'title' | 'description'): void {
+    setEditing({ kind, draft: (kind === 'title' ? title : description) ?? '' })
+  }
+
+  function handlePress(kind: InputAffordanceKind): void {
+    if (kind === 'title' || kind === 'description') {
+      openEditor(kind)
+      return
+    }
+    // `camera.tsx` and `voice.tsx` both read `recordId` off the route params
+    // this way (`useLocalSearchParams<{ recordId?: string }>()`), and both
+    // are what actually attach the file — nothing here writes media.
+    router.push({ pathname: kind === 'photo' ? '/camera' : '/voice', params: { recordId: record.id } })
+  }
+
   async function save(): Promise<void> {
+    if (editing === null) return
+    const { kind, draft } = editing
     const trimmed = draft.trim()
-    // An empty box is a cleared name, which `renameRecord` models explicitly as
-    // `title: null` — not as an empty string, which would be a name made of no
+    // An empty box is a cleared value, which `renameRecord` models explicitly
+    // as `null` — not as an empty string, which would be text made of no
     // characters.
     const next = trimmed.length === 0 ? null : trimmed
     setSaving(true)
     setError(null)
     try {
-      const renamed = await renameRecord(db, { recordId: record.id, title: next, deviceId })
+      const renamed = await renameRecord(
+        db,
+        kind === 'title'
+          ? { recordId: record.id, title: next, deviceId }
+          : { recordId: record.id, title, description: next, deviceId },
+      )
       if (!mounted.current) return
       setTitle(renamed.title)
-      setEditing(false)
+      setDescription(renamed.description)
+      setEditing(null)
     } catch (caught) {
       if (!mounted.current) return
-      setError(
-        `The name was not saved: ${caught instanceof Error ? caught.message : String(caught)}. ` +
-          'The point itself is safe.',
-      )
+      const detail = caught instanceof Error ? caught.message : String(caught)
+      const subject = kind === 'title' ? 'name' : 'notes'
+      const verb = kind === 'title' ? 'was' : 'were'
+      setError({ kind, message: `The ${subject} ${verb} not saved: ${detail}. The point itself is safe.` })
     } finally {
       if (mounted.current) setSaving(false)
     }
@@ -1286,47 +1239,15 @@ function RecordedAffordances({
         ADD TO THIS POINT
       </Type>
 
-      <View testID="capture-affordances" style={{ flexDirection: 'row', gap: spacing.sm }}>
-        {RECORDED_AFFORDANCES.map((kind) => {
-          if (kind === 'location') {
-            return (
-              <AffordanceTile
-                key={kind}
-                kind={kind}
-                state="done"
-                spokenLabel="Location, already recorded"
-              />
-            )
-          }
-          if (kind === 'title') {
-            return (
-              <AffordanceTile
-                key={kind}
-                kind={kind}
-                state={title === null ? 'available' : 'done'}
-                spokenLabel={title === null ? 'Add a title' : 'Change the title'}
-                onPress={() => {
-                  setDraft(title ?? '')
-                  setEditing(true)
-                }}
-              />
-            )
-          }
-          return (
-            <AffordanceTile
-              key={kind}
-              kind={kind}
-              state="unavailable"
-              spokenLabel={`${AFFORDANCE_FACE[kind].label} — not available until media capture is built`}
-            />
-          )
-        })}
-      </View>
+      <InputAffordanceRow
+        testID="capture-affordances"
+        onPress={handlePress}
+        completed={completed}
+        counts={{ photo: photoCount, voice: voiceCount }}
+        busy={busy}
+      />
 
-      <Type variant="small" dim testID="capture-media-pending">
-        Voice notes and photos arrive with media capture. The point is a complete record without
-        them.
-      </Type>
+      <MediaStrip testID="capture-media-strip" items={mediaItems} />
 
       {title === null ? null : (
         <Type variant="body" testID="capture-title-value">
@@ -1334,16 +1255,25 @@ function RecordedAffordances({
         </Type>
       )}
 
-      {editing ? (
+      {description === null ? null : (
+        <Type variant="body" testID="capture-description-value">
+          {description}
+        </Type>
+      )}
+
+      {editing === null ? null : (
         <View style={{ gap: spacing.sm }}>
           <TextInput
-            testID="capture-title-input"
-            accessibilityLabel="A name for this point"
-            value={draft}
-            onChangeText={setDraft}
-            placeholder="A name for this point"
+            testID={editing.kind === 'title' ? 'capture-title-input' : 'capture-description-input'}
+            accessibilityLabel={editing.kind === 'title' ? 'A name for this point' : 'Notes about this point'}
+            value={editing.draft}
+            onChangeText={(text) => {
+              setEditing({ kind: editing.kind, draft: text })
+            }}
+            placeholder={editing.kind === 'title' ? 'A name for this point' : 'Notes about this point'}
             placeholderTextColor={theme.colors.textDim}
             autoFocus
+            multiline={editing.kind === 'description'}
             style={{
               minHeight: touch.min,
               borderRadius: radii.md,
@@ -1355,20 +1285,22 @@ function RecordedAffordances({
             }}
           />
           <Button
-            testID="capture-title-save"
-            label={saving ? 'SAVING…' : 'SAVE NAME'}
-            spokenLabel="Save this name onto the point"
+            testID={editing.kind === 'title' ? 'capture-title-save' : 'capture-description-save'}
+            label={saving ? 'SAVING…' : editing.kind === 'title' ? 'SAVE NAME' : 'SAVE NOTES'}
+            spokenLabel={
+              editing.kind === 'title' ? 'Save this name onto the point' : 'Save these notes onto the point'
+            }
             disabled={saving}
             onPress={() => {
               void save()
             }}
           />
         </View>
-      ) : null}
+      )}
 
       {error === null ? null : (
-        <Type variant="small" testID="capture-title-error">
-          {error}
+        <Type variant="small" testID={`capture-${error.kind}-error`}>
+          {error.message}
         </Type>
       )}
     </View>

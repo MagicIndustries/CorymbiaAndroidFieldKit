@@ -11,7 +11,7 @@ import {
   DUPLICATE_THRESHOLD_M,
   type Reading,
 } from '@corymbia/geo'
-import type { Fix, FieldRecord } from '@corymbia/data'
+import type { Attachment, Fix, FieldRecord } from '@corymbia/data'
 
 /**
  * Tests for the capture screen (spec §9.1–§9.4).
@@ -85,6 +85,10 @@ const mockRepo = {
   createRecord: jest.fn(),
   refineRecordFix: jest.fn(),
   renameRecord: jest.fn(),
+  listMedia: jest.fn<
+    ReturnType<typeof import('@corymbia/data').listMedia>,
+    Parameters<typeof import('@corymbia/data').listMedia>
+  >(),
 }
 
 jest.mock('@corymbia/data', () => {
@@ -94,16 +98,24 @@ jest.mock('@corymbia/data', () => {
     createRecord: (...args: unknown[]) => mockRepo.createRecord(...args),
     refineRecordFix: (...args: unknown[]) => mockRepo.refineRecordFix(...args),
     renameRecord: (...args: unknown[]) => mockRepo.renameRecord(...args),
+    listMedia: (...args: Parameters<typeof import('@corymbia/data').listMedia>) =>
+      mockRepo.listMedia(...args),
   }
 })
+
+// A plain alias, matching the brief's own naming — not referenced from inside
+// the `jest.mock` factory above, which is hoisted ahead of this declaration.
+const listMedia = mockRepo.listMedia
 
 /**
  * The router, mocked as an object rather than a fresh one per call.
  *
- * The screen's only navigation is the `recorded` state's way out, which until
- * Plan 5 builds the launcher is the gallery at `/`. Nothing here needs a real
- * navigation container, and mounting one would put the whole of expo-router's
- * layout machinery between these tests and the two lines they are about.
+ * The screen's navigation is the `recorded` state's two ways out — the
+ * gallery at `/`, until Plan 5 builds the launcher — and, as of Task 11, the
+ * push to `/camera` and `/voice` a photo or voice tile makes. Nothing here
+ * needs a real navigation container, and mounting one would put the whole of
+ * expo-router's layout machinery between these tests and the lines they are
+ * actually about.
  */
 const mockRouter = {
   push: jest.fn(),
@@ -113,6 +125,25 @@ const mockRouter = {
 
 jest.mock('expo-router', () => ({
   useRouter: () => mockRouter,
+}))
+
+/**
+ * `mediaStore`, mocked whole — the same reason `useAttachMedia.test.ts` mocks
+ * it (`../store`, from `src/media`): it is backed by `expo-file-system`, a
+ * native module with no meaningful behaviour in a headless test environment.
+ * This screen only ever calls `uriFor`, to turn an attachment's stored file
+ * name into the URI `MediaStrip` renders a photo tile from; `save`, `remove`
+ * and `exists` are not reachable from here at all — attaching happens on
+ * `/camera` and `/voice`, not on this screen — so each throws if anything
+ * ever reaches for it, rather than silently returning something plausible.
+ */
+jest.mock('../../src/media/store', () => ({
+  mediaStore: {
+    save: () => Promise.reject(new Error('not used by capture.tsx')),
+    remove: () => Promise.reject(new Error('not used by capture.tsx')),
+    exists: () => Promise.reject(new Error('not used by capture.tsx')),
+    uriFor: (fileName: string) => `file:///media/${fileName}`,
+  },
 }))
 
 const mockDevice = {
@@ -278,6 +309,7 @@ beforeEach(() => {
   mockRepo.createRecord.mockReset()
   mockRepo.refineRecordFix.mockReset()
   mockRepo.renameRecord.mockReset()
+  mockRepo.listMedia.mockReset()
   mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) =>
     Promise.resolve(recordFrom(input.fix)),
   )
@@ -289,10 +321,25 @@ beforeEach(() => {
     (_db: unknown, input: { recordId: string; fix: Fix }) =>
       Promise.resolve({ record: amendRecord(input.recordId, { fix: input.fix }), applied: true }),
   )
+  // Mirrors the real `renameRecord`'s own rule (`records.ts`): `description`
+  // is only ever touched when the caller's input actually carries that key —
+  // a title-only save must leave whatever notes are already on the record
+  // alone, exactly as the real repository function's `'description' in input`
+  // check does.
   mockRepo.renameRecord.mockImplementation(
-    (_db: unknown, input: { recordId: string; title: string | null }) =>
-      Promise.resolve(amendRecord(input.recordId, { title: input.title })),
+    (_db: unknown, input: { recordId: string; title: string | null; description?: string | null }) =>
+      Promise.resolve(
+        amendRecord(
+          input.recordId,
+          'description' in input
+            ? { title: input.title, description: input.description ?? null }
+            : { title: input.title },
+        ),
+      ),
   )
+  // No attachments unless a test says otherwise — the ordinary case for a
+  // capture that has just finished and has had nothing added to it yet.
+  mockRepo.listMedia.mockResolvedValue([])
 })
 
 afterEach(() => {
@@ -386,6 +433,51 @@ async function acceptNow() {
 async function takeAnotherReading() {
   await fireEvent.press(captureButton())
   await settle()
+}
+
+/**
+ * Captures a point and accepts the fix straight away, landing on the
+ * `recorded` state with its affordances ready to press — the same three
+ * steps every test in "the four affordances" describe block used to repeat
+ * inline. `accuracyM` defaults to the same 8 m `arriveWithAFix` itself
+ * defaults to; a caller passing a different one is asking for a specific
+ * final accuracy to assert against, not for a different completion — 8 m is
+ * comfortably short of both `TARGET_METRES` (so it never locks) and the flat
+ * hold that would plateau it, so ending the wait early with `acceptNow` is
+ * always what actually happens here.
+ */
+async function renderRecorded(options: { accuracyM?: number } = {}) {
+  const view = await arriveWithAFix(options.accuracyM ?? 8)
+  await tap()
+  await acceptNow()
+  return view
+}
+
+/**
+ * An attachment fixture, matching `useAttachMedia.test.ts`'s own `fakeAttachment`
+ * shape — the two files are testing opposite ends of the same pipeline
+ * (`attachMedia`'s insert there, `listMedia`'s read here), so the row either
+ * of them hands out is worth keeping recognisably the same shape.
+ *
+ * `id` is a required, explicit argument rather than a default — every test
+ * below that renders more than one attachment needs them to have distinct
+ * ids, since `MediaStrip` keys its tiles by `id` and a repeated one would
+ * silently collapse two tiles into one under React's own reconciliation
+ * rather than fail the test that rendered them.
+ */
+function photoRow(id: string, overrides: Partial<Attachment> = {}): Attachment {
+  return {
+    id,
+    recordId: 'record-1',
+    kind: 'photo',
+    fileName: `${id}.jpg`,
+    byteSize: 2048,
+    durationMs: null,
+    ordinal: 1,
+    capturedAt: '2026-09-07T01:00:05.000Z',
+    deletedAt: null,
+    ...overrides,
+  }
 }
 
 /**
@@ -1167,59 +1259,149 @@ describe('the recorded state (spec §9.6, doctrine rule 17)', () => {
   })
 })
 
-describe('the four affordances (spec §9.6)', () => {
-  it('shows all four, in the one order used everywhere in the application', async () => {
-    await arriveWithAFix()
-    await tap()
-    await acceptNow()
+describe('the affordances (spec §9.6, Task 11)', () => {
+  it('offers all four inputs, in the one order used everywhere in the application', async () => {
+    await renderRecorded()
 
+    // §9.6, as media capture completes it: title, notes, voice, photo — the
+    // whole of `InputAffordanceRow`'s own canonical list, with none of them
+    // held back any more. Asserted against the exported constant rather than
+    // a literal repeated here (doctrine rule 5's "in the same order" is a
+    // claim about the whole application) — a screen that reordered its tiles
+    // would satisfy a hand-typed array only by being edited to match, and
+    // this one not at all.
     const tiles = within(screen.getByTestId('capture-affordances')).getAllByTestId(
       /^affordance-[a-z]+$/,
     )
-    // §9.6, verbatim: "location (already complete), title, voice note, photo.
-    // Identical icons, identical order, everywhere in the application."
-    expect(tiles.map((tile) => tile.props.testID)).toEqual([
-      'affordance-location',
-      'affordance-title',
-      'affordance-voice',
-      'affordance-photo',
-    ])
-
-    // And the three this screen shares with `InputAffordanceRow` are in the
-    // same relative order as that component's own canonical list — doctrine
-    // rule 5's "in the same order" is a claim about the whole application, so
-    // it is asserted against the exported constant rather than against a
-    // literal repeated here. A screen that reordered its tiles would satisfy
-    // the literal above only by being edited to match, and this one not at all.
-    const shared = INPUT_AFFORDANCE_ORDER.filter((kind) => kind !== 'description')
-    expect(tiles.map((tile) => tile.props.testID)).toEqual([
-      'affordance-location',
-      ...shared.map((kind) => `affordance-${kind}`),
-    ])
+    expect(tiles.map((tile) => tile.props.testID)).toEqual(
+      INPUT_AFFORDANCE_ORDER.map((kind) => `affordance-${kind}`),
+    )
   })
 
-  it('has voice and photo present and disabled, and says when they arrive', async () => {
-    await arriveWithAFix()
-    await tap()
-    await acceptNow()
+  it('does not offer location, because the capture just took one', async () => {
+    await renderRecorded()
 
-    // There is no media table, so building these would mean inventing storage.
-    // Present-and-disabled is the honest state: she can see that the app knows
-    // about them and that they are not available yet (doctrine rule 3 — every
-    // level of disclosure is a legitimate stopping point, and a level that is
-    // not built must not pretend otherwise).
-    expect(screen.getByTestId('affordance-voice')).toBeDisabled()
-    expect(screen.getByTestId('affordance-photo')).toBeDisabled()
-    expect(screen.getByTestId('capture-media-pending')).toHaveTextContent(/media capture/)
+    // Spec §9.6: location is not an input here, it is the fix the capture
+    // just made — the thing the tile would have restated rather than let her
+    // do. Its removal is the point of this test, not an incidental check.
+    expect(screen.queryByTestId('affordance-location')).toBeNull()
+  })
 
-    // The one that is real must not be swept up in the same disablement.
-    expect(screen.getByTestId('affordance-title')).not.toBeDisabled()
+  it('still says what position was stored, now that the location tile is gone', async () => {
+    // A distinctive accuracy, not one already used elsewhere in this file for
+    // a different reason, so a hardcoded readout could not coincidentally
+    // satisfy this.
+    await renderRecorded({ accuracyM: 2.4 })
+
+    // Removing the tile must not remove the reassurance it carried — the
+    // recorded state's own accuracy readout already says so, untouched by
+    // this change. A single reading through the real `averageReadings`
+    // reports exactly its own accuracy, so `2.4` here is not a coincidence.
+    expect(readoutText('capture-recorded-accuracy')).toBe('±2.4 m')
+  })
+
+  it('opens the camera for the record that was just captured', async () => {
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-photo'))
+
+    expect(mockRouter.push).toHaveBeenCalledWith({
+      pathname: '/camera',
+      params: { recordId: 'record-1' },
+    })
+  })
+
+  it('opens the voice recorder for the record that was just captured', async () => {
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-voice'))
+
+    expect(mockRouter.push).toHaveBeenCalledWith({
+      pathname: '/voice',
+      params: { recordId: 'record-1' },
+    })
+  })
+
+  it('shows how many photos are attached', async () => {
+    listMedia.mockResolvedValue([photoRow('med_a'), photoRow('med_b')])
+
+    await renderRecorded()
+    await settle()
+
+    // A substring check, deliberately: `InputAffordanceRow`'s own label is
+    // `Photo · 2`, not the bare digit, so an exact match here (this file's
+    // usual default) could never pass regardless of what the screen does.
+    // Step 5 of the brief hardcodes the count to 1 to show this still fails
+    // when the number is wrong rather than merely present.
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('2', { exact: false })
+    // And it is really the photo count, not a count leaking onto every tile
+    // regardless of kind — two attachments of one kind and none of the
+    // other, not a label that only ever reads "some".
+    expect(screen.getByTestId('affordance-voice-label')).not.toHaveTextContent('·', {
+      exact: false,
+    })
+  })
+
+  it('shows the attachments on the record', async () => {
+    listMedia.mockResolvedValue([photoRow('med_a')])
+
+    await renderRecorded()
+    await settle()
+
+    expect(screen.getByTestId('media-tile-med_a')).toBeTruthy()
+  })
+
+  it('renders no media strip at all when nothing has been attached', async () => {
+    // `MediaStrip` rendering nothing for an empty list is a requirement
+    // (`packages/ui/src/media/MediaStrip.tsx`'s own doc comment), not an
+    // optimisation — so this screen must not wrap it in a container that
+    // would leave an empty frame where the component itself renders null.
+    await renderRecorded()
+
+    expect(screen.queryByTestId('capture-media-strip')).toBeNull()
+  })
+
+  it('saves notes against the record', async () => {
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+    await fireEvent.changeText(screen.getByTestId('capture-description-input'), 'Wet gully, ferns')
+    await fireEvent.press(screen.getByTestId('capture-description-save'))
+    await settle()
+
+    expect(mockRepo.renameRecord).toHaveBeenCalledTimes(1)
+    expect(mockRepo.renameRecord).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ recordId: 'record-1', description: 'Wet gully, ferns' }),
+    )
+
+    // The tile reads as complete the same two-channel way the title one does,
+    // and the value itself is shown, the way a saved title already is.
+    expect(screen.getByTestId('affordance-description-label')).toHaveTextContent('Notes ✓')
+    expect(screen.getByTestId('capture-description-value')).toHaveTextContent('Wet gully, ferns')
+  })
+
+  it('says the notes were not saved, and that the point itself is safe', async () => {
+    mockRepo.renameRecord.mockImplementation(() =>
+      Promise.reject(new Error('database is locked')),
+    )
+
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+    await fireEvent.changeText(screen.getByTestId('capture-description-input'), 'Wet gully, ferns')
+    await fireEvent.press(screen.getByTestId('capture-description-save'))
+    await settle()
+
+    expect(screen.getByTestId('capture-description-error')).toHaveTextContent(
+      'The notes were not saved: database is locked. The point itself is safe.',
+    )
+    expect(screen.queryByTestId('capture-description-value')).toBeNull()
+    expect(screen.getByTestId('capture-description-save')).not.toBeDisabled()
   })
 
   it('gives the saved point a name, through the repository that writes the event', async () => {
-    await arriveWithAFix()
-    await tap()
-    await acceptNow()
+    await renderRecorded()
 
     await fireEvent.press(screen.getByTestId('affordance-title'))
     await fireEvent.changeText(screen.getByTestId('capture-title-input'), '  Frog pond outflow  ')
@@ -1251,9 +1433,7 @@ describe('the four affordances (spec §9.6)', () => {
       Promise.reject(new Error('database is locked')),
     )
 
-    await arriveWithAFix()
-    await tap()
-    await acceptNow()
+    await renderRecorded()
 
     await fireEvent.press(screen.getByTestId('affordance-title'))
     await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
