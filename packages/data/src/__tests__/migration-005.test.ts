@@ -10,7 +10,22 @@ const NOW = '2026-09-08T09:14:00+10:00'
  * passes on a column typo, a renamed table or a dropped constraint alike. The
  * constraints in this migration are named, so SQLite reports them by name and
  * a test can insist the rule it is about is the rule that fired.
+ *
+ * CHECK() reproduces records-schema.test.ts's helper: SQLite's real message is
+ * `CHECK constraint failed: <name>`, and a bare `/media_kind_known/` would also
+ * match an unrelated error that merely mentioned the name in passing.
+ *
+ * The two UNIQUE indexes get the same treatment records-schema.test.ts already
+ * gives record's two unique indexes, for the same reason: SQLite never puts an
+ * index name in a UNIQUE error, so `/idx_media_file_name|UNIQUE/` only ever
+ * matches through its right-hand `/UNIQUE/` branch — the left alternative is
+ * dead, and the test would pass just the same if the *other* unique index
+ * fired. Matching the column list instead ties each assertion to the rule it
+ * names.
  */
+const CHECK = (name: string): RegExp => new RegExp(`CHECK constraint failed: ${name}`)
+const UNIQUE_FILE_NAME = /UNIQUE constraint failed: media\.file_name/
+const UNIQUE_RECORD_ORDINAL = /UNIQUE constraint failed: media\.record_id, media\.ordinal/
 
 async function seedDevice(db: Database): Promise<void> {
   await db.execute(
@@ -90,6 +105,20 @@ interface MediaOverrides {
   ordinal?: number
 }
 
+interface MediaRow {
+  id: string
+  record_id: string
+  kind: string
+  file_name: string
+  byte_size: number
+  duration_ms: number | null
+  ordinal: number
+  captured_at: string
+  deleted_at: string | null
+  created_at: string
+  updated_at: string
+}
+
 /**
  * Ordinals default to an auto-incrementing counter, not a fixed 1, so that two
  * `insertMedia` calls in the same test don't collide on idx_media_record_ordinal
@@ -98,32 +127,78 @@ interface MediaOverrides {
  */
 let nextOrdinal = 1
 
-async function insertMedia(db: Database, over: MediaOverrides = {}): Promise<string> {
-  const id = over.id ?? `med_${nextOrdinal}`
-  const kind = over.kind ?? 'photo'
-  const ordinal = over.ordinal ?? nextOrdinal
+/** Row-building shared by `insertMedia` and `replaceMedia`, mirroring `recordRow`. */
+function mediaRow(over: MediaOverrides = {}): MediaRow {
+  const counter = nextOrdinal
   nextOrdinal += 1
-
-  const row = {
+  const id = over.id ?? `med_${counter}`
+  const kind = over.kind ?? 'photo'
+  const ordinal = over.ordinal ?? counter
+  return {
     id,
     record_id: over.recordId ?? 'rec_a',
     kind,
     file_name: over.fileName ?? `${id}.jpg`,
     byte_size: over.byteSize ?? 123_456,
-    duration_ms:
-      over.durationMs !== undefined ? over.durationMs : kind === 'voice' ? 4200 : null,
+    duration_ms: over.durationMs !== undefined ? over.durationMs : kind === 'voice' ? 4200 : null,
     ordinal,
     captured_at: NOW,
     deleted_at: null,
     created_at: NOW,
     updated_at: NOW,
   }
-  const columns = Object.keys(row)
+}
+
+const MEDIA_COLUMNS =
+  'id, record_id, kind, file_name, byte_size, duration_ms, ordinal, captured_at, deleted_at, created_at, updated_at'
+const MEDIA_PLACEHOLDERS = '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?'
+
+/**
+ * `row` is concretely typed as `MediaRow` (unlike `seedRecord`'s dynamically
+ * shaped `Record<string, unknown>`), so its values are read out by name into a
+ * fixed-length tuple rather than via `Object.keys`/`Object.values` — that
+ * needs no `as` cast at all, where the generic column-list approach would
+ * need one to recover the key and value types `Object.keys`/`Object.values`
+ * erase.
+ */
+function mediaParams(row: MediaRow): (string | number | null)[] {
+  return [
+    row.id,
+    row.record_id,
+    row.kind,
+    row.file_name,
+    row.byte_size,
+    row.duration_ms,
+    row.ordinal,
+    row.captured_at,
+    row.deleted_at,
+    row.created_at,
+    row.updated_at,
+  ]
+}
+
+async function insertMedia(db: Database, over: MediaOverrides = {}): Promise<string> {
+  const row = mediaRow(over)
   await db.execute(
-    `INSERT INTO media (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
-    Object.values(row) as (string | number | null)[],
+    `INSERT INTO media (${MEDIA_COLUMNS}) VALUES (${MEDIA_PLACEHOLDERS})`,
+    mediaParams(row),
   )
-  return id
+  return row.id
+}
+
+/**
+ * Same row-building as `insertMedia`, but via `INSERT OR REPLACE` — the route
+ * around `media_is_never_hard_deleted`'s `BEFORE DELETE` trigger that migration
+ * 005's doc comment stakes the soft-delete guarantee on, the same hole
+ * records-schema.test.ts's `replaceRecord` exercises for `record` and `event`.
+ */
+async function replaceMedia(db: Database, over: MediaOverrides = {}): Promise<string> {
+  const row = mediaRow(over)
+  await db.execute(
+    `INSERT OR REPLACE INTO media (${MEDIA_COLUMNS}) VALUES (${MEDIA_PLACEHOLDERS})`,
+    mediaParams(row),
+  )
+  return row.id
 }
 
 async function softDelete(db: Database, id: string): Promise<void> {
@@ -144,17 +219,49 @@ describe('the media table', () => {
     await db.close()
   })
 
-  it('stores a photo attached to a record', async () => {
-    await insertMedia(db, { id: 'med_one', fileName: 'med_one.jpg' })
-    const rows = await db.all<{ id: string; record_id: string; kind: string }>(
-      'SELECT id, record_id, kind FROM media WHERE id = ?',
-      ['med_one'],
-    )
-    expect(rows).toEqual([{ id: 'med_one', record_id: 'rec_a', kind: 'photo' }])
+  it('stores a photo attached to a record, every column intact', async () => {
+    // Reads back the whole row rather than three of eleven columns, so a
+    // column/value misalignment in the shared insert helper cannot pass
+    // unnoticed — the earlier version of this test asserted only id, record_id
+    // and kind.
+    await insertMedia(db, {
+      id: 'med_one',
+      fileName: 'med_one.jpg',
+      byteSize: 654_321,
+      ordinal: 3,
+    })
+    const row = await db.first<MediaRow>('SELECT * FROM media WHERE id = ?', ['med_one'])
+    expect(row).toEqual({
+      id: 'med_one',
+      record_id: 'rec_a',
+      kind: 'photo',
+      file_name: 'med_one.jpg',
+      byte_size: 654_321,
+      duration_ms: null,
+      ordinal: 3,
+      captured_at: NOW,
+      deleted_at: null,
+      created_at: NOW,
+      updated_at: NOW,
+    })
   })
 
   it('refuses a kind it does not know', async () => {
-    await expect(insertMedia(db, { kind: 'video' })).rejects.toThrow(/media_kind_known/)
+    await expect(insertMedia(db, { kind: 'video' })).rejects.toThrow(CHECK('media_kind_known'))
+  })
+
+  it('stores a voice note with its duration', async () => {
+    // The negative voice tests below are both about what a voice note must
+    // NOT look like; nothing until now proved a well-formed one is storable
+    // at all. Narrowing media_duration_matches_kind to the photo half alone
+    // would make every voice note unstorable and still leave those negative
+    // tests green.
+    await insertMedia(db, { id: 'med_voice', kind: 'voice', durationMs: 4200 })
+    const row = await db.first<{ kind: string; duration_ms: number | null }>(
+      'SELECT kind, duration_ms FROM media WHERE id = ?',
+      ['med_voice'],
+    )
+    expect(row).toEqual({ kind: 'voice', duration_ms: 4200 })
   })
 
   it('refuses a voice note with no duration', async () => {
@@ -162,26 +269,60 @@ describe('the media table', () => {
     // progress bar, or costed for export. Photos have no duration at all, and
     // one constraint enforces both halves so neither can drift.
     await expect(insertMedia(db, { kind: 'voice', durationMs: null })).rejects.toThrow(
-      /media_duration_matches_kind/,
+      CHECK('media_duration_matches_kind'),
+    )
+  })
+
+  it.each([0, -100])('refuses a voice note with a duration of %i ms', async (durationMs) => {
+    // duration_ms > 0 is a separate half of the same constraint from IS NOT
+    // NULL — weakening it to IS NOT NULL alone would accept a duration of zero
+    // or less, and nothing above exercises either.
+    await expect(insertMedia(db, { kind: 'voice', durationMs })).rejects.toThrow(
+      CHECK('media_duration_matches_kind'),
     )
   })
 
   it('refuses a photo that claims a duration', async () => {
     await expect(insertMedia(db, { kind: 'photo', durationMs: 5000 })).rejects.toThrow(
-      /media_duration_matches_kind/,
+      CHECK('media_duration_matches_kind'),
     )
   })
 
   it('refuses a zero-byte file', async () => {
     // An empty file is a failed capture that reported success. Storing the row
     // makes it look like she has a photo she does not have.
-    await expect(insertMedia(db, { byteSize: 0 })).rejects.toThrow(/media_byte_size_positive/)
+    await expect(insertMedia(db, { byteSize: 0 })).rejects.toThrow(
+      CHECK('media_byte_size_positive'),
+    )
+  })
+
+  it('refuses an ordinal of zero', async () => {
+    await expect(insertMedia(db, { ordinal: 0 })).rejects.toThrow(
+      CHECK('media_ordinal_positive'),
+    )
   })
 
   it('refuses two rows claiming the same file', async () => {
     await insertMedia(db, { id: 'med_one', fileName: 'med_one.jpg' })
     await expect(insertMedia(db, { id: 'med_two', fileName: 'med_one.jpg' })).rejects.toThrow(
-      /idx_media_file_name|UNIQUE/,
+      UNIQUE_FILE_NAME,
+    )
+  })
+
+  it('refuses a new attachment claiming a soft-deleted attachment’s file name', async () => {
+    // idx_media_record_ordinal is properly pinned by "frees a position once the
+    // attachment at it is soft-deleted" below: the ordinal is display order
+    // alone, so reusing one after a soft delete is correct. idx_media_file_name
+    // must NOT get the same treatment — the file it names is still sitting on
+    // disk, awaiting a deliberate purge, and handing its name to a new capture
+    // overwrites those bytes. One record's photo would silently become
+    // another's, with both rows still looking correct. Adding
+    // `WHERE deleted_at IS NULL` here — "make the two indexes consistent" — is
+    // exactly the tidy-up that would reopen that hole.
+    await insertMedia(db, { id: 'med_one', fileName: 'shared.jpg' })
+    await softDelete(db, 'med_one')
+    await expect(insertMedia(db, { id: 'med_two', fileName: 'shared.jpg' })).rejects.toThrow(
+      UNIQUE_FILE_NAME,
     )
   })
 
@@ -189,7 +330,7 @@ describe('the media table', () => {
     await insertMedia(db, { id: 'med_one', recordId: 'rec_a', ordinal: 1 })
     await expect(
       insertMedia(db, { id: 'med_two', recordId: 'rec_a', ordinal: 1 }),
-    ).rejects.toThrow(/idx_media_record_ordinal|UNIQUE/)
+    ).rejects.toThrow(UNIQUE_RECORD_ORDINAL)
   })
 
   it('frees a position once the attachment at it is soft-deleted', async () => {
@@ -221,6 +362,38 @@ describe('the media table', () => {
     await expect(db.execute('DELETE FROM media WHERE id = ?', ['med_one'])).rejects.toThrow(
       /media_is_never_hard_deleted/,
     )
+  })
+
+  it('refuses an INSERT OR REPLACE: the route around the hard-delete guard', async () => {
+    // REPLACE conflict resolution deletes the conflicting row before inserting
+    // the new one — not an UPDATE, so media_file_name_is_immutable (a BEFORE
+    // UPDATE trigger) never runs on this path. media_is_never_hard_deleted (a
+    // BEFORE DELETE trigger) is what actually catches it, provided
+    // recursive_triggers is ON — see the next test.
+    await insertMedia(db, { id: 'med_one', fileName: 'med_one.jpg', byteSize: 111_111 })
+    await expect(
+      replaceMedia(db, { id: 'med_one', fileName: 'med_one.jpg', byteSize: 999_999 }),
+    ).rejects.toThrow(/media_is_never_hard_deleted/)
+    const row = await db.first<{ byte_size: number }>(
+      'SELECT byte_size FROM media WHERE id = ?',
+      ['med_one'],
+    )
+    expect(row?.byte_size).toBe(111_111)
+  })
+
+  it('leaves recursive_triggers on, which is what makes that REPLACE refusal work', async () => {
+    // Confirmed, not assumed: with the pragma OFF the same REPLACE succeeds and
+    // silently rewrites the row, which is exactly the failure this trigger
+    // exists to stop. This test flips the pragma itself to prove the causation
+    // rather than only reading its value.
+    await insertMedia(db, { id: 'med_one', fileName: 'med_one.jpg', byteSize: 111_111 })
+    await db.execute('PRAGMA recursive_triggers = OFF')
+    await replaceMedia(db, { id: 'med_one', fileName: 'med_one.jpg', byteSize: 999_999 })
+    const row = await db.first<{ byte_size: number }>(
+      'SELECT byte_size FROM media WHERE id = ?',
+      ['med_one'],
+    )
+    expect(row?.byte_size).toBe(999_999)
   })
 
   it('refuses an attachment on a record that does not exist', async () => {
