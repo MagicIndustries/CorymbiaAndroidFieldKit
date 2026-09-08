@@ -1,2 +1,2 @@
-export { MediaStrip, KIND_LABEL } from './MediaStrip'
+export { MediaStrip, KIND_LABEL, mediaStripLabel } from './MediaStrip'
 export type { MediaStripItem } from './MediaStrip'

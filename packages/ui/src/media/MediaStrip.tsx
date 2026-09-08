@@ -46,6 +46,44 @@ export const KIND_LABEL: Readonly<Record<MediaKind, string>> = Object.freeze({
 })
 
 /**
+ * How one attachment is named — `Photo 3 of 10`, `Voice note 1 of 2` — to a
+ * screen reader on its own tile, and to `capture.tsx`'s removal confirmation
+ * for the tile it is about.
+ *
+ * **The number is within the kind, not across the strip.** An earlier version
+ * built `${index + 1} of ${items.length}` from the flat list, so a record
+ * with ten photos and three voice notes announced its last tile as "Voice
+ * note 13 of 13" and its first as "Photo 1 of 13" — a count of something
+ * nobody is looking at. The noun was corrected four separate times over this
+ * branch; the number beside it was not looked at once. `MediaStrip.test.tsx`
+ * used to render one photo and one voice note, where "1 of 2" and "2 of 2"
+ * are what BOTH implementations produce, so the fixture codified the bug
+ * rather than catching it — it now renders two photos and one voice note,
+ * which the flat count cannot satisfy.
+ *
+ * Exported, and used by this component itself, because the removal
+ * confirmation has to name the tile she is actually about to lose: the strip
+ * shows roughly five of ten near-identical 64dp thumbnails, resets to offset
+ * 0 on every refresh, and there is no undo anywhere in the app. Two
+ * independently-written numbering schemes disagreeing would point her at the
+ * wrong photo, so there is one.
+ *
+ * `null` when `id` names nothing in `items` — a strip that has just been
+ * refreshed out from under a pending removal, which the caller renders as no
+ * confirmation at all rather than as a question about nothing.
+ */
+export function mediaStripLabel(
+  items: readonly { id: string; kind: MediaKind }[],
+  id: string,
+): string | null {
+  const item = items.find((entry) => entry.id === id)
+  if (item === undefined) return null
+  const sameKind = items.filter((entry) => entry.kind === item.kind)
+  const position = sameKind.findIndex((entry) => entry.id === id) + 1
+  return `${KIND_LABEL[item.kind]} ${position} of ${sameKind.length}`
+}
+
+/**
  * A minimal microphone glyph, drawn as SVG rather than as an emoji `Text`
  * node. That distinction is load-bearing, not decorative: `toHaveTextContent`
  * walks every `Text` descendant of a tile and concatenates them (see
@@ -91,11 +129,23 @@ export function MediaStrip({
   items,
   onPress,
   onRemove,
+  pendingRemovalId = null,
   testID,
 }: {
   items: MediaStripItem[]
   onPress?: (id: string) => void
   onRemove?: (id: string) => void
+  /**
+   * The attachment a removal confirmation is currently open for, marked in
+   * the strip so the question and the thing it is about are visibly the same
+   * one.
+   *
+   * Two channels (doctrine rule 9), because a mis-identified tile is
+   * destroyed with no undo: the tile takes the amber border the confirmation
+   * panel itself uses AND a thicker one, and its spoken name says it is the
+   * attachment the question is about. Neither is colour alone.
+   */
+  pendingRemovalId?: string | null
   testID?: string
 }): React.JSX.Element | null {
   const { theme } = useTheme()
@@ -106,8 +156,6 @@ export function MediaStrip({
   // populated one.
   if (items.length === 0) return null
 
-  const total = items.length
-
   return (
     <ScrollView
       testID={testID}
@@ -115,14 +163,16 @@ export function MediaStrip({
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={{ flexDirection: 'row', gap: spacing.sm }}
     >
-      {items.map((item, index) => {
-        const label = `${KIND_LABEL[item.kind]} ${index + 1} of ${total}`
+      {items.map((item) => {
+        const pending = item.id === pendingRemovalId
+        const place = mediaStripLabel(items, item.id) ?? KIND_LABEL[item.kind]
+        const label = pending ? `${place}, the attachment the removal question is about` : place
         const tileStyle = {
           width: field.mediaTile,
           minHeight: field.mediaTile,
           borderRadius: radii.md,
-          borderWidth: 1,
-          borderColor: theme.colors.border,
+          borderWidth: pending ? 3 : 1,
+          borderColor: pending ? theme.colors.statusFair : theme.colors.border,
           backgroundColor: theme.colors.surfaceRaised,
           alignItems: 'center' as const,
           justifyContent: 'center' as const,

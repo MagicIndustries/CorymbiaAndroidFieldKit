@@ -1,8 +1,8 @@
 import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react-native'
-import { field, spacing, touch } from '@corymbia/tokens'
+import { darkTheme, field, spacing, touch } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
-import { MediaStrip, type MediaStripItem } from '../MediaStrip'
+import { MediaStrip, mediaStripLabel, type MediaStripItem } from '../MediaStrip'
 
 // `useTheme()` throws outside a `ThemeProvider` (see ContextStamp.test.tsx
 // and InputAffordanceRow.test.tsx) — every render in this file goes through
@@ -74,10 +74,82 @@ describe('MediaStrip', () => {
     expect(style.minHeight).toBeGreaterThanOrEqual(touch.comfortable)
   })
 
-  it('names each attachment to a screen reader by kind and position', async () => {
-    await wrap(<MediaStrip items={[photo('a'), voice('b', 4000)]} onPress={() => {}} testID="strip" />)
-    expect(screen.getByTestId('media-tile-a').props.accessibilityLabel).toMatch(/photo 1 of 2/i)
-    expect(screen.getByTestId('media-tile-b').props.accessibilityLabel).toMatch(/voice note 2 of 2/i)
+  it('names each attachment to a screen reader by kind and position within that kind', async () => {
+    // The fixture is two photos and ONE voice note, deliberately. The
+    // earlier one-of-each fixture could not fail: with a photo first and a
+    // voice note second, "1 of 2" and "2 of 2" are what the correct
+    // within-kind numbering AND the flat `index + 1 of items.length` both
+    // produce, so it codified the bug it was supposed to catch. A record
+    // with ten photos and three voice notes announced its last tile as
+    // "Voice note 13 of 13" — a position in a list nobody is looking at, and
+    // the fifth appearance of the same photo/voice conflation this branch
+    // corrected four times in the noun alone.
+    await wrap(
+      <MediaStrip
+        items={[photo('a'), photo('c'), voice('b', 4000)]}
+        onPress={() => {}}
+        testID="strip"
+      />,
+    )
+    expect(screen.getByTestId('media-tile-a').props.accessibilityLabel).toBe('Photo 1 of 2')
+    expect(screen.getByTestId('media-tile-c').props.accessibilityLabel).toBe('Photo 2 of 2')
+    expect(screen.getByTestId('media-tile-b').props.accessibilityLabel).toBe('Voice note 1 of 1')
+  })
+
+  it('numbers a kind by its own order, not by where its tiles sit in the strip', async () => {
+    // Interleaved, so within-kind position and strip position disagree for
+    // every tile after the first: the second photo is the THIRD tile.
+    await wrap(
+      <MediaStrip
+        items={[photo('a'), voice('b', 4000), photo('c'), voice('d', 5000)]}
+        onPress={() => {}}
+        testID="strip"
+      />,
+    )
+    expect(screen.getByTestId('media-tile-c').props.accessibilityLabel).toBe('Photo 2 of 2')
+    expect(screen.getByTestId('media-tile-d').props.accessibilityLabel).toBe('Voice note 2 of 2')
+  })
+
+  it('names an attachment the same way for a caller as it does on the tile', async () => {
+    // `capture.tsx`'s removal confirmation asks "Remove photo 2 of 2?" using
+    // this exported function, and the strip labels its own tiles with it too
+    // — one numbering, not two that could drift apart and point her at the
+    // wrong thumbnail.
+    const items = [photo('a'), photo('c'), voice('b', 4000)]
+    expect(mediaStripLabel(items, 'c')).toBe('Photo 2 of 2')
+    expect(mediaStripLabel(items, 'b')).toBe('Voice note 1 of 1')
+    expect(mediaStripLabel(items, 'gone')).toBeNull()
+  })
+
+  it('marks the tile a removal question is open for', async () => {
+    // Ten photos, roughly five visible in a scrolling strip of near-identical
+    // 64dp thumbnails that resets to offset 0 on every refresh, and no undo
+    // anywhere in the app: a confirmation that does not point at its own
+    // subject is a coin toss.
+    await wrap(
+      <MediaStrip items={[photo('a'), photo('c')]} onRemove={() => {}} pendingRemovalId="c" testID="strip" />,
+    )
+    const marked = screen.getByTestId('media-tile-c')
+    const other = screen.getByTestId('media-tile-a')
+    expect(marked.props.style.borderColor).toBe(darkTheme.colors.statusFair)
+    expect(other.props.style.borderColor).toBe(darkTheme.colors.border)
+    // Doctrine rule 9: never the colour alone. The border is also thicker,
+    // and the spoken name says which tile the question is about.
+    expect(marked.props.style.borderWidth).toBeGreaterThan(other.props.style.borderWidth)
+    expect(marked.props.accessibilityLabel).toBe(
+      'Photo 2 of 2, the attachment the removal question is about',
+    )
+    expect(other.props.accessibilityLabel).toBe('Photo 1 of 2')
+  })
+
+  it('marks nothing when no removal is pending', async () => {
+    await wrap(<MediaStrip items={[photo('a'), photo('c')]} onRemove={() => {}} testID="strip" />)
+    expect(screen.getByTestId('media-tile-a').props.style.borderColor).toBe(
+      darkTheme.colors.border,
+    )
+    expect(screen.getByTestId('media-tile-c').props.style.borderColor).toBe(
+      darkTheme.colors.border,
+    )
   })
 
   it('offers removal only when a handler is given', async () => {
