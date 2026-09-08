@@ -1167,16 +1167,25 @@ instructions and data aloud.
 
 ### 12.1 Storage
 
-Files live in **app-owned storage** in one flat media directory, named by record UUID plus an
-index.
+Files live in **app-owned storage** in one flat media directory, named by the media row's own
+id.
 
 **Flat, not under a project directory.** An earlier draft put files under the project they
 belonged to. That cannot hold once records are refilable: filing an Inbox record, or moving
 one between activities, would have to move its files too, and a half-finished move on a dying
 battery leaves rows pointing at files that are no longer there. It is the same failure §12.1
 already rejects below for naming files by title — a stored path that depends on mutable
-metadata — arrived at one level up. The record UUID never changes, so the path never has to.
-Project structure is applied at export time, where human-readable naming already happens.
+metadata — arrived at one level up. Project structure is applied at export time, where
+human-readable naming already happens.
+
+**Named by the media id, not by record plus an index.** An earlier draft used the record UUID
+and an ordinal. The record UUID is stable, but the *index* is not: removing the first of three
+photos, or reordering them, moves every index after it — and with it every filename, which is
+the third time the same mutable-metadata-in-a-path failure appears in this section. Worse, a
+soft-deleted attachment keeps its file until purge, so a reused index would collide with bytes
+that are still on disk. The media row's id is minted once and never changes, which makes the
+name unique for the life of the database and the ordering free to change without touching a
+file. The record it belongs to is a column, which is where a mutable relationship belongs.
 
 **Not a public shared folder.** Scoped storage on Android 10+ prevents free writes to
 arbitrary public directories, and anything placed there is swept into the gallery and cloud
