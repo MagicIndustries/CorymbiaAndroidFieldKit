@@ -2044,6 +2044,56 @@ git commit
 
 ---
 
+### Task 10b: Connect the pipeline — added during execution
+
+**Files:**
+- Move: `apps/fieldkit/src/media/ambient.ts` out of the media module
+- Modify: `apps/fieldkit/app/camera.tsx`, `apps/fieldkit/app/voice.tsx` and their tests
+- Modify: `apps/fieldkit/app/capture.tsx`, `apps/fieldkit/app/diagnostics.tsx`
+- Delete: `apps/fieldkit/src/media/attachPhoto.ts`, `apps/fieldkit/src/media/attachVoice.ts`
+
+**Why this task exists.** It is not in the original plan; it closes two gaps that plan created,
+found when Task 10 reported `DONE_WITH_CONCERNS`. **After Task 10 the media feature does not
+work at all**, and the two halves must be fixed together — fixing only the first produces a
+feature that appears to work while stamping "no position" on every photo and voice note, which
+is the failure that looks like success.
+
+**Gap one: the screens still call stubs.** Task 8's brief invented a module-level `attachPhoto`
+seam for Task 10 to fill, without noticing that what would fill it is a React hook needing
+database and device context. So `attachPhoto.ts` and `attachVoice.ts` still throw, and the
+screens call them. Delete both modules; have each screen call `useAttachMedia()` at the top of
+its component and keep the returned function where the imported one sits today.
+
+Two things the seam shape hid, neither visible from the screens:
+
+- `camera.test.tsx` and `voice.test.tsx` `jest.mock` the seam modules. Their mocks must be
+  retargeted at `../../src/media/useAttachMedia`.
+- `useDatabase()` and `useDevice()` **throw** when the database is not yet open. A module-level
+  function had no such precondition; a hook does. The screens must sit under `DatabaseProvider`
+  and respect `useDatabaseStatus`, the way `capture.tsx` already splits its body in two for
+  exactly this reason.
+
+**Gap two: the ambient cache has no producer, and there are now two caches.** `useAttachMedia`
+reads a module-level cache nothing calls `.record()` on, so `readAmbient()` returns `null` and
+every media event is stamped `{ quality: 'none' }`. Meanwhile `diagnostics.tsx` builds its
+*own* cache in a `useRef`, and `capture.tsx` builds a `LocationSource` with no cache at all.
+
+Feeding one without unifying them leaves the fed cache and the read cache as different objects
+and the symptom survives the fix, which is why this is one task. So: relocate the module out of
+`src/media` first — an app-wide GPS cache under the media module means the capture screen would
+import its location cache from there — then have every screen that receives readings call
+`.record(reading)` on that one instance, and replace `diagnostics.tsx`'s private cache with it.
+
+**A test must fail if the two ever separate again.** Attaching media after a capture screen has
+taken readings must produce an event carrying an *ambient* fix, not `{ quality: 'none' }`.
+
+**The cross-task constraint from Task 9 still binds** — `voice.tsx` calls `discardFile(sourceUri)`
+whenever the attach rejects, and `MediaStore.save` moves, so the hook must never reject after
+committing anything that still depends on the source file. Do not change either screen's error
+or cleanup paths: they were written against the move semantics the store actually has.
+
+---
+
 ### Task 11: Wire it into the capture screen, and retire the local affordance tile
 
 **Files:**
