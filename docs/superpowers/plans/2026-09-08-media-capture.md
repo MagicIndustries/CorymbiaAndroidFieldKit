@@ -2425,6 +2425,19 @@ by the owner, in this order:
 `npx expo prebuild --platform android` must run before the build**, or neither permission
 reaches the manifest and both screens fail at runtime with no useful message.
 
+#### The device checks live in `docs/media-hardware-checklist.md`
+
+Written there rather than here, and rather than in a gitignored task report, because it is a
+document the owner works from while standing outside — not a task instruction. It carries the
+voice screen's own seven checks plus everything the reviews could not settle without hardware.
+
+The voice screen's checks matter most, for a reason worth repeating: five passes were needed on
+that screen, and **four versions passed their full test suite while being wrong on the device**.
+Two of those were found only by reading the bundled Kotlin.
+
+<details>
+<summary>The original text, kept for the reasoning it records</summary>
+
 #### The voice screen's own checks, which no test can answer
 
 The voice note screen went through five review passes. Three of them were verified green and
@@ -2464,6 +2477,8 @@ the S25 — the tablet has never run this app.
    deliberately; the stored duration should be within a second. Then a 2 s note (must be kept)
    and a 0.5 s tap (must be discarded as too short) — and check the cache directory afterwards
    to confirm the discarded file is actually gone.
+
+</details>
 
 - [ ] **Step 5: Verify and commit**
 
