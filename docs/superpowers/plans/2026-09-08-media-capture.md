@@ -33,10 +33,9 @@ the docs disagree, the docs win — say so in your report rather than making the
 - Every adapter that opens the database must set `PRAGMA recursive_triggers = ON` and `PRAGMA foreign_keys = ON`.
 - TypeScript strict with `noUncheckedIndexedAccess`. No `as` casts to silence a type, no non-null assertions.
 - Never `git add -A` or `git add .`. The working tree carries unrelated pre-existing deletions under `.agents/skills/tauri/` that must stay out of every commit. Stage the exact paths each step names.
-- Every commit message ends with:
+- Every commit message ends with exactly this one trailer line, and nothing after it:
   ```
   Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-  Claude-Session: https://claude.ai/code/session_01E5UkRfbRSagHNeYr5imHyi
   ```
 - Do not run `npx expo run:android`. It never exits — it keeps Metro alive by design. The owner builds and installs.
 - Media files are **app-owned and flat**, named by record UUID plus index (spec §12.1). Never a public shared directory: scoped storage on Android 10+ forbids it, and anything placed there is swept into the gallery and cloud backup, which destroys chain-of-custody.
