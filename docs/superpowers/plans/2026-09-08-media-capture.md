@@ -1081,7 +1081,7 @@ describe('softDeleteMedia', () => {
     await softDeleteMedia(db, 'med_one', DEVICE, fix)
     const events = await listEvents(db, RECORD)
     const removal = events.filter((e) => e.action === 'edited').at(-1)
-    expect(removal?.message).toMatch(/removed/i)
+    expect(removal?.detail).toMatch(/removed/i)
   })
 
   it('is refused for an attachment that is already gone', async () => {
@@ -1092,9 +1092,9 @@ describe('softDeleteMedia', () => {
 })
 ```
 
-Check `appendEvent`'s actual parameter names in `packages/data/src/repositories/events.ts`
-and use them — the `message` field above is the shape `refineRecordFix` already writes, so
-confirm rather than assume.
+`EventEntry`'s free-text field is **`detail`**, not `message` — confirmed against
+`packages/data/src/repositories/events.ts` during Task 4, where an earlier draft of this plan
+had it wrong. Check `appendEvent`'s other parameter names there too rather than assuming.
 
 - [ ] **Step 2: Run them to verify they fail**
 
