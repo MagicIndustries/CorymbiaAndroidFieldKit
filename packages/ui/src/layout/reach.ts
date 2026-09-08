@@ -38,3 +38,20 @@ export function resolveReach({
     primarySide: handedness,
   }
 }
+
+/**
+ * How wide a `bottomCorners` control block may grow — the capture block on
+ * `capture.tsx`, the shutter controls on `camera.tsx`. A tablet in landscape
+ * is the only case that reaches `bottomCorners`, and there the whole point is
+ * that the block sits under one thumb: allowed to span a ten-inch screen it
+ * would put its own far edge further from the control than the layout this
+ * anchor exists to replace. This is a fixed physical size in dp, not a
+ * fraction of the window — nothing here may branch on a raw width (doctrine's
+ * layout rule), and the ergonomic question is how far a thumb reaches, which
+ * is a distance rather than a proportion.
+ *
+ * Owned here, next to `resolveReach`, rather than declared per screen: two
+ * copies of the same ergonomic constant drift the moment one screen's is
+ * tuned and the other's is not.
+ */
+export const CORNER_BLOCK_MAX_W = 420

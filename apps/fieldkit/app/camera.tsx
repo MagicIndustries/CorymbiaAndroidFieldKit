@@ -3,7 +3,7 @@ import { View, type ViewStyle } from 'react-native'
 import { router, useLocalSearchParams } from 'expo-router'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 import { spacing } from '@corymbia/tokens'
-import { Button, Screen, Type, resolveReach, useLayout, useTheme } from '@corymbia/ui'
+import { Button, CORNER_BLOCK_MAX_W, Screen, Type, resolveReach, useLayout, useTheme } from '@corymbia/ui'
 import { useSettings } from '../src/db/provider'
 import { attachPhoto } from '../src/media/attachPhoto'
 
@@ -21,20 +21,20 @@ import { attachPhoto } from '../src/media/attachPhoto'
  */
 
 /**
- * How wide the control band may grow when the reach zone anchors it to a
- * corner — the same ergonomic reasoning `capture.tsx`'s `CORNER_BLOCK_MAX_W`
- * applies to the capture block: a tablet in landscape pulls the shutter to
- * whichever corner her dominant hand reaches, and without a cap that corner
- * block would stretch the full width of a 10-inch tablet.
+ * A human sentence first, the technical cause subordinate to it rather than
+ * the whole message (doctrine rule 6: plain language for process). Until
+ * Task 10 lands, every capture surfaces the seam's own placeholder message —
+ * and a native camera failure will be equally raw — so this is what stands
+ * between that text and a field ecologist who needs to know what happened
+ * and what to do, not what threw.
  */
-const CORNER_BLOCK_MAX_W = 420
-
 function messageFor(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause)
+  const detail = cause instanceof Error ? cause.message : String(cause)
+  return `The photo could not be saved: ${detail}. Try the shutter again.`
 }
 
 export default function CameraScreen() {
-  const { recordId } = useLocalSearchParams<{ recordId: string }>()
+  const { recordId } = useLocalSearchParams<{ recordId?: string }>()
   const [permission, requestPermission] = useCameraPermissions()
   const cameraRef = useRef<CameraView>(null)
   const [error, setError] = useState<string | null>(null)
@@ -57,6 +57,13 @@ export default function CameraScreen() {
    */
   const shoot = useCallback(async () => {
     if (savingRef.current) return
+    // Nothing navigates to `/camera` yet (spec §12.1 lands with Task 10), so
+    // this is latent rather than reachable today — but a route opened
+    // without its param would otherwise hand `attachPhoto` an `undefined`
+    // foreign key. The render guard below keeps the shutter from ever
+    // appearing in that case; this is the type-level backstop for the
+    // closure that outlives it.
+    if (recordId === undefined) return
     savingRef.current = true
     setSaving(true)
     setError(null)
@@ -76,16 +83,44 @@ export default function CameraScreen() {
     }
   }, [recordId])
 
+  // No route navigates here without a `recordId` yet (latent until Task 10),
+  // but the seam validates nothing, and `useLocalSearchParams` yields
+  // `undefined` in practice however the type is spelled. Render something
+  // honest rather than a viewfinder with nowhere to attach its photo.
+  if (recordId === undefined) {
+    return (
+      <Screen
+        testID="camera-screen"
+        spokenDescription="Camera. This screen was opened without a record to attach a photo to, so there is nothing to capture into."
+      >
+        <Type testID="camera-no-record">
+          This camera was not opened from a survey record, so there is nowhere to attach a
+          photo. Go back and open the camera from the record you want to add it to.
+        </Type>
+      </Screen>
+    )
+  }
+
   // `permission` is `null` until the hook resolves, and `null` is not
   // `denied` — rendering the refusal here would flash "no camera access" at
   // someone who granted it months ago. Three states, not two.
   if (permission === null) {
-    return <Screen testID="camera-screen">{null}</Screen>
+    return (
+      <Screen
+        testID="camera-screen"
+        spokenDescription="Camera. Checking whether Corymbia Field Kit has permission to use the camera."
+      >
+        {null}
+      </Screen>
+    )
   }
 
   if (!permission.granted && permission.canAskAgain) {
     return (
-      <Screen testID="camera-screen">
+      <Screen
+        testID="camera-screen"
+        spokenDescription="Camera access needed. Corymbia Field Kit needs the camera to attach a photo to this survey record. A button to allow it."
+      >
         <Type>
           Corymbia Field Kit needs the camera to attach a photo to this survey record.
         </Type>
@@ -103,7 +138,10 @@ export default function CameraScreen() {
 
   if (!permission.granted) {
     return (
-      <Screen testID="camera-screen">
+      <Screen
+        testID="camera-screen"
+        spokenDescription="Camera access refused. Open Settings to allow Corymbia Field Kit to use the camera, then come back to attach a photo."
+      >
         <Type testID="camera-denied">
           Camera access was refused. Open Settings to allow Corymbia Field Kit to use the
           camera, then come back to attach a photo.
@@ -123,7 +161,11 @@ export default function CameraScreen() {
       : { alignSelf: 'stretch' }
 
   return (
-    <Screen testID="camera-screen" padded={false}>
+    <Screen
+      testID="camera-screen"
+      padded={false}
+      spokenDescription="Camera. The live viewfinder and one control that captures a photo and attaches it to this record."
+    >
       <CameraView testID="camera-view" ref={cameraRef} style={{ flex: 1 }} />
       <View style={[controlsStyle, { padding: spacing.lg, gap: spacing.md }]}>
         {error !== null ? (

@@ -14,6 +14,7 @@ import { radii, spacing, touch } from '@corymbia/tokens'
 import {
   Button,
   CaptureDial,
+  CORNER_BLOCK_MAX_W,
   HelpAffordance,
   INPUT_AFFORDANCE_ORDER,
   Screen,
@@ -262,20 +263,6 @@ const AFFORDANCE_FACE: Record<RecordedAffordanceKind, { glyph: string; label: st
   voice: { glyph: '🎙️', label: 'Voice' },
   photo: { glyph: '📷', label: 'Photo' },
 }
-
-/**
- * How wide the capture block may grow when the reach zone anchors it to a
- * corner rather than stretching it across a band.
- *
- * A tablet in landscape is the only case that reaches this (see `resolveReach`),
- * and there the whole point is that the block sits under one thumb: allowed to
- * span a ten-inch screen it would put its own far edge further from the control
- * than the panel this design replaced. This is a fixed physical size in dp, not
- * a fraction of the window — nothing here may branch on a raw width (doctrine's
- * layout rule), and the ergonomic question is how far a thumb reaches, which is
- * a distance rather than a proportion.
- */
-const CORNER_BLOCK_MAX_W = 420
 
 export default function CaptureScreen() {
   const status = useDatabaseStatus()

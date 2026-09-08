@@ -32,7 +32,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Corymbia Field Kit uses the camera to attach photos to a survey record."
+          "cameraPermission": "Corymbia Field Kit uses the camera to attach photos to a survey record.",
+          "barcodeScannerEnabled": false
         }
       ]
     ]

@@ -97,7 +97,7 @@ const mockRouterBack = jest.fn()
 // being able to change between tests. A screen that quietly hardcoded
 // 'rec_a' as the argument to `attachPhoto` would satisfy a test that only
 // ever exercised one recordId — this is what lets a second value catch that.
-let mockRecordId = 'rec_a'
+let mockRecordId: string | undefined = 'rec_a'
 
 jest.mock('expo-router', () => ({
   router: { back: (...args: unknown[]) => mockRouterBack(...args) },
@@ -112,6 +112,7 @@ import CameraScreen from '../camera'
 const takePictureAsync = mockTakePictureAsync
 const attachPhoto = mockAttachPhoto
 const routerBack = mockRouterBack
+const requestPermission = mockRequestPermission
 
 function setPermission(permission: MockPermission) {
   mockPermission = permission
@@ -144,6 +145,17 @@ describe('CameraScreen', () => {
     expect(screen.queryByTestId('camera-view')).toBeNull()
   })
 
+  it('asks the OS for camera access when the request button is pressed', async () => {
+    // The one branch on this screen with a real side effect: pressing this
+    // button and doing nothing are indistinguishable to every other
+    // assertion in this file, which is exactly what makes it worth pinning
+    // on its own.
+    setPermission({ granted: false, canAskAgain: true, status: 'undetermined' })
+    await renderScreen()
+    await fireEvent.press(screen.getByTestId('camera-request'))
+    expect(requestPermission).toHaveBeenCalledTimes(1)
+  })
+
   it('shows neither the viewfinder nor a refusal while permission is still unknown', async () => {
     // `useCameraPermissions` returns null until it resolves. Treating null as
     // denied flashes "no camera access" at someone who granted it months ago.
@@ -151,6 +163,12 @@ describe('CameraScreen', () => {
     await renderScreen()
     expect(screen.queryByTestId('camera-denied')).toBeNull()
     expect(screen.queryByTestId('camera-view')).toBeNull()
+    // The third state, not just the two obvious ones: a null permission is
+    // neither granted nor refused, so the *request* UI — correct only once
+    // `canAskAgain` is known — must be absent here too, or someone who
+    // granted access months ago sees "Allow camera access" flash up while
+    // the hook is still resolving.
+    expect(screen.queryByTestId('camera-request')).toBeNull()
   })
 
   it('explains what to do when permission was refused for good', async () => {
@@ -183,6 +201,12 @@ describe('CameraScreen', () => {
     expect(attachPhoto).toHaveBeenCalledWith(
       expect.objectContaining({ recordId: 'rec_a', sourceUri: 'file:///tmp/shot.jpg' }),
     )
+    // `exif: true` is deliberate (spec §12.1): the image's own timestamp and
+    // coordinates corroborate the record's fix, which matters for a photo
+    // that may end up as evidence of what was at a site. Nothing else
+    // asserted the option object, so deleting it left every other test
+    // green.
+    expect(takePictureAsync).toHaveBeenCalledWith({ quality: 0.85, exif: true })
   })
 
   it('attaches to a different record when opened for a different one', async () => {
@@ -203,6 +227,19 @@ describe('CameraScreen', () => {
   it('ignores a second shutter press while the first is still saving', async () => {
     // The exact failure that killed the capture button in Plan 3: a claim
     // taken after an await is a claim taken too late. Two presses, one photo.
+    //
+    // Both presses are fired from the SAME rendered element, back to back,
+    // inside one outer `act`, with no `await` between them. RNTL v14's
+    // `fireEvent` awaits `act()` internally, so an `await` between two
+    // presses lets `setSaving(true)` from the first flush and re-render
+    // before the second press is even dispatched — at which point a state
+    // guard (`if (saving) return`) reads the already-updated value and
+    // blocks correctly too, making it indistinguishable from the ref guard
+    // this screen actually uses. Not awaiting between them reproduces the
+    // real hazard: two taps landing in the same frame, before React has had
+    // a chance to re-render, which only the ref guard survives — a state
+    // guard reads `saving` from the stale closure both times and lets both
+    // presses through.
     setPermission({ granted: true, canAskAgain: false, status: 'granted' })
     let release: (v: unknown) => void = () => {}
     takePictureAsync.mockReturnValue(
@@ -211,8 +248,24 @@ describe('CameraScreen', () => {
       }),
     )
     await renderScreen()
-    await fireEvent.press(screen.getByTestId('camera-shutter'))
-    await fireEvent.press(screen.getByTestId('camera-shutter'))
+    const shutter = screen.getByTestId('camera-shutter')
+    // Two `fireEvent.press` calls on the SAME rendered element, inside one
+    // outer `act`, with no `await` between them. `fireEvent.press` awaits
+    // its own internal `act()` when awaited individually — that await is
+    // exactly what lets `setSaving(true)` from the first press flush and
+    // re-render before the second is even dispatched, at which point a
+    // state guard reads the already-updated value and blocks correctly
+    // too, indistinguishable from the ref guard this screen actually uses.
+    // Nesting both calls inside one `act` and awaiting only the outer one
+    // reproduces the real hazard instead: two taps landing in the same
+    // frame, before React has re-rendered, which only the ref guard
+    // survives. (React logs an "overlapping act()" warning here — expected
+    // and harmless: it is two synchronous dispatches sharing one flush,
+    // which is the point.)
+    await act(async () => {
+      fireEvent.press(shutter)
+      fireEvent.press(shutter)
+    })
     release({ uri: 'file:///tmp/shot.jpg' })
     await act(async () => {})
     expect(takePictureAsync).toHaveBeenCalledTimes(1)
@@ -225,7 +278,12 @@ describe('CameraScreen', () => {
     setPermission({ granted: true, canAskAgain: false, status: 'granted' })
     await renderScreen()
     await fireEvent.press(screen.getByTestId('camera-shutter'))
-    expect(screen.getByTestId('camera-error')).toBeTruthy()
+    // Not just present — says something. `setError('')` would leave this
+    // node in the tree with nothing in it: a coloured blank line, which
+    // `toBeTruthy()` alone cannot tell apart from a real message.
+    expect(screen.getByTestId('camera-error')).toHaveTextContent(
+      'The photo could not be saved: disk full. Try the shutter again.',
+    )
     expect(screen.getByTestId('camera-shutter')).toBeTruthy()
   })
 
@@ -258,5 +316,39 @@ describe('CameraScreen', () => {
     await renderScreen()
     await fireEvent.press(screen.getByTestId('camera-shutter'))
     expect(screen.queryByTestId('camera-error')).toBeNull()
+  })
+
+  it('shows the saving label while the write is in flight, and reverts once it settles', async () => {
+    // Nothing else in this file presses the shutter and checks the label —
+    // delete `saving` and the ternary that reads it, and every other test
+    // still passes. Without this, there is no proof she gets any feedback
+    // during the write.
+    setPermission({ granted: true, canAskAgain: false, status: 'granted' })
+    let release: (v: unknown) => void = () => {}
+    takePictureAsync.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+    await renderScreen()
+    expect(screen.getByTestId('camera-shutter')).toHaveTextContent('Capture')
+    await fireEvent.press(screen.getByTestId('camera-shutter'))
+    expect(screen.getByTestId('camera-shutter')).toHaveTextContent('Saving…')
+    release({ uri: 'file:///tmp/shot.jpg' })
+    await act(async () => {})
+    expect(screen.getByTestId('camera-shutter')).toHaveTextContent('Capture')
+  })
+
+  it('renders something honest when opened without a record to attach to', async () => {
+    // Latent until Task 10 wires up navigation to this screen, but
+    // `useLocalSearchParams` yields `undefined` in practice regardless of
+    // how the generic is spelled, and the seam validates nothing — an
+    // `undefined` foreign key should never reach `attachPhoto`.
+    mockRecordId = undefined
+    setPermission({ granted: true, canAskAgain: false, status: 'granted' })
+    await renderScreen()
+    expect(screen.getByTestId('camera-no-record')).toHaveTextContent(/record/i)
+    expect(screen.queryByTestId('camera-view')).toBeNull()
+    expect(screen.queryByTestId('camera-shutter')).toBeNull()
   })
 })
