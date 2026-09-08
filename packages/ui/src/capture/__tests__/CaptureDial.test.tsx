@@ -169,12 +169,40 @@ describe('CaptureDial', () => {
     expect(screen.getByTestId('dial-ring-progress')).toBeTruthy()
   })
 
-  it('renders the crosshair sized to TARGET_RADIUS_PX', async () => {
+  it('centres the crosshair on the target the accuracy circle closes onto', async () => {
     await renderDial({ grade: 'good', accuracyM: 3 })
     const horizontal = screen.getByTestId('dial-crosshair-horizontal')
     const vertical = screen.getByTestId('dial-crosshair-vertical')
-    expect(horizontal.props.x2 - horizontal.props.x1).toBeCloseTo(2 * TARGET_RADIUS_PX, 6)
-    expect(vertical.props.y2 - vertical.props.y1).toBeCloseTo(2 * TARGET_RADIUS_PX, 6)
+    // The arms may run past the ring (below), but the point they mark is
+    // still the target: symmetric about the centre, and equal in both axes.
+    expect((horizontal.props.x1 + horizontal.props.x2) / 2).toBeCloseTo(vertical.props.x1, 6)
+    expect((vertical.props.y1 + vertical.props.y2) / 2).toBeCloseTo(horizontal.props.y1, 6)
+    expect(vertical.props.y2 - vertical.props.y1).toBeCloseTo(
+      horizontal.props.x2 - horizontal.props.x1,
+      6,
+    )
+  })
+
+  it('runs each crosshair arm past the ring, so it reads as a reticule and not a cross in a circle', async () => {
+    // The owner's judgement on the device, and the reason the arms are no
+    // longer `TARGET_RADIUS_PX` long: arms stopping exactly on the ring read
+    // as two shapes that happen to touch. Crossing it fuses them into one mark.
+    //
+    // Measured against the ring's *own rendered* radius rather than an
+    // imported constant, so shortening the arms back to the ring — or growing
+    // the ring out to meet them — fails here.
+    await renderDial({ grade: 'good', accuracyM: 3 })
+    const ring = screen.getByTestId('dial-crosshair-ring')
+    const horizontal = screen.getByTestId('dial-crosshair-horizontal')
+    const vertical = screen.getByTestId('dial-crosshair-vertical')
+
+    const overshoot = (horizontal.props.x2 - horizontal.props.x1) / 2 - ring.props.r
+    expect(overshoot).toBeCloseTo(6, 6)
+    expect((vertical.props.y2 - vertical.props.y1) / 2 - ring.props.r).toBeCloseTo(6, 6)
+
+    // Small enough to stay a tick breaking the ring's edge rather than a
+    // second cross competing with the circle closing onto it.
+    expect(overshoot).toBeLessThan(ring.props.r / 2)
   })
 
   it('rings the crosshair, so it reads as a reticule rather than a tappable plus', async () => {
@@ -839,7 +867,16 @@ describe('CaptureDial the settled completion (spec §9.2.1)', () => {
     })
     // And still its own size — the target has not moved to meet the circle
     // any more than the circle moved to meet the target.
-    expect(horizontal.props.x2 - horizontal.props.x1).toBeCloseTo(2 * TARGET_RADIUS_PX, 6)
+    expect(screen.getByTestId('dial-crosshair-ring').props.r).toBeCloseTo(TARGET_RADIUS_PX, 6)
+
+    // The claim in this test's name, which nothing else checks: the whole
+    // crosshair, arms included, sits inside the ring marking where the
+    // capture actually got to. That containment IS the settled signal — the
+    // visible gap between what was reached and what was possible — so an
+    // overshoot grown until the arms broke out through the settled ring
+    // would destroy it.
+    const armEnd = (horizontal.props.x2 - horizontal.props.x1) / 2
+    expect(armEnd).toBeLessThan(screen.getByTestId('dial-settled-ring').props.r)
   })
 
   it('firms the circle, so a finished measurement does not read as one still moving', async () => {

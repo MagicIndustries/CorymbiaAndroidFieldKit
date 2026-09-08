@@ -84,6 +84,28 @@ const LOCK_FILL_UNLOCKED = 0.15
 const LOCK_FILL_LOCKED = 0.45
 
 /**
+ * How far each crosshair arm runs past the ring around it, in px. The arms
+ * stopping exactly on the ring is what made the earlier version read as a
+ * cross drawn inside a circle — two shapes that happen to touch. A reticule's
+ * arms cross the ring and stick out the other side, and that overshoot is the
+ * whole difference: it is what fuses the ring and the cross into one object
+ * whose job is to mark a point.
+ *
+ * Small on purpose. At roughly a quarter of `TARGET_RADIUS_PX` the arms read
+ * as ticks breaking the ring's edge; much longer and the cross starts
+ * competing with the accuracy circle closing onto it, which is the thing the
+ * eye is meant to be following.
+ */
+const CROSSHAIR_OVERSHOOT_PX = 6
+
+/**
+ * Half the length of a crosshair arm, in px — the ring's radius plus the
+ * overshoot. Derived rather than written out, so the arms cannot silently
+ * stop drifting away from the ring they are meant to cross.
+ */
+const CROSSHAIR_ARM_PX = TARGET_RADIUS_PX + CROSSHAIR_OVERSHOOT_PX
+
+/**
  * How far past the crosshair's own radius the lock's ripple travels, in px
  * (spec §9.2.1). Another of the numbers the owner asked to be made more
  * visible, not softened.
@@ -611,6 +633,11 @@ export function CaptureDial({
              * middle of a screen reads as "add", and people try to tap it — which
              * it is not, and never becomes. It is the target the accuracy circle
              * closes onto, and a reticule says that without a word.
+             *
+             * The arms cross the ring and stick out the other side
+             * (`CROSSHAIR_ARM_PX`) rather than stopping on it. Arms that stop
+             * on the ring read as a cross drawn inside a circle; arms that
+             * cross it read as one instrument.
              */}
             <AnimatedCircle
               testID="dial-crosshair-ring"
@@ -623,9 +650,9 @@ export function CaptureDial({
             />
             <AnimatedLine
               testID="dial-crosshair-horizontal"
-              x1={CENTER - TARGET_RADIUS_PX}
+              x1={CENTER - CROSSHAIR_ARM_PX}
               y1={CENTER}
-              x2={CENTER + TARGET_RADIUS_PX}
+              x2={CENTER + CROSSHAIR_ARM_PX}
               y2={CENTER}
               stroke={crosshairColour}
               strokeWidth={crosshairWeight}
@@ -633,9 +660,9 @@ export function CaptureDial({
             <AnimatedLine
               testID="dial-crosshair-vertical"
               x1={CENTER}
-              y1={CENTER - TARGET_RADIUS_PX}
+              y1={CENTER - CROSSHAIR_ARM_PX}
               x2={CENTER}
-              y2={CENTER + TARGET_RADIUS_PX}
+              y2={CENTER + CROSSHAIR_ARM_PX}
               stroke={crosshairColour}
               strokeWidth={crosshairWeight}
             />
