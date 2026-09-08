@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { ScrollView, TextInput, View, type ViewStyle } from 'react-native'
-import { useRouter } from 'expo-router'
+import { useFocusEffect, useRouter } from 'expo-router'
 import {
   createExpoLocationSource,
   distanceMetres,
@@ -1151,21 +1151,51 @@ function RecordedAffordances({
     }
   }, [])
 
-  // What is already attached, fetched once for the record this state is
-  // about. There is nowhere on this screen that writes a photo or a voice
-  // note — that happens on `/camera` and `/voice` — so this read is the whole
-  // of this component's part in showing them.
-  useEffect(() => {
-    listMedia(db, record.id)
-      .then((rows) => {
-        if (mounted.current) setMedia(rows)
-      })
-      .catch(() => {
-        // The record itself is unaffected by a read that fails; the tiles
-        // simply carry on showing no count until the next successful fetch,
-        // which is honester than inventing a number that was never read.
-      })
-  }, [db, record.id])
+  /**
+   * Which `listMedia` call the state currently belongs to.
+   *
+   * `mounted` alone is not enough here. Camera → back → voice → back happens
+   * in a couple of seconds in the field, and each return starts a fetch
+   * without cancelling the one before it; two in-flight reads can resolve in
+   * either order, and the older one resolving last would overwrite the newer
+   * answer with a list that is one attachment short. Every fetch takes a
+   * ticket and only the holder of the current one is allowed to write, which
+   * is last-request-wins rather than last-response-wins.
+   */
+  const generation = useRef(0)
+
+  /**
+   * What is already attached, re-read every time this screen becomes the
+   * focused route — not once on mount.
+   *
+   * Nothing on this screen writes a photo or a voice note: pressing the tile
+   * pushes to `/camera` or `/voice`, and `useAttachMedia` writes the file and
+   * the row over there. So the only moment this component can learn that an
+   * attachment now exists is the moment she comes back, and a mount-only
+   * fetch never sees it — the screen was already mounted when she left.
+   * `useFocusEffect` fires on first focus too, so this REPLACES the mount
+   * fetch rather than sitting beside it; keeping both would double-fetch on
+   * every entry.
+   *
+   * This depends on the root layout being a `Stack` and not a `Slot` (see
+   * `_layout.tsx`): under `Slot` there is nothing left to refocus, because
+   * the push unmounted this screen and everything the capture is.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      generation.current += 1
+      const ticket = generation.current
+      listMedia(db, record.id)
+        .then((rows) => {
+          if (mounted.current && ticket === generation.current) setMedia(rows)
+        })
+        .catch(() => {
+          // The record itself is unaffected by a read that fails; the tiles
+          // simply carry on showing no count until the next successful fetch,
+          // which is honester than inventing a number that was never read.
+        })
+    }, [db, record.id]),
+  )
 
   const photoCount = media.filter((item) => item.kind === 'photo').length
   const voiceCount = media.filter((item) => item.kind === 'voice').length
@@ -1187,6 +1217,11 @@ function RecordedAffordances({
   const busy: InputAffordanceKind[] = saving && editing !== null ? [editing.kind] : []
 
   function openEditor(kind: 'title' | 'description'): void {
+    // The previous failure goes with the editor that produced it. Without
+    // this, a failed title save leaves "The name was not saved…" sitting under
+    // a freshly opened notes box, where it reads as a refusal of the notes she
+    // has not typed yet.
+    setError(null)
     setEditing({ kind, draft: (kind === 'title' ? title : description) ?? '' })
   }
 
@@ -1215,8 +1250,25 @@ function RecordedAffordances({
       const renamed = await renameRecord(
         db,
         kind === 'title'
-          ? { recordId: record.id, title: next, deviceId }
-          : { recordId: record.id, title, description: next, deviceId },
+          ? // No `description` key at all, which is the whole of how
+            // `renameRecord` (`records.ts`: `'description' in input`) is told
+            // to leave the notes alone. Passing `description: undefined` would
+            // NOT be the same thing — the key would be present, and the notes
+            // would be cleared.
+            { recordId: record.id, title: next, deviceId }
+          : // A notes save must still carry a title, because `renameRecord`
+            // takes `title` unconditionally and would otherwise read this as
+            // "clear the title". `title` here is this component's own state,
+            // which is correct for as long as this screen is the only thing
+            // that can rename this record — it is, today. The cost is that
+            // every notes save appends an `'edited'` event restating a title
+            // that did not change, and the moment anything else can rename a
+            // record (Plan 5's list, or a sync) this becomes a lost update:
+            // the notes save would overwrite the other rename with whatever
+            // title this screen last saw. Fixing it properly means either a
+            // notes-only input on `renameRecord` or a read-modify-write inside
+            // its transaction, not a change here.
+            { recordId: record.id, title, description: next, deviceId },
       )
       if (!mounted.current) return
       setTitle(renamed.title)

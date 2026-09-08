@@ -84,7 +84,14 @@ jest.mock('@corymbia/geo', () => {
 const mockRepo = {
   createRecord: jest.fn(),
   refineRecordFix: jest.fn(),
-  renameRecord: jest.fn(),
+  // Typed against the real function rather than left bare: the notes-survive-a
+  // -title-save test below asserts this mock's exact payload, and an untyped
+  // `jest.fn()` would let `toHaveBeenLastCalledWith` be handed an object the
+  // real `renameRecord` would never accept.
+  renameRecord: jest.fn<
+    ReturnType<typeof import('@corymbia/data').renameRecord>,
+    Parameters<typeof import('@corymbia/data').renameRecord>
+  >(),
   listMedia: jest.fn<
     ReturnType<typeof import('@corymbia/data').listMedia>,
     Parameters<typeof import('@corymbia/data').listMedia>
@@ -97,7 +104,8 @@ jest.mock('@corymbia/data', () => {
     ...actual,
     createRecord: (...args: unknown[]) => mockRepo.createRecord(...args),
     refineRecordFix: (...args: unknown[]) => mockRepo.refineRecordFix(...args),
-    renameRecord: (...args: unknown[]) => mockRepo.renameRecord(...args),
+    renameRecord: (...args: Parameters<typeof import('@corymbia/data').renameRecord>) =>
+      mockRepo.renameRecord(...args),
     listMedia: (...args: Parameters<typeof import('@corymbia/data').listMedia>) =>
       mockRepo.listMedia(...args),
   }
@@ -123,9 +131,52 @@ const mockRouter = {
   back: jest.fn(),
 }
 
-jest.mock('expo-router', () => ({
-  useRouter: () => mockRouter,
-}))
+/**
+ * Every focus effect currently registered by a mounted component.
+ *
+ * `useFocusEffect` is the screen's answer to a problem this test file cannot
+ * reproduce with a real navigator: she leaves the recorded state for
+ * `/camera`, attaches a photo, and comes back, and the screen has to notice.
+ * Mounting expo-router's own navigation container here would put its entire
+ * layout machinery between these tests and the lines they are about — so the
+ * mock keeps the one property that matters, which is *when* the effect runs:
+ * once when the component mounts and becomes focused, and again on every
+ * later focus, with `refocus()` below standing in for the return from a push.
+ */
+const mockFocusEffects = new Set<() => void>()
+
+/**
+ * The hook lives inside the factory rather than beside this set, and that is
+ * forced from both ends: `babel-plugin-jest-hoist` hoists `jest.mock` above
+ * every declaration in the file and so refuses a factory that reaches for any
+ * out-of-scope name not prefixed `mock`, while `react-hooks/rules-of-hooks`
+ * refuses to let a function whose name does not begin with `use` call
+ * `useEffect`. No single module-scope name satisfies both. As an object
+ * property it is named `useFocusEffect`, which the lint rule reads as a hook,
+ * and `require('react')` inside a factory is allowed where a reference to the
+ * imported `React` would not be — `react` is not mocked here, so it is the
+ * same module instance the screen itself renders through.
+ */
+jest.mock('expo-router', () => {
+  const { useEffect } = jest.requireActual<typeof import('react')>('react')
+  return {
+    useRouter: () => mockRouter,
+    useFocusEffect: (effect: () => void) => {
+      // The identity-keyed `useEffect` is what makes this a faithful stand-in
+      // for the real hook on first focus: an effect whose dependencies
+      // changed re-runs, and one whose dependencies did not does not.
+      // `capture.tsx` wraps its callback in `useCallback` precisely so this is
+      // a stable identity.
+      useEffect(() => {
+        mockFocusEffects.add(effect)
+        effect()
+        return () => {
+          mockFocusEffects.delete(effect)
+        }
+      }, [effect])
+    },
+  }
+})
 
 /**
  * `mediaStore`, mocked whole — the same reason `useAttachMedia.test.ts` mocks
@@ -299,6 +350,9 @@ beforeEach(() => {
 
   mockCaptureNumber = 0
   mockRecords.clear()
+  // A component that failed to unmount cleanly must not leave a focus effect
+  // behind for the next test's `refocus()` to fire into.
+  mockFocusEffects.clear()
   mockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
   mockCreateSourceSpy.mockClear()
   watchCallCount = 0
@@ -326,16 +380,15 @@ beforeEach(() => {
   // a title-only save must leave whatever notes are already on the record
   // alone, exactly as the real repository function's `'description' in input`
   // check does.
-  mockRepo.renameRecord.mockImplementation(
-    (_db: unknown, input: { recordId: string; title: string | null; description?: string | null }) =>
-      Promise.resolve(
-        amendRecord(
-          input.recordId,
-          'description' in input
-            ? { title: input.title, description: input.description ?? null }
-            : { title: input.title },
-        ),
+  mockRepo.renameRecord.mockImplementation((_db, input) =>
+    Promise.resolve(
+      amendRecord(
+        input.recordId,
+        'description' in input
+          ? { title: input.title, description: input.description ?? null }
+          : { title: input.title },
       ),
+    ),
   )
   // No attachments unless a test says otherwise — the ordinary case for a
   // capture that has just finished and has had nothing added to it yet.
@@ -446,11 +499,42 @@ async function takeAnotherReading() {
  * hold that would plateau it, so ending the wait early with `acceptNow` is
  * always what actually happens here.
  */
-async function renderRecorded(options: { accuracyM?: number } = {}) {
-  const view = await arriveWithAFix(options.accuracyM ?? 8)
+async function renderRecorded(options: { accuracyM?: number } = {}): Promise<void> {
+  await arriveWithAFix(options.accuracyM ?? 8)
   await tap()
   await acceptNow()
-  return view
+}
+
+/**
+ * Comes back to this screen from `/camera` or `/voice`.
+ *
+ * With the root layout a `Stack` (`_layout.tsx`), the push never unmounted
+ * this screen — so a return is a focus, not a mount, and running the
+ * registered focus effects is the whole of what the navigator does to it.
+ * That is exactly the event a mount-only fetch cannot see, which is why the
+ * refresh test below fails against one.
+ */
+async function refocus() {
+  await act(async () => {
+    for (const effect of mockFocusEffects) effect()
+    await Promise.resolve()
+  })
+  await settle()
+}
+
+/**
+ * A promise a test resolves by hand, so a write can be held open for as long
+ * as an assertion about the in-flight state needs. `resolve` is assigned
+ * synchronously by the `Promise` constructor, so it is never read before it
+ * is set — but it is typed and initialised so that neither a non-null
+ * assertion nor a cast is needed to say so.
+ */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve: (value: T) => void = () => undefined
+  const promise = new Promise<T>((settleWith) => {
+    resolve = settleWith
+  })
+  return { promise, resolve: (value: T) => { resolve(value) } }
 }
 
 /**
@@ -475,6 +559,35 @@ function photoRow(id: string, overrides: Partial<Attachment> = {}): Attachment {
     durationMs: null,
     ordinal: 1,
     capturedAt: '2026-09-07T01:00:05.000Z',
+    deletedAt: null,
+    ...overrides,
+  }
+}
+
+/**
+ * The other kind of attachment, which nothing in this file used to supply.
+ *
+ * Its absence was not a gap in coverage so much as a hole the mapping fell
+ * through: with `photoRow` the only fixture, `kind: item.kind` could be
+ * hardcoded to `'photo'`, `durationMs: item.durationMs` to `null`, and the
+ * voice count to `0`, and every test here stayed green. A voice note carries
+ * a length and no image, so it is the only fixture that can tell any of those
+ * apart from the real mapping.
+ *
+ * `durationMs` is 8000 rather than a round minute because `MediaStrip`
+ * formats `m:ss` with the seconds zero-padded — 8 s renders `0:08`, which a
+ * raw-milliseconds or unpadded implementation could not produce by accident.
+ */
+function voiceRow(id: string, overrides: Partial<Attachment> = {}): Attachment {
+  return {
+    id,
+    recordId: 'record-1',
+    kind: 'voice',
+    fileName: `${id}.m4a`,
+    byteSize: 40960,
+    durationMs: 8000,
+    ordinal: 2,
+    capturedAt: '2026-09-07T01:00:09.000Z',
     deletedAt: null,
     ...overrides,
   }
@@ -1328,18 +1441,33 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     await renderRecorded()
     await settle()
 
-    // A substring check, deliberately: `InputAffordanceRow`'s own label is
-    // `Photo · 2`, not the bare digit, so an exact match here (this file's
-    // usual default) could never pass regardless of what the screen does.
-    // Step 5 of the brief hardcodes the count to 1 to show this still fails
-    // when the number is wrong rather than merely present.
-    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('2', { exact: false })
+    // The whole label, exactly — `toHaveTextContent` defaults to an exact
+    // match, and this is the assertion that makes the number load-bearing. A
+    // substring check for `'2'` was satisfied by `Photo · 12` just as
+    // happily, so it could not tell a correct count from an arithmetic
+    // mistake that happens to contain the right digit.
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Photo · 2')
     // And it is really the photo count, not a count leaking onto every tile
     // regardless of kind — two attachments of one kind and none of the
     // other, not a label that only ever reads "some".
-    expect(screen.getByTestId('affordance-voice-label')).not.toHaveTextContent('·', {
-      exact: false,
-    })
+    expect(screen.getByTestId('affordance-voice-label')).toHaveTextContent('Voice')
+  })
+
+  it('counts each kind against its own tile, and neither against the other', async () => {
+    // One of each, which is the only shape that can catch the two mistakes a
+    // photo-only fixture cannot: a photo count computed as `media.length`
+    // (which would read `Photo · 2` here) and a voice count hardcoded to
+    // zero (which would leave the voice tile a bare `Voice`). Both halves
+    // matter — `InputAffordanceRow` renders no count at all for zero, so a
+    // stale or hardcoded zero is visually identical to nothing attached,
+    // which is a denial rather than a gap.
+    listMedia.mockResolvedValue([photoRow('med_p'), voiceRow('med_v')])
+
+    await renderRecorded()
+    await settle()
+
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Photo · 1')
+    expect(screen.getByTestId('affordance-voice-label')).toHaveTextContent('Voice · 1')
   })
 
   it('shows the attachments on the record', async () => {
@@ -1349,6 +1477,29 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     await settle()
 
     expect(screen.getByTestId('media-tile-med_a')).toBeTruthy()
+    // The thumbnail is the stored file, resolved through `mediaStore.uriFor`
+    // — the one reason this file mocks that module at all. Without this the
+    // screen could hand `MediaStrip` an empty `uri` and every other test
+    // here would still pass, because a tile with no image is still a tile.
+    expect(screen.getByTestId('media-thumb-med_a').props.source).toEqual({
+      uri: 'file:///media/med_a.jpg',
+    })
+  })
+
+  it('shows a voice note by its length, not as a picture of nothing', async () => {
+    listMedia.mockResolvedValue([voiceRow('med_v')])
+
+    await renderRecorded()
+    await settle()
+
+    // `MediaStrip` renders a voice tile as a glyph (SVG, deliberately not
+    // text) plus its duration in `m:ss`, so the tile's only text content is
+    // the length — which pins both `kind` and `durationMs` coming through the
+    // mapping intact. A tile mapped as a photo would render an `Image` and no
+    // text at all; one mapped with a null duration would render an empty
+    // string.
+    expect(screen.getByTestId('media-tile-med_v')).toHaveTextContent('0:08')
+    expect(screen.queryByTestId('media-thumb-med_v')).toBeNull()
   })
 
   it('renders no media strip at all when nothing has been attached', async () => {
@@ -1359,6 +1510,86 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     await renderRecorded()
 
     expect(screen.queryByTestId('capture-media-strip')).toBeNull()
+  })
+
+  it('hangs the strip beside the tiles, not inside a wrapper of its own', async () => {
+    // The companion to the test above, and the reason that one can be
+    // trusted. `queryByTestId(...)` returning null only proves `MediaStrip`
+    // itself rendered nothing; an un-testID'd `View` wrapped around it would
+    // satisfy that assertion and still leave an empty frame on the screen.
+    // What rules the wrapper out is where the strip sits when it does render:
+    // as a direct sibling of the affordance row, under the same parent, so
+    // there is no container of its own left behind when it renders null.
+    listMedia.mockResolvedValue([photoRow('med_a')])
+
+    await renderRecorded()
+    await settle()
+
+    expect(screen.getByTestId('capture-media-strip').parent).toBe(
+      screen.getByTestId('capture-affordances').parent,
+    )
+  })
+
+  it('picks up a photo attached while she was away on the camera screen', async () => {
+    // The defect this whole task exists for. Nothing on this screen writes an
+    // attachment — `/camera` does — so the only moment it can learn a photo
+    // exists is the moment she comes back to it. A fetch that runs on mount
+    // cannot see that: the screen was already mounted when she left.
+    //
+    // Both halves are asserted because both come from the same state and both
+    // lie in the same way. An empty strip reads as "nothing here yet"; a
+    // count that never arrives leaves a bare `Photo` tile, which reads as a
+    // denial of the photo she just took.
+    listMedia.mockResolvedValue([])
+
+    await renderRecorded()
+    await settle()
+
+    expect(screen.queryByTestId('capture-media-strip')).toBeNull()
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Photo')
+
+    await fireEvent.press(screen.getByTestId('affordance-photo'))
+    // What `useAttachMedia` wrote on the camera screen while this one stayed
+    // mounted underneath it.
+    listMedia.mockResolvedValue([photoRow('med_new')])
+
+    await refocus()
+
+    expect(screen.getByTestId('media-tile-med_new')).toBeTruthy()
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Photo · 1')
+  })
+
+  it('keeps the newest answer when two reads come back out of order', async () => {
+    // Camera → back → voice → back takes a couple of seconds in the field,
+    // and each return starts a read without cancelling the one before it. If
+    // the older read resolves last it would overwrite the newer answer with a
+    // list one attachment short — and `mounted.current`, which is the only
+    // other guard on this write, is true for both, so it cannot tell them
+    // apart.
+    const first = deferred<Attachment[]>()
+    const second = deferred<Attachment[]>()
+    listMedia.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+
+    await renderRecorded()
+    await refocus()
+
+    // The second focus answers first, with what is actually on the record.
+    await act(async () => {
+      second.resolve([photoRow('med_a'), voiceRow('med_v')])
+      await Promise.resolve()
+    })
+    await settle()
+    // The first, stale, read lands afterwards — with the record as it was.
+    await act(async () => {
+      first.resolve([])
+      await Promise.resolve()
+    })
+    await settle()
+
+    expect(screen.getByTestId('media-tile-med_a')).toBeTruthy()
+    expect(screen.getByTestId('media-tile-med_v')).toBeTruthy()
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Photo · 1')
+    expect(screen.getByTestId('affordance-voice-label')).toHaveTextContent('Voice · 1')
   })
 
   it('saves notes against the record', async () => {
@@ -1446,11 +1677,103 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     // The record is untouched and the tile has not claimed a title it does
     // not have.
     expect(screen.queryByTestId('capture-title-value')).toBeNull()
+    // Exact, which is this file's default: `Title` and not `Title ✓`. The
+    // `.not.toHaveTextContent('✓')` that used to sit here was redundant with
+    // that — and worse than redundant, since with `exact` defaulting to true
+    // it asserted only that the label was not the single character `✓`, which
+    // it could never be.
     expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title')
-    expect(screen.getByTestId('affordance-title-label')).not.toHaveTextContent('✓')
     // And the control is live again, so the failure is recoverable rather
     // than a dead end.
     expect(screen.getByTestId('capture-title-save')).not.toBeDisabled()
+  })
+
+  it('takes the failure away with the editor that produced it', async () => {
+    mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('database is locked')))
+
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+    expect(screen.getByTestId('capture-title-error')).toBeTruthy()
+
+    // Opening the notes editor must not leave "The name was not saved…"
+    // standing underneath it, where it reads as a refusal of notes she has
+    // not typed yet.
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+
+    expect(screen.queryByTestId('capture-title-error')).toBeNull()
+    expect(screen.getByTestId('capture-description-input')).toBeTruthy()
+  })
+
+  it('says the title is saving while the write is still in flight', async () => {
+    // `busy` is what stops a second tap landing on a tile whose write has not
+    // returned, and doctrine rule 9 requires it to read from the wording and
+    // not only from the dimmed tile. Holding the repository's promise open is
+    // the only way to observe it at all: every other test in this file lets
+    // the write resolve within the same `settle()`, so `busy` is always `[]`
+    // by the time an assertion runs.
+    const write = deferred<FieldRecord>()
+    mockRepo.renameRecord.mockImplementation(() => write.promise)
+
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title · Saving')
+    expect(screen.getByTestId('affordance-title')).toBeDisabled()
+    // Only the tile being written, not every tile: notes are not in flight.
+    expect(screen.getByTestId('affordance-description-label')).toHaveTextContent('Notes')
+    expect(screen.getByTestId('affordance-description')).not.toBeDisabled()
+
+    // Let it finish, so the screen is not left mid-write with a pending
+    // promise for the next test to inherit.
+    await act(async () => {
+      write.resolve(amendRecord('record-1', { title: 'Frog pond outflow' }))
+      await Promise.resolve()
+    })
+    await settle()
+
+    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title ✓')
+  })
+
+  it('does not wipe the notes when a title is saved after them', async () => {
+    // `renameRecord` takes `title` unconditionally but touches `description`
+    // only when the caller's input actually carries that key
+    // (`records.ts`: `'description' in input`), and the fixture above mirrors
+    // that rule exactly. This is the sequence the rule exists for, and until
+    // now nothing performed it: notes saved, then a title saved, and the
+    // notes must still be on the record afterwards rather than cleared by a
+    // save that was never about them.
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+    await fireEvent.changeText(screen.getByTestId('capture-description-input'), 'Wet gully, ferns')
+    await fireEvent.press(screen.getByTestId('capture-description-save'))
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    // An exact payload, not `objectContaining`: the absence of the
+    // `description` key is the entire assertion, and `objectContaining` could
+    // not see it.
+    expect(mockRepo.renameRecord).toHaveBeenLastCalledWith(mockDb, {
+      recordId: 'record-1',
+      title: 'Frog pond outflow',
+      deviceId: mockDevice.id,
+    })
+    expect(screen.getByTestId('capture-description-value')).toHaveTextContent('Wet gully, ferns')
+    expect(screen.getByTestId('capture-title-value')).toHaveTextContent('Frog pond outflow')
+    expect(screen.getByTestId('affordance-description-label')).toHaveTextContent('Notes ✓')
+    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title ✓')
   })
 })
 
