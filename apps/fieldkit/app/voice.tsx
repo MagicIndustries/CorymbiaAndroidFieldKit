@@ -9,6 +9,7 @@ import {
   useAudioRecorder,
   useAudioRecorderState,
   type PermissionResponse,
+  type RecordingStatus,
 } from 'expo-audio'
 import { spacing } from '@corymbia/tokens'
 import { Button, CORNER_BLOCK_MAX_W, Screen, Type, resolveReach, useLayout, useTheme } from '@corymbia/ui'
@@ -44,6 +45,39 @@ import { attachVoice } from '../src/media/attachVoice'
  * `expo-audio/build/AudioModule.types.d.ts:243,280`, the latter in
  * milliseconds, the same field the poller reads); `state.durationMillis`
  * drives the ticking display and nothing else.
+ *
+ * **AND THE POLLER CANNOT SEE A RECORDING THAT DIES.** An earlier pass tried
+ * to notice an unasked-for stop by watching `state.isRecording` /
+ * `state.mediaServicesDidReset`. On Android that watches nothing. In
+ * `node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioRecorder.kt`
+ * the Kotlin `isRecording` field goes false in exactly two places —
+ * `pauseRecording()` and `reset()` — and `reset()` is only reached from
+ * `stopRecording()`, from the max-filesize branch of `onInfo`, and from
+ * `sharedObjectDidRelease()`; all of those are this app's own calls or a cap
+ * this screen never sets. `onError` — the media-server-died case — emits an
+ * event and returns *without* resetting anything, so the polled flag stays
+ * true. `AudioModule.kt`'s audio-focus listener handles focus loss by
+ * iterating `allPlayables` (players and playlists); recorders are never
+ * touched, so an incoming call moves nothing the poller reads either. And
+ * `getAudioRecorderStatus()` never writes a `mediaServicesDidReset` key at
+ * all — that field is `@platform ios` in `Audio.types.d.ts` and is always
+ * `undefined` here.
+ *
+ * So the interruption is delivered, or it is not delivered at all:
+ * `useAudioRecorder(options, statusListener)` subscribes to
+ * `recordingStatusUpdate` (`ExpoAudio.d.ts:145`), which carries
+ * `{ id, isFinished, hasError, error, url }` (`Audio.types.d.ts:252`) and is
+ * emitted from `onError`, from `onInfo`, and from `stopRecording`. Push, not
+ * poll: nothing has to be guessed about how long to wait for a poll that may
+ * legitimately be slow, and a `record()` that never starts arrives as
+ * `hasError` rather than as silence.
+ *
+ * One trap in that hook, and this screen is built around it: the effect that
+ * subscribes is keyed on `[recorder.id]`, so the `statusListener` closure it
+ * captures is **the one from the first render** and is never replaced. A
+ * listener that closed over state would go on reading the mount-time values
+ * forever. `statusListenerRef` is why the function passed in is a bare
+ * forwarder.
  */
 
 /**
@@ -74,9 +108,13 @@ const MINIMUM_NOTE_MS = 1000
  * "Still loading…. Try recording again." (`camera.tsx` strips the same set,
  * for the same reason).
  */
+function withoutTrailingPunctuation(detail: string): string {
+  return detail.replace(/[.?!…]+$/, '')
+}
+
 function messageFor(cause: unknown): string {
   const detail = cause instanceof Error ? cause.message : String(cause)
-  return `The voice note could not be saved: ${detail.replace(/[.?!…]+$/, '')}. Try recording again.`
+  return `The voice note could not be saved: ${withoutTrailingPunctuation(detail)}. Try recording again.`
 }
 
 function formatElapsed(durationMillis: number): string {
@@ -130,14 +168,99 @@ function discardFile(uri: string | null): void {
  */
 type Phase = 'idle' | 'starting' | 'recording' | 'saving'
 
+/**
+ * The length a salvaged note is judged by: whichever of two lower bounds is
+ * larger.
+ *
+ * `recorder.getStatus().durationMillis` is authoritative while the native
+ * recorder still holds the recording — and on the `onError` path it does,
+ * because that handler never calls `reset()`. It is not authoritative on the
+ * other path: `onInfo`'s max-filesize branch calls `reset()` *before* it
+ * emits the status, and `reset()` sets `durationAlreadyRecorded = 0` and
+ * `startTime = 0`, after which `getAudioRecorderDurationMillis()` returns 0.
+ * A two-minute note would arrive here reporting nothing, fall under
+ * `MINIMUM_NOTE_MS`, and be deleted as a stray tap — the exact loss the
+ * salvage path exists to prevent, arriving through the salvage path.
+ *
+ * The wall clock since `record()` returned is the bound `reset()` cannot
+ * erase. It is a floor rather than a replacement: it counts wall time, and
+ * this screen never pauses a recording, so for a note that ran to an
+ * interruption the two agree. Taking the larger keeps the recorder's own
+ * figure wherever the recorder still has one.
+ */
+function longestProvenRun(fromRecorder: number, startedAtMs: number | null): number {
+  if (startedAtMs === null) return fromRecorder
+  return Math.max(fromRecorder, Date.now() - startedAtMs)
+}
+
+/**
+ * What became of a recording that ended without being asked to, and the
+ * sentence that says so.
+ *
+ * `saved` is not decoration and it is not what tells her: doctrine rule 9
+ * says colour never carries meaning alone, so the message states which
+ * happened in words and the colour only follows it. And it states *which* —
+ * an earlier wording said "It may not have been saved", which on the abandon
+ * path was simply untrue (nothing called `attachVoice` and no route reached
+ * the record) and left her to either hunt for a note that was never there or
+ * assume one might be and not record it again.
+ *
+ * `durationMillis` freezes the elapsed readout at the moment the recording
+ * died. Android's `onError` returns without calling `reset()`, so
+ * `getAudioRecorderDurationMillis()` goes on adding `now - startTime` for as
+ * long as the screen is open and the 500 ms poller goes on committing a
+ * bigger number — a timer still climbing underneath a sentence saying the
+ * recording stopped.
+ */
+type Interruption = {
+  message: string
+  saved: boolean
+  durationMillis: number
+}
+
+const INTERRUPTED = 'The recording stopped on its own, probably an interruption such as a call'
+
+function interruptionSaved(durationMillis: number): string {
+  return `${INTERRUPTED}. What it had already recorded — ${spokenElapsed(durationMillis)} — was saved to this record.`
+}
+
+function interruptionTooShort(): string {
+  return `${INTERRUPTED}. It had not caught anything yet, so it was not saved. Record it again.`
+}
+
+/**
+ * The abandon path, and the one that has to be most definite: there is no
+ * file, so there is nothing to attach and nothing to hunt for. On Android
+ * this is the branch an interruption actually lands in — `onError` emits
+ * `url: null` unconditionally, because the `.m4a` it abandoned was never
+ * finalised. Handing that half-written container to `attachVoice` would put
+ * a note on the record that cannot be played, which is worse than saying
+ * plainly that it was lost.
+ */
+function interruptionNotSaved(cause: string | null): string {
+  if (cause === null) return `${INTERRUPTED}, and it was not saved. Record it again.`
+  return `The recording stopped on its own and was not saved: ${withoutTrailingPunctuation(cause)}. Record it again.`
+}
+
 export default function VoiceScreen() {
   const { recordId } = useLocalSearchParams<{ recordId?: string }>()
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY)
+  // A bare forwarder, deliberately. `useAudioRecorder` subscribes inside an
+  // effect keyed on `[recorder.id]`, so whatever function is passed on the
+  // first render is the one that stays subscribed for the life of the
+  // recorder; anything closing over state would be frozen at mount. The ref
+  // it forwards to is re-pointed every render, below.
+  const statusListenerRef = useRef<(status: RecordingStatus) => void>(() => {
+    // Replaced by the effect below before any native event can arrive.
+  })
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY, (status) => {
+    statusListenerRef.current(status)
+  })
   const state = useAudioRecorderState(recorder)
   const [permission, setPermission] = useState<PermissionResponse | null>(null)
   const [permissionFailed, setPermissionFailed] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [tooShort, setTooShort] = useState(false)
+  const [interruption, setInterruption] = useState<Interruption | null>(null)
   // Claimed synchronously, before any await — see `toggle` below, the same
   // reason `camera.tsx`'s `savingRef` exists: a claim taken after an await
   // is a claim taken too late, because a second press can land in the gap
@@ -147,7 +270,20 @@ export default function VoiceScreen() {
   // `stop()` resolves the recorder is no longer recording, so a label
   // derived from the live flag mid-action would flip from "Saving…" to
   // "Starting…" while the attach is still in flight.
-  const [phase, setPhase] = useState<Phase>('idle')
+  const [phase, setPhaseState] = useState<Phase>('idle')
+  // The same value the status listener can read *synchronously*. React state
+  // is only current as of the last render, and the one thing the listener has
+  // to know — whether the stop it is being told about is one this screen
+  // asked for — is decided a microtask earlier, inside `toggle`, before any
+  // await. `setPhase` writes both so the two can never disagree.
+  const phaseRef = useRef<Phase>('idle')
+  const setPhase = useCallback((next: Phase) => {
+    phaseRef.current = next
+    setPhaseState(next)
+  }, [])
+  // Wall-clock milliseconds at the moment `record()` returned; `null` when no
+  // recording is under way. See `longestProvenRun`.
+  const recordingStartedAtRef = useRef<number | null>(null)
   const { theme } = useTheme()
   const { deviceClass, orientation } = useLayout()
   const { settings } = useSettings()
@@ -161,53 +297,114 @@ export default function VoiceScreen() {
   }, [])
 
   /**
-   * `phase` is only ever moved back to `'idle'` by this screen's own stop
-   * branch and its catch — nothing reverts it when the recorder stops
-   * without being asked: an incoming call, a native `mediaServicesDidReset`,
-   * another app seizing the microphone. Left alone, `phase` (and everything
-   * drawn from it — the label, the "RECORDING" header, the spoken
-   * description) keeps claiming a recording that no longer exists, and her
-   * next tap reads the LIVE flag correctly, finds it false, and takes the
-   * *start* branch: she presses a control that reads "Stop" and instead
-   * begins a brand-new recording over whatever she had just said. Silently.
+   * A recording ended without this screen asking it to: `onError` (including
+   * the media-server-died case), `onInfo`'s file cap, or — on iOS — a media
+   * services reset. Nothing else moves `phase` back to `'idle'` when that
+   * happens. Left alone the button goes on reading "Stop" forever, the
+   * header goes on reading "RECORDING", and her next tap reads the live flag
+   * and takes some branch chosen by a recorder she has been told nothing
+   * about.
    *
-   * `state.isRecording` / `state.mediaServicesDidReset` — the POLLED copy,
-   * not the live flag — are what this checks. That is deliberate and safe
-   * here in a way it is not for `toggle`'s decisions: this is a display
-   * concern, not a branch, so the poller's up-to-500 ms lag only delays how
-   * quickly she is told, never which action a tap takes.
+   * Three things this must get right, in order.
    *
-   * `pollConfirmedRecordingRef` guards the one moment reading the poll
-   * directly would be actively wrong: the instant `phase` becomes
-   * `'recording'`, the poller's last commit can still be the ONE FROM
-   * BEFORE this recording started — stale in the opposite direction — and
-   * reacting to that immediately would announce a fresh recording as
-   * already over (see the "moves through Record, Starting…, Stop and
-   * Saving…" test, which presses Record and checks the label before the
-   * poller has had a chance to agree). So this only acts once the poller
-   * has agreed, at least once, that the recording is genuinely under way. A
-   * `record()` call that fails to start and is never once confirmed by the
-   * poller is a narrower, separate gap this does not close — closing it
-   * would mean guessing how long is too long to wait for a poll that may
-   * legitimately be slow, and the failure mode of guessing wrong here is
-   * announcing a live recording as dead.
+   * **It must not take the deliberate stop path's event.** `stopRecording()`
+   * emits `recordingStatusUpdate` too, with the same `isFinished: true`. The
+   * discriminator is `phaseRef`: `toggle` writes `'saving'` synchronously,
+   * before it awaits anything, so by the time any event is delivered a
+   * deliberate stop is no longer in `'recording'` and this returns. The
+   * toggle keeps sole ownership of the note it stopped.
+   *
+   * **It must read the length before it stops anything.** `stop()` reaches
+   * Kotlin's `reset()`, which zeroes the duration; see `longestProvenRun`.
+   *
+   * **It must put the recorder back into a usable state.** Android's
+   * `onError` emits and returns without calling `reset()`, so `recorder`
+   * stays non-null, `isPrepared` stays set and `isRecording` stays *true*.
+   * Wedged that way the recorder is broken in both directions: her next tap
+   * reads `recorder.isRecording === true` and takes the *stop* branch —
+   * stopping a dead recorder and attaching its unfinalised file as though it
+   * were a note — and had it taken the start branch instead,
+   * `prepareRecording` throws `AudioRecorderAlreadyPreparedException`
+   * because `recorder != null`. `stop()` is the only JS call that reaches
+   * `reset()`, so this issues one. Its own `recordingStatusUpdate` is then
+   * ignored by the `phaseRef` guard above, which by then reads `'saving'`.
+   *
+   * The salvage itself is the point. An interruption at the end of a
+   * two-minute note is not a stray tap, and the status carries the finished
+   * file's `url`: if the run clears `MINIMUM_NOTE_MS` it is attached exactly
+   * as the stop branch would attach it, and if it does not the file is
+   * deleted exactly as `discardFile` deletes a stray tap's. Either way she
+   * is told which — see `Interruption`.
    */
-  const pollConfirmedRecordingRef = useRef(false)
+  const handleRecordingStatus = useCallback(
+    async (status: RecordingStatus) => {
+      if (!status.isFinished) return
+      if (phaseRef.current !== 'recording') return
+      if (busyRef.current) return
+      // The same type-level backstop `toggle` keeps, for the same reason: an
+      // `undefined` foreign key must never reach `attachVoice`.
+      if (recordId === undefined) return
+      busyRef.current = true
+      const ranForMs = longestProvenRun(
+        recorder.getStatus().durationMillis,
+        recordingStartedAtRef.current,
+      )
+      const finishedUri = status.url
+      recordingStartedAtRef.current = null
+      setPhase('saving')
+      setError(null)
+      setTooShort(false)
+      // `.catch` because `MediaRecorder.stop()` on a recorder that has
+      // already errored throws — and Kotlin runs `reset()` in its own
+      // `finally` regardless, so the call has done the job it is here for
+      // whether or not it resolves.
+      void recorder.stop().catch(() => {
+        // The recording is already over; there is nothing further to say.
+      })
+      try {
+        if (finishedUri === null) {
+          setInterruption({
+            message: interruptionNotSaved(status.hasError ? status.error : null),
+            saved: false,
+            durationMillis: ranForMs,
+          })
+        } else if (ranForMs < MINIMUM_NOTE_MS) {
+          discardFile(finishedUri)
+          setInterruption({
+            message: interruptionTooShort(),
+            saved: false,
+            durationMillis: ranForMs,
+          })
+        } else {
+          await attachVoice({ recordId, sourceUri: finishedUri, durationMs: ranForMs })
+          // Deliberately no `router.back()`, unlike the stop branch. She did
+          // not ask for this stop and does not know it happened; navigating
+          // away would take the only sentence that tells her with it
+          // (doctrine rule 3, the same reason nothing here is an Alert).
+          setInterruption({
+            message: interruptionSaved(ranForMs),
+            saved: true,
+            durationMillis: ranForMs,
+          })
+        }
+        setPhase('idle')
+      } catch (cause) {
+        setError(messageFor(cause))
+        setPhase('idle')
+      } finally {
+        busyRef.current = false
+      }
+    },
+    [recorder, recordId, setPhase],
+  )
+
+  // Re-pointed every render, because the subscription itself cannot be: see
+  // the frozen-closure note in this file's header comment.
   useEffect(() => {
-    if (phase !== 'recording') {
-      pollConfirmedRecordingRef.current = false
-      return
+    statusListenerRef.current = (status: RecordingStatus) => {
+      void handleRecordingStatus(status)
     }
-    if (state.isRecording && !state.mediaServicesDidReset) {
-      pollConfirmedRecordingRef.current = true
-      return
-    }
-    if (!pollConfirmedRecordingRef.current) return
-    setPhase('idle')
-    setError(
-      'The recording stopped on its own, possibly because of an interruption such as a call. It may not have been saved — record it again to be sure.',
-    )
-  }, [phase, state.isRecording, state.mediaServicesDidReset])
+  }, [handleRecordingStatus])
 
   /**
    * Asked on mount and again from the "Allow microphone access" button. A
@@ -270,11 +467,13 @@ export default function VoiceScreen() {
     setPhase(wasRecording ? 'saving' : 'starting')
     setError(null)
     setTooShort(false)
+    setInterruption(null)
     try {
       if (!wasRecording) {
         await recorder.prepareToRecordAsync()
         await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true })
         recorder.record()
+        recordingStartedAtRef.current = Date.now()
         setPhase('recording')
       } else {
         // Read from the recorder, at the press, before `stop()` — the
@@ -282,6 +481,7 @@ export default function VoiceScreen() {
         // the difference between a 1.4 s note kept and the same note
         // reported as 900 ms and silently discarded.
         const ranForMs = recorder.getStatus().durationMillis
+        recordingStartedAtRef.current = null
         // `stop()` must resolve before `recorder.uri` means anything —
         // reading it earlier attaches the previous recording, or nothing,
         // with a straight face.
@@ -307,7 +507,7 @@ export default function VoiceScreen() {
     } finally {
       busyRef.current = false
     }
-  }, [recorder, recordId])
+  }, [recorder, recordId, setPhase])
 
   // No route navigates here without a `recordId` yet, but the seam
   // validates nothing, and `useLocalSearchParams` yields `undefined` in
@@ -418,6 +618,11 @@ export default function VoiceScreen() {
   // tap registered, and "Record" still showing half a second after she
   // pressed Record is the same as no feedback at all.
   const isRecording = phase === 'recording'
+  // Frozen at the moment an interrupted recording died. On Android the poller
+  // goes on climbing after `onError`, because that handler never resets the
+  // native recorder — a readout still counting up under a sentence that says
+  // the recording has stopped. See `Interruption`.
+  const elapsedMillis = interruption === null ? state.durationMillis : interruption.durationMillis
   const toggleLabel =
     phase === 'saving'
       ? 'Saving…'
@@ -434,7 +639,9 @@ export default function VoiceScreen() {
   const spokenDescription =
     error !== null
       ? `Voice note. ${error}`
-      : tooShort
+      : interruption !== null
+        ? `Voice note. ${interruption.message}`
+        : tooShort
         ? 'Voice note. That recording was too short to carry anything, so it was not saved. Record again and say what you need before you stop it.'
         : isRecording
           ? 'Voice note. Recording. The elapsed time, and one control that stops the recording and attaches it to this record.'
@@ -456,9 +663,9 @@ export default function VoiceScreen() {
         <Type
           variant="hero"
           testID="voice-elapsed"
-          accessibilityLabel={spokenElapsed(state.durationMillis)}
+          accessibilityLabel={spokenElapsed(elapsedMillis)}
         >
-          {formatElapsed(state.durationMillis)}
+          {formatElapsed(elapsedMillis)}
         </Type>
       </View>
       {/*
@@ -479,6 +686,17 @@ export default function VoiceScreen() {
         {error !== null ? (
           <Type testID="voice-error" style={{ color: theme.colors.statusPoor }}>
             {error}
+          </Type>
+        ) : null}
+        {interruption !== null ? (
+          // Coloured only when something was lost, and never load-bearing:
+          // the sentence itself says "was saved" or "was not saved"
+          // (doctrine rule 9).
+          <Type
+            testID="voice-interrupted"
+            style={interruption.saved ? undefined : { color: theme.colors.statusPoor }}
+          >
+            {interruption.message}
           </Type>
         ) : null}
         {tooShort ? (
