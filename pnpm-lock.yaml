@@ -53,6 +53,9 @@ importers:
       '@corymbia/geo':
         specifier: workspace:*
         version: link:../../packages/geo
+      '@corymbia/media':
+        specifier: workspace:*
+        version: link:../../packages/media
       '@corymbia/tokens':
         specifier: workspace:*
         version: link:../../packages/tokens

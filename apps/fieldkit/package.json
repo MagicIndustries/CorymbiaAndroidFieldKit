@@ -6,6 +6,7 @@
     "@corymbia/brand": "workspace:*",
     "@corymbia/data": "workspace:*",
     "@corymbia/geo": "workspace:*",
+    "@corymbia/media": "workspace:*",
     "@corymbia/tokens": "workspace:*",
     "@corymbia/ui": "workspace:*",
     "expo": "~57.0.20",
