@@ -28,8 +28,9 @@ import { attachVoice } from '../src/media/attachVoice'
  * needs to know the extension itself.
  *
  * **THE RECORDER IS THE TRUTH; `useAudioRecorderState` IS A POLLER.** The
- * hook runs `setInterval(..., 500)` and commits a new object only once
- * `durationMillis` has moved more than 50 ms
+ * hook runs `setInterval(..., 500)` and commits a new object once
+ * `canRecord`, `isRecording`, `mediaServicesDidReset`, `url` or `metering`
+ * changes, OR `durationMillis` moves by more than 50 ms
  * (`node_modules/expo-audio/build/utils/useAudioRecorderState.js`), so every
  * value it returns is up to half a second old. That is fine for a ticking
  * readout and wrong for everything else, and it cost real speech: a decision
@@ -64,14 +65,18 @@ const MINIMUM_NOTE_MS = 1000
  * a field ecologist who needs to know what happened and what to do, not what
  * threw.
  *
- * The trailing full stop is stripped from the cause before this sentence
- * adds its own: `attachVoice`'s message ends in one, and glued together
- * uncorrected they read "...implements this seam.. Try recording again."
- * (`camera.tsx` strips it the same way, for the same message).
+ * Trailing sentence punctuation is stripped from the cause before this
+ * sentence adds its own: `attachVoice`'s message ends in a full stop, and
+ * glued together uncorrected they read "...implements this seam.. Try
+ * recording again." A native cause is not guaranteed to end in a full stop
+ * at all — "Still loading…" ends in an ellipsis, a thrown message can end
+ * in "?" or "!" — and any of those left in place reads just as oddly:
+ * "Still loading…. Try recording again." (`camera.tsx` strips the same set,
+ * for the same reason).
  */
 function messageFor(cause: unknown): string {
   const detail = cause instanceof Error ? cause.message : String(cause)
-  return `The voice note could not be saved: ${detail.replace(/\.+$/, '')}. Try recording again.`
+  return `The voice note could not be saved: ${detail.replace(/[.?!…]+$/, '')}. Try recording again.`
 }
 
 function formatElapsed(durationMillis: number): string {
@@ -154,6 +159,55 @@ export default function VoiceScreen() {
       mountedRef.current = false
     }
   }, [])
+
+  /**
+   * `phase` is only ever moved back to `'idle'` by this screen's own stop
+   * branch and its catch — nothing reverts it when the recorder stops
+   * without being asked: an incoming call, a native `mediaServicesDidReset`,
+   * another app seizing the microphone. Left alone, `phase` (and everything
+   * drawn from it — the label, the "RECORDING" header, the spoken
+   * description) keeps claiming a recording that no longer exists, and her
+   * next tap reads the LIVE flag correctly, finds it false, and takes the
+   * *start* branch: she presses a control that reads "Stop" and instead
+   * begins a brand-new recording over whatever she had just said. Silently.
+   *
+   * `state.isRecording` / `state.mediaServicesDidReset` — the POLLED copy,
+   * not the live flag — are what this checks. That is deliberate and safe
+   * here in a way it is not for `toggle`'s decisions: this is a display
+   * concern, not a branch, so the poller's up-to-500 ms lag only delays how
+   * quickly she is told, never which action a tap takes.
+   *
+   * `pollConfirmedRecordingRef` guards the one moment reading the poll
+   * directly would be actively wrong: the instant `phase` becomes
+   * `'recording'`, the poller's last commit can still be the ONE FROM
+   * BEFORE this recording started — stale in the opposite direction — and
+   * reacting to that immediately would announce a fresh recording as
+   * already over (see the "moves through Record, Starting…, Stop and
+   * Saving…" test, which presses Record and checks the label before the
+   * poller has had a chance to agree). So this only acts once the poller
+   * has agreed, at least once, that the recording is genuinely under way. A
+   * `record()` call that fails to start and is never once confirmed by the
+   * poller is a narrower, separate gap this does not close — closing it
+   * would mean guessing how long is too long to wait for a poll that may
+   * legitimately be slow, and the failure mode of guessing wrong here is
+   * announcing a live recording as dead.
+   */
+  const pollConfirmedRecordingRef = useRef(false)
+  useEffect(() => {
+    if (phase !== 'recording') {
+      pollConfirmedRecordingRef.current = false
+      return
+    }
+    if (state.isRecording && !state.mediaServicesDidReset) {
+      pollConfirmedRecordingRef.current = true
+      return
+    }
+    if (!pollConfirmedRecordingRef.current) return
+    setPhase('idle')
+    setError(
+      'The recording stopped on its own, possibly because of an interruption such as a call. It may not have been saved — record it again to be sure.',
+    )
+  }, [phase, state.isRecording, state.mediaServicesDidReset])
 
   /**
    * Asked on mount and again from the "Allow microphone access" button. A

@@ -16,7 +16,8 @@ import { field } from '@corymbia/tokens'
  *
  * **THE MOCK KEEPS TWO STATES, AND THAT IS THE POINT.** On a device
  * `useAudioRecorderState` is a poller — `setInterval(..., 500)`, committing
- * only once `durationMillis` has moved more than 50 ms
+ * once `canRecord`, `isRecording`, `mediaServicesDidReset`, `url` or
+ * `metering` changes, OR `durationMillis` moves by more than 50 ms
  * (`node_modules/expo-audio/build/utils/useAudioRecorderState.js`) — so what
  * the hook returns is up to half a second behind what the recorder is
  * actually doing. An earlier version of this file returned the SAME object
@@ -98,7 +99,7 @@ let mockPolledState: MockRecorderState = { ...idleState }
 const mockRecorderInstance = {
   prepareToRecordAsync: (...args: unknown[]) => mockPrepareToRecordAsync(...args),
   record: (...args: unknown[]) => mockRecord(...args),
-  stop: (...args: unknown[]) => mockStop(...args) as Promise<void>,
+  stop: (...args: unknown[]) => mockStop(...args),
   getStatus: () => ({ ...mockLiveState }),
   get isRecording() {
     return mockLiveState.isRecording
@@ -244,6 +245,21 @@ async function renderScreen() {
   )
 }
 
+/**
+ * Forces the tree to re-invoke `VoiceScreen` so it reads the CURRENT
+ * `mockPolledState`/`mockLiveState` rather than whatever it captured on its
+ * last render. Mutating those module-level variables alone does not — the
+ * mock hooks are plain reads, not React state, so nothing schedules a
+ * re-render on their own the way the real 500 ms poller does on a device.
+ */
+async function rerenderScreen(view: Awaited<ReturnType<typeof renderScreen>>) {
+  await view.rerender(
+    <ThemeProvider initial="dark">
+      <VoiceScreen />
+    </ThemeProvider>,
+  )
+}
+
 function spokenDescription(): unknown {
   return screen.getByTestId('voice-screen-spoken-description').props.accessibilityLabel
 }
@@ -310,6 +326,10 @@ describe('VoiceScreen', () => {
     })
     await renderScreen()
     await act(async () => {})
+    // Not just present — says why. An empty `voice-needs-permission` node
+    // satisfies `toBeTruthy()` on the button beside it while telling her
+    // nothing about what she is being asked to allow.
+    expect(screen.getByTestId('voice-needs-permission')).toHaveTextContent(/microphone/i)
     expect(screen.getByTestId('voice-request')).toBeTruthy()
     expect(screen.queryByTestId('voice-denied')).toBeNull()
     expect(screen.queryByTestId('voice-toggle')).toBeNull()
@@ -394,6 +414,22 @@ describe('VoiceScreen', () => {
     expect(screen.getByTestId('voice-elapsed').props.accessibilityLabel).toBe(
       '1 minute 12 seconds',
     )
+  })
+
+  it('says the seconds alone under a minute, and gets the singular right', async () => {
+    // The only other pinned case (above) is 72.4 s — past a minute, and
+    // plural throughout. Zero minutes is the common case for a field note,
+    // and replacing the seconds-only return with '' leaves that test green.
+    setRecorderState({ isRecording: true, durationMillis: 12_000 })
+    const view = await renderScreen()
+    expect(screen.getByTestId('voice-elapsed').props.accessibilityLabel).toBe('12 seconds')
+    await view.unmount()
+
+    // And the singular: a note that ran for exactly one second is "1
+    // second", not "1 seconds".
+    setRecorderState({ isRecording: true, durationMillis: 1000 })
+    await renderScreen()
+    expect(screen.getByTestId('voice-elapsed').props.accessibilityLabel).toBe('1 second')
   })
 
   it('prepares before recording, because record() on an unprepared recorder does nothing', async () => {
@@ -508,11 +544,17 @@ describe('VoiceScreen', () => {
     expect(screen.queryByTestId('voice-error')).toBeNull()
   })
 
-  it('stops rather than starting again when the second tap lands inside the poll window', async () => {
-    // `useAudioRecorderState` polls every 500 ms. She taps Record and taps
-    // again inside that window: the poller still says "not recording", and a
-    // screen that believed it would call `prepareToRecordAsync()` and
-    // `record()` against a recorder that is already running.
+  it('stops the already-running recording even though the poller has not caught up yet', async () => {
+    // Not literally two taps: this fixes the live and polled state apart
+    // and presses ONCE, which is enough on its own to show the decision is
+    // taken on the live flag rather than the poller's stale copy. (A real
+    // "second tap inside the poll window" scenario is two presses with
+    // nothing moving the state in between; that is not what this does.)
+    // `useAudioRecorderState` polls every 500 ms, and she may have started
+    // recording — or the recorder may have started on its own — inside that
+    // window: the poller still says "not recording", and a screen that
+    // believed it would call `prepareToRecordAsync()` and `record()` against
+    // a recorder that is already running.
     setLive({ isRecording: true, durationMillis: 4000 })
     setPolled({ isRecording: false, durationMillis: 0 })
     uri.mockReturnValue('file:///tmp/note.m4a')
@@ -546,8 +588,9 @@ describe('VoiceScreen', () => {
     await renderScreen()
     const toggle = screen.getByTestId('voice-toggle')
     await fireEvent.press(toggle)
-    // The poller has not caught up with the stop yet.
-    setPolled({ isRecording: true })
+    // The poller was never told about the stop, so `mockPolledState.isRecording`
+    // is still true here — nothing needs to force it; that staleness is the
+    // whole scenario this test is about.
     expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Record')
     await fireEvent.press(screen.getByTestId('voice-toggle'))
     expect(stop).toHaveBeenCalledTimes(1)
@@ -577,6 +620,31 @@ describe('VoiceScreen', () => {
     await fireEvent.press(screen.getByTestId('voice-toggle'))
     expect(fileConstructed).toHaveBeenCalledWith('file:///tmp/stray.m4a')
     expect(fileDelete).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not try to delete a discarded note that has no uri', async () => {
+    // `discardFile`'s `uri === null` guard: without it, `new File(null)`
+    // would be constructed and probed for a file that was never there.
+    setRecorderState({ isRecording: true, durationMillis: 300 })
+    uri.mockReturnValue(null)
+    await renderScreen()
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(fileConstructed).not.toHaveBeenCalled()
+    expect(fileDelete).not.toHaveBeenCalled()
+  })
+
+  it('does not try to delete a discarded note whose file is already gone', async () => {
+    // `discardFile`'s `if (file.exists)` guard: without it, `.delete()` is
+    // called on a file that was never written, which is at best a wasted
+    // call and on some platforms a thrown error this best-effort function
+    // is specifically written not to let escape.
+    mockFileExists.mockReturnValue(false)
+    setRecorderState({ isRecording: true, durationMillis: 300 })
+    uri.mockReturnValue('file:///tmp/gone.m4a')
+    await renderScreen()
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(fileConstructed).toHaveBeenCalledWith('file:///tmp/gone.m4a')
+    expect(fileDelete).not.toHaveBeenCalled()
   })
 
   it('keeps a note exactly at the minimum and discards one just under it', async () => {
@@ -609,6 +677,14 @@ describe('VoiceScreen', () => {
       'The voice note could not be saved: disk full. Try recording again.',
     )
     expect(routerBack).not.toHaveBeenCalled()
+    // The `error !== null` branch of `spokenDescription`: a screen reader
+    // user gets this from the announcement, not from reading `voice-error`
+    // directly, so the two have to actually agree.
+    expect(spokenDescription()).toEqual(
+      expect.stringContaining(
+        'Voice note. The voice note could not be saved: disk full. Try recording again.',
+      ),
+    )
   })
 
   it('does not double the full stop when the cause already ends in one', async () => {
@@ -625,7 +701,21 @@ describe('VoiceScreen', () => {
     )
   })
 
-  it('clears the discarded and failed messages on the next attempt', async () => {
+  it('strips trailing punctuation other than a full stop before adding its own', async () => {
+    // `replace(/\.+$/, '')` only ever matched a run of full stops — a cause
+    // ending in "?", "!" or an ellipsis went through unstripped and read
+    // "Still loading…. Try recording again."
+    setRecorderState({ isRecording: true, durationMillis: 5000 })
+    uri.mockReturnValue('file:///tmp/note.m4a')
+    attachVoice.mockRejectedValue(new Error('Still loading…'))
+    await renderScreen()
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(screen.getByTestId('voice-error')).toHaveTextContent(
+      'The voice note could not be saved: Still loading. Try recording again.',
+    )
+  })
+
+  it('clears the discarded message on the next attempt', async () => {
     // A message that survives the next press describes something that is no
     // longer happening.
     setRecorderState({ isRecording: true, durationMillis: 300 })
@@ -635,6 +725,21 @@ describe('VoiceScreen', () => {
     expect(screen.getByTestId('voice-too-short')).toBeTruthy()
     await fireEvent.press(screen.getByTestId('voice-toggle'))
     expect(screen.queryByTestId('voice-too-short')).toBeNull()
+  })
+
+  it('clears the failed-save message on the next attempt', async () => {
+    // The counterpart above proves the discard message clears for real,
+    // because it is genuinely set by the first press. This one has to set a
+    // REAL error the same way: `setError(null)` clearing a message that was
+    // never set in the first place — `error` stays `null` throughout —
+    // would pass whether or not that call is even there.
+    setRecorderState({ isRecording: true, durationMillis: 5000 })
+    uri.mockReturnValue('file:///tmp/note.m4a')
+    attachVoice.mockRejectedValue(new Error('disk full'))
+    await renderScreen()
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(screen.getByTestId('voice-error')).toBeTruthy()
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
     expect(screen.queryByTestId('voice-error')).toBeNull()
   })
 
@@ -689,6 +794,40 @@ describe('VoiceScreen', () => {
       expect.objectContaining({ sourceUri: 'file:///tmp/note.m4a', durationMs: 4000 }),
     )
     expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Record')
+  })
+
+  it('tells her the recording stopped on its own instead of going on claiming it is still running', async () => {
+    // An incoming call, a native `mediaServicesDidReset`, another app
+    // seizing the microphone: none of these ask this screen first, and
+    // nothing else ever moves `phase` back to 'idle' when they happen. Left
+    // alone, the button goes on reading "Stop" forever, the header goes on
+    // reading "RECORDING", and her next tap — which reads the LIVE flag
+    // correctly and finds it false — starts a brand-new recording over
+    // whatever she had just said. Silently.
+    const view = await renderScreen()
+    await fireEvent.press(screen.getByTestId('voice-toggle'))
+    expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Stop')
+
+    // The poller catches up and agrees the recording is genuinely under
+    // way. This has to happen before the "stops on its own" half below, or
+    // the poller's OWN stale-from-before-this-recording value (still
+    // `false` the instant `phase` became 'recording') would be
+    // indistinguishable from a real stop.
+    setPolled({ isRecording: true, durationMillis: 4000 })
+    await rerenderScreen(view)
+    expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Stop')
+
+    // Now the recorder stops on its own, behind the screen's back — nobody
+    // pressed Stop.
+    setLive({ isRecording: false })
+    setPolled({ isRecording: false })
+    await rerenderScreen(view)
+
+    expect(screen.getByTestId('voice-toggle')).toHaveTextContent('Record')
+    // Not just idle — SAYS SO. Reverting silently would swap one lie
+    // ("still recording") for a blank ("Record", as if nothing happened),
+    // and she needs to know the note may not have been captured.
+    expect(screen.getByTestId('voice-error')).toHaveTextContent(/stopped on its own/i)
   })
 
   it('gives the toggle a field-sized target', async () => {
@@ -757,12 +896,37 @@ describe('VoiceScreen', () => {
     // screen's, and React runs unmount cleanups in registration order — so
     // the recorder may already be released by the time this stop runs. An
     // unhandled rejection there surfaces on a screen that has already gone.
-    setRecorderState({ isRecording: true, durationMillis: 4000 })
-    stop.mockRejectedValue(new Error('recorder already released'))
-    const view = await renderScreen()
-    await view.unmount()
-    await act(async () => {})
+    //
+    // `expect(stop).toHaveBeenCalled()` alone does not pin the `.catch` —
+    // the test above it already asserts a call, and whether an unhandled
+    // rejection here turns THIS test red depends on Jest's own reporting,
+    // which nothing here mutates to check. Listening for Node's
+    // `unhandledRejection` event directly is deterministic regardless of
+    // how (or whether) the test runner surfaces one: the event fires
+    // exactly when a rejected promise reaches the end of a microtask turn
+    // with no handler attached, which is precisely what `.catch` prevents.
+    const rejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown) => {
+      rejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      setRecorderState({ isRecording: true, durationMillis: 4000 })
+      stop.mockRejectedValue(new Error('recorder already released'))
+      const view = await renderScreen()
+      await view.unmount()
+      await act(async () => {})
+      // One more real turn of the event loop: Node reports an unhandled
+      // rejection a tick after the promise settles, which `act`'s own
+      // microtask flushing does not necessarily wait out.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0)
+      })
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
     expect(stop).toHaveBeenCalled()
+    expect(rejections).toHaveLength(0)
   })
 
   it('ignores a second toggle press while the first action is still starting', async () => {
@@ -770,7 +934,7 @@ describe('VoiceScreen', () => {
     // after an await is a claim taken too late. Both presses are fired from
     // the SAME rendered element, inside one outer `act`, with no `await`
     // between them — an awaited `fireEvent.press` in between would let
-    // `setPending(...)` from the first press flush and re-render before the
+    // `setPhase(...)` from the first press flush and re-render before the
     // second press is even dispatched, at which point a state guard would
     // block correctly too and this test would no longer be able to tell a
     // state guard from the ref guard this screen actually uses. Not
