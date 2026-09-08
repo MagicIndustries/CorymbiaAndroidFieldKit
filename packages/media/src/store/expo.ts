@@ -40,20 +40,29 @@ export function createExpoMediaStore(): MediaStore {
             "another's, and the row pointing at the old bytes would not know.",
         )
       }
-      // Idempotent so a second capture does not throw on a directory that is
-      // already there, and `intermediates` so a fresh install does not fail on
-      // a missing parent.
-      directory().create({ intermediates: true, idempotent: true })
-
       const source = new File(sourceUri)
       if (!source.exists) {
         throw new Error(`No source file at ${sourceUri} to save as ${fileName}.`)
       }
 
+      // Checked above, not below: a missing source has nothing to move, and
+      // creating the directory first would leave an empty `media/` behind
+      // when a camera or recorder failed silently and there was never
+      // anything to put in it.
+      //
+      // Idempotent so a second capture does not throw on a directory that is
+      // already there, and `intermediates` so a fresh install does not fail on
+      // a missing parent.
+      directory().create({ intermediates: true, idempotent: true })
+
       // A File destination, not a Directory one. `move` accepts either
-      // (SDK 57 docs, Classes > File > move: `destination: File | Directory`),
-      // and the difference is the whole of this line: handed a Directory the
-      // file keeps its SOURCE name — the docs' own example moves `example.txt`
+      // (installed typings, node_modules/expo-file-system/build/internal/
+      // NativeFileSystem.types.d.ts:190: `move(destination: PublicDirectory |
+      // PublicFile, options?: RelocationOptions): Promise<void>` — cited by
+      // file and line rather than by docs section, which moves around across
+      // SDK versions in a way a path into node_modules does not), and the
+      // difference is the whole of this line: handed a Directory the file
+      // keeps its SOURCE name — the docs' own example moves `example.txt`
       // into a folder and it is `${dir}/example.txt` on the far side — which
       // here would leave the bytes under the camera's throwaway name while
       // every row points at the media id. Handed a File it lands at that
