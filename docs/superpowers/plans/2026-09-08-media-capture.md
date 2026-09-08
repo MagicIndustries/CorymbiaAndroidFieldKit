@@ -2375,6 +2375,46 @@ by the owner, in this order:
 `npx expo prebuild --platform android` must run before the build**, or neither permission
 reaches the manifest and both screens fail at runtime with no useful message.
 
+#### The voice screen's own checks, which no test can answer
+
+The voice note screen went through five review passes. Three of them were verified green and
+were **wrong on the device** — the first branched on a 500 ms poller and discarded real speech
+as a stray tap; the second left the button reading "Stop" after the recorder stopped on its
+own, so the next tap recorded over the lost note; the third watched a signal the bundled Kotlin
+never moves on Android for any of the three causes its own comment named. Everything below is a
+question a mock cannot answer, and the history says that is exactly where this screen fails.
+
+Take a **release** build so the JS bundle is embedded, and run these on the tablet as well as
+the S25 — the tablet has never run this app.
+
+1. **Does an interrupted recording tell her anything at all?** Start a note, then make the
+   recorder fail — kill the media server over adb, or start a recording in another app to take
+   the microphone. Expect the button to return to "Record" within about a second and a red
+   sentence saying the recording stopped on its own and was not saved. **If the button still
+   says "Stop", the event is not reaching JS and this has failed the same way pass 3 did.**
+2. **Can she record again straight afterwards?** Immediately after that message, record five
+   seconds and stop. Expect a normal note, no crash, and nothing mentioning "already prepared".
+   That is the entire reason the forced stop exists.
+3. **Press Record again very fast.** Within a second of the interruption message, and again
+   straight after a deliberate too-short tap (Record, Stop inside a second, Record again at
+   once). Expect nothing to claim the note you just started "stopped on its own", and no voice
+   note on the record that you did not finish. Either would be the stale-event bug on hardware.
+4. **Ring the phone mid-recording.** Have someone call, answer, hang up, then stop the note.
+   Write down what actually happened: any message, whether it attached, and — on playback —
+   whether the audio goes silent from the moment the call started. The likely answer is that
+   nothing on screen changes and it records silence. That is a platform limitation nothing in
+   JavaScript can fix, and it belongs in the field notes rather than left implied.
+5. **Does an interruption ever hand back a file?** Note whether any interruption says "was
+   saved" or "was not saved". Everything read off the native source says it will always be "not
+   saved" on Android with the current preset. If you ever see "was saved", play that note back
+   and confirm it is not a broken file.
+6. **Does the timer stop?** During an interruption message, watch the elapsed readout for ten
+   seconds. It must sit still.
+7. **Is a real note's length right?** Record against a stopwatch for exactly 30 s and stop
+   deliberately; the stored duration should be within a second. Then a 2 s note (must be kept)
+   and a 0.5 s tap (must be discarded as too short) — and check the cache directory afterwards
+   to confirm the discarded file is actually gone.
+
 - [ ] **Step 5: Verify and commit**
 
 Run: `pnpm turbo run test lint typecheck --force` and `pnpm run lint:verify-rules`.
