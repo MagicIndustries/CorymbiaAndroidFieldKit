@@ -1109,6 +1109,26 @@ still written as a set on every accepted refinement — a record must never be l
 its old position and half its new one — but that particular direction of the clearing is dead
 code by design, not an oversight.
 
+**The applied event's own wording has to split by class too, for the same reason the guard
+does.** §9.6's `fix refined from … to …` prefix is pinned copy, and its default filling —
+the two `accuracy_m` figures, before then after — is right for a same-class refinement,
+where the two numbers really are answers to the same question. It is wrong for exactly the
+case this section exists for: an ambient fix upgraded to a deliberate one. `fix refined from
+±3.0 m to ±4.0 m` sets the two figures side by side as though smaller-is-better were being
+judged between them, which is the one reading this whole section says must never happen —
+and to an auditor who was not told a class changed, it reads as a degradation, not the
+upgrade it actually was. So when the applied refinement crosses classes and the record being
+replaced carries a real accuracy (an ambient fix's — a `'none'` record has none, so refining
+*from* `'none'` keeps the plain wording; there is no pair of numbers there to misread as a
+comparison), the class transition is named first and the accuracy pair demoted to a
+parenthetical:
+
+> `fix refined from ambient to deliberate (±3.0 m to ±4.0 m)`
+
+Pinned here as copy, the same way §9.6's discarded-run sentence is: the class names are read
+off the stored and incoming fix quality, not hardcoded, so a fourth fix class does not
+silently leave this sentence describing a transition that never happened.
+
 ---
 
 ## 10. Navigation and journeys

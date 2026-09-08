@@ -1449,10 +1449,17 @@ describe('filing, reordering and refiling', () => {
       // it is gone — it was proving a transition that can no longer happen,
       // and restoring it would be restoring the defect this file exists to
       // close. An upgrade (ambient to deliberate) is the direction §9.6.2
-      // leaves legal, applies unconditionally on rank alone, and is the
-      // transition the application will actually perform once Plan 5's
-      // media-first entry points land — so it is what exercises this
-      // clearing now.
+      // leaves legal, and is the transition the application will actually
+      // perform once Plan 5's media-first entry points land — so it is what
+      // exercises this clearing now.
+      //
+      // This instance goes ±38 m (AMBIENT) to ±4 m (DELIBERATE), which would
+      // also have applied under the old accuracy-only guard — so on its own
+      // this test is not evidence that rank decided the outcome, only that
+      // the clearing is correct on an upgrade. The `refineRecordFix across
+      // fix classes` describe block below is what actually pins rank over
+      // accuracy, including the case where the ambient number is the sharper
+      // one and still loses.
       const record = await createRecord(db, { activityId, kind: 'pin', fix: AMBIENT, deviceId })
 
       const { record: refined, applied } = await refineRecordFix(db, {
@@ -1685,9 +1692,27 @@ describe('filing, reordering and refiling', () => {
       expect(applied).toBe(true)
       expect(refined.fix).toEqual(sharperDeliberate)
       expect((await getRecord(db, record.id))?.fix).toEqual(sharperDeliberate)
+
+      // Both outcomes of this guard append an 'edited' event (see the
+      // refusal tests below, which pin their half); this is the applied
+      // half. And its wording is the point of this test: the two accuracy
+      // numbers must not sit side by side as if they were being compared —
+      // that is the exact misreading §9.6.2 exists to prevent — so the class
+      // transition, not the numbers, is what follows the fixed
+      // `fix refined from ` prefix.
+      const events = await listEvents(db, record.id)
+      expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+      expect(events[1]?.detail).toBe('fix refined from ambient to deliberate (±3.0 m to ±4.0 m)')
     })
 
     it('applies a deliberate fix over no position at all', async () => {
+      // Unlike the test above, this is not evidence for the rank rule: a
+      // 'none' record's accuracy_m is always NULL, so the pre-existing
+      // `existing.accuracy_m === null` branch already applied any positioned
+      // fix, before this task's rank comparison existed at all. It passes
+      // unchanged on the old implementation and stays as regression cover for
+      // refining from 'none' — the rank-over-accuracy claim is what the
+      // ambient-vs-deliberate tests in this block are for.
       const record = await createRecord(db, {
         activityId,
         kind: 'pin',
