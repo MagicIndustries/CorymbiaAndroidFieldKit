@@ -29,9 +29,6 @@ own, so the next tap recorded over the lost note; the third watched a signal the
 never moves on Android for any of the three causes its own comment named. Everything below is a
 question a mock cannot answer, and the history says that is exactly where this screen fails.
 
-Take a **release** build so the JS bundle is embedded, and run these on the tablet as well as
-the S25 — the tablet has never run this app.
-
 1. **Does an interrupted recording tell her anything at all?** Start a note, then make the
    recorder fail — kill the media server over adb, or start a recording in another app to take
    the microphone. Expect the button to return to "Record" within about a second and a red
@@ -62,21 +59,27 @@ the S25 — the tablet has never run this app.
 
 ## Everything else
 
-### The rest
-
 1. **Take a photo on a record.** Confirm the count on the Photo tile goes to 1 and the
    thumbnail actually appears — the tile's image height was changed from a percentage to an
    explicit token value because a percentage against a parent with only `minHeight` is a Yoga
    trap that can resolve to zero, invisible to Jest.
-2. **Take three more.** Confirm the strip scrolls horizontally rather than shrinking the tiles
-   to fit.
+2. **Take five more, for six in all.** Confirm the strip scrolls horizontally rather than
+   shrinking the tiles to fit. Six rather than the three this item used to ask for: a 64dp tile
+   plus an 8dp gap is 72dp, so four of them come to about 280dp and fit without scrolling on
+   any device this app runs on — at four photos a strip that scrolls correctly and one that
+   silently shrinks its tiles look identical, and the check passes either way.
 3. **Record a voice note.** Confirm the elapsed time visibly moves while recording — a frozen
    timer means the recorder never actually started.
 4. **Play it back.** Confirm it is the note just recorded, not a previous one.
 5. **Remove a photo.** Confirm it disappears and the remaining photos keep their order. Then
-   tap deliberately near the boundary between two adjacent tiles: their remove hit regions meet
-   exactly there with zero margin (an 8dp tile gap exactly absorbs 8dp of hitSlop expansion on
-   each side), so confirm the photo you meant to remove is the one that goes, not its neighbour.
+   tap deliberately near the boundary between two adjacent tiles, and confirm the photo you
+   meant to remove is the one that goes, not its neighbour. The reasoning, corrected: the
+   control is a 24dp box inset `spacing.xs` (4dp) from its tile's right edge with a 12dp
+   `hitSlop` on every side, so its hit region runs past the tile by 8dp on the **right** and
+   8dp above the **top**, and stays inside the tile on the left and bottom. Tiles sit 8dp
+   apart, so one tile's overhang reaches exactly its neighbour's left edge and stops — the two
+   regions meet, they do not overlap, and the expansion is not "on each side" of the tile as
+   this item used to say.
 6. **Force-quit the app and reopen the record.** Confirm every attachment — photos and voice
    notes both — is still there. This is the one check that proves files landed in
    `Paths.document` and not somewhere the OS can reclaim without warning (see

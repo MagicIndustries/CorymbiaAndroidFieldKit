@@ -103,11 +103,15 @@ describe('InputAffordanceRow', () => {
     // the `count` prop can satisfy at most one of these two assertions, so
     // this bounds the same hardcoding risk finding 1's fix left open.
     await wrap(<InputAffordanceRow onPress={() => {}} counts={{ photo: 4, voice: 2 }} />)
-    // `toHaveTextContent` defaults to an EXACT match in this RNTL version
-    // (see the comment atop ContextStamp.test.tsx) — the label is
-    // `Photo · 4`, not the bare digit, so this is a substring check.
-    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('4', { exact: false })
-    expect(screen.getByTestId('affordance-voice-label')).toHaveTextContent('2', { exact: false })
+    // `toHaveTextContent` defaults to an EXACT whole-string match in this
+    // RNTL version (see the comment atop ContextStamp.test.tsx), and these
+    // two labels are known exactly, so they are asserted exactly. The
+    // earlier `{ exact: false }` against a bare `'4'` made this a substring
+    // check for one digit — satisfied by `Photo · 44`, by `Photo · 4 of 7`,
+    // and by a label that dropped the kind name altogether. Nothing here
+    // needed that latitude: the format is this component's own.
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Photo · 4')
+    expect(screen.getByTestId('affordance-voice-label')).toHaveTextContent('Voice · 2')
   })
 
   it('says done without a number for a kind that can only happen once', async () => {
@@ -176,9 +180,19 @@ describe('InputAffordanceRow', () => {
   })
 
   it('tells a screen-reader user how many of a kind are already attached', async () => {
-    await wrap(<InputAffordanceRow onPress={() => {}} counts={{ photo: 3 }} />)
-    expect(screen.getByTestId('affordance-photo').props.accessibilityLabel).toEqual(
-      expect.stringContaining('3'),
+    await wrap(<InputAffordanceRow onPress={() => {}} counts={{ photo: 4, voice: 2 }} />)
+    // Two counts on two different kinds, which is the anti-hardcoding shape
+    // the visible-label sibling above has and this one did not: with only
+    // `{ photo: 3 }` and `stringContaining('3')`, a literal `, 3 attached`
+    // appended to every spoken name passed. Two different non-zero counts on
+    // two different kinds cannot both be satisfied by one literal, and the
+    // spoken names are known exactly, so they are asserted exactly rather
+    // than by containment.
+    expect(screen.getByTestId('affordance-photo').props.accessibilityLabel).toBe(
+      'Take a photo, 4 attached',
+    )
+    expect(screen.getByTestId('affordance-voice').props.accessibilityLabel).toBe(
+      'Record a voice note, 2 attached',
     )
   })
 })
