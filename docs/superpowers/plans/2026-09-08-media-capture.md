@@ -442,9 +442,16 @@ const file = new File(Paths.document, 'media', 'name.jpg')
 file.exists     // boolean property, NOT a method, NOT a promise
 file.size       // bytes
 file.uri
-file.move(destination)   // synchronous; updates file.uri
+await file.move(destination)   // ASYNC — returns Promise<void>; `moveSync` is the sync variant
 file.delete()
 ```
+
+`move`'s declared signature in 57.0.6 is
+`move(destination: PublicDirectory | PublicFile, options?: RelocationOptions): Promise<void>`
+(`node_modules/expo-file-system/build/internal/NativeFileSystem.types.d.ts`). Two things follow,
+and an earlier draft of this task got both wrong: it is **awaited**, and it takes a **`File`**
+destination as well as a `Directory` — which is the supported move-and-rename, because a
+`Directory` destination keeps the source's own filename.
 
 `Paths.document` is the app's document directory — private, not swept into the gallery, and
 not deleted under storage pressure the way `Paths.cache` is. That distinction is the whole
@@ -637,14 +644,12 @@ export function createExpoMediaStore(): MediaStore {
 }
 ```
 
-**A gap you must close before you finish this task.** `source.move(directory())` moves the
-file under its *source* name, not `fileName` — the docs' own example shows
-`file.move(new Directory(...))` keeping `example.txt`. Read the SDK 57 `File` docs and find
-the supported way to move-and-rename in one step (check whether `move` accepts a `File`
-destination as well as a `Directory`). Implement whichever the docs support, adjust the
-test's expectation to match, and **state in your report which API you used and where the
-docs say so.** Do not guess, and do not leave the rename to a second operation without
-saying why.
+**RESOLVED during execution — recorded here so the answer is not lost.** The draft above
+called `source.move(directory())`, which moves the file under its *source* name rather than
+`fileName`. `move` accepts a `File` destination as well as a `Directory`, so
+`await source.move(destination)` with the destination `File` is the supported move-and-rename
+in one operation. A `move` into the directory followed by a `rename` was rejected: two
+operations leave an orphan under the camera's own name if interrupted between them.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
