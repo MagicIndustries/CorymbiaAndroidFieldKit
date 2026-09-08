@@ -4,15 +4,14 @@ import { router, useLocalSearchParams } from 'expo-router'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 import { spacing } from '@corymbia/tokens'
 import { Button, CORNER_BLOCK_MAX_W, Screen, Type, resolveReach, useLayout, useTheme } from '@corymbia/ui'
-import { useSettings } from '../src/db/provider'
-import { attachPhoto } from '../src/media/attachPhoto'
+import { useDatabaseStatus, useSettings } from '../src/db/provider'
+import { useAttachMedia } from '../src/media/useAttachMedia'
 
 /**
  * The camera screen (Plan 4, Task 8): a full-screen viewfinder with our own
- * shutter, reached from a record. Task 10 fills `attachPhoto` (`src/media`)
- * in with the pipeline that writes the file and the row; this screen only
- * needs something to call and await once a photo has been captured to a
- * temporary file.
+ * shutter, reached from a record. `useAttachMedia` (`src/media`) is the
+ * pipeline that writes the file and the row; this screen only calls and
+ * awaits it once a photo has been captured to a temporary file.
  *
  * `exif: true` on the capture is deliberate (spec §12.1): the image carries
  * its own timestamp and, where the OS provides it, its own coordinates —
@@ -22,15 +21,15 @@ import { attachPhoto } from '../src/media/attachPhoto'
 
 /**
  * A human sentence first, the technical cause subordinate to it rather than
- * the whole message (doctrine rule 6: plain language for process). Until
- * Task 10 lands, every capture surfaces the seam's own placeholder message —
- * and a native camera failure will be equally raw — so this is what stands
- * between that text and a field ecologist who needs to know what happened
- * and what to do, not what threw.
+ * the whole message (doctrine rule 6: plain language for process). A failed
+ * attach surfaces whatever SQLite or the file system said, and a native
+ * camera failure is equally raw — so this is what stands between that text
+ * and a field ecologist who needs to know what happened and what to do, not
+ * what threw.
  *
  * Trailing sentence punctuation is stripped from the cause before this
- * sentence adds its own: `attachPhoto`'s message ends in a full stop, and
- * glued together uncorrected they read "...implements this seam.. Try the
+ * sentence adds its own: a cause whose message ends in a full stop, glued
+ * together uncorrected, reads "...disk full.. Try the
  * shutter again." A native cause is not guaranteed to end in a full stop at
  * all — "Still loading…" ends in an ellipsis, a thrown message can end in
  * "?" or "!" — and any of those left in place reads just as oddly: "Still
@@ -43,6 +42,31 @@ function messageFor(cause: unknown): string {
 }
 
 export default function CameraScreen() {
+  const status = useDatabaseStatus()
+
+  // `useAttachMedia` reads the database and the registered device out of
+  // context, and `useDatabase`/`useDevice` both throw before the database is
+  // open — so the guard has to come before the body that calls them, hence
+  // the split into two components rather than an early return inside one
+  // (`capture.tsx` and `diagnostics.tsx` do the same, for the same reason).
+  if (status.state !== 'ready') {
+    return (
+      <Screen
+        testID="camera-screen"
+        spokenDescription={`Camera. The database is ${status.state}, so there is nowhere to attach a photo yet.`}
+      >
+        <Type testID="camera-database" variant="title">
+          Database {status.state}
+        </Type>
+        {status.error ? <Type dim>{status.error.message}</Type> : null}
+      </Screen>
+    )
+  }
+
+  return <CameraBody />
+}
+
+function CameraBody() {
   const { recordId } = useLocalSearchParams<{ recordId?: string }>()
   const [permission, requestPermission] = useCameraPermissions()
   const cameraRef = useRef<CameraView>(null)
@@ -53,6 +77,7 @@ export default function CameraScreen() {
   const { theme } = useTheme()
   const { deviceClass, orientation } = useLayout()
   const { settings } = useSettings()
+  const { attachPhoto } = useAttachMedia()
 
   /**
    * The exact failure that killed the capture button for a whole session in
@@ -66,11 +91,11 @@ export default function CameraScreen() {
    */
   const shoot = useCallback(async () => {
     if (savingRef.current) return
-    // Nothing navigates to `/camera` yet (spec §12.1 lands with Task 10), so
-    // this is latent rather than reachable today — but a route opened
-    // without its param would otherwise hand `attachPhoto` an `undefined`
-    // foreign key. The render guard below keeps the shutter from ever
-    // appearing in that case; this is the type-level backstop for the
+    // Nothing navigates to `/camera` yet (spec §12.1's affordance row lands
+    // with Task 11), so this is latent rather than reachable today — but a
+    // route opened without its param would otherwise hand `attachPhoto` an
+    // `undefined` foreign key. The render guard below keeps the shutter from
+    // ever appearing in that case; this is the type-level backstop for the
     // closure that outlives it.
     if (recordId === undefined) return
     savingRef.current = true
@@ -90,10 +115,10 @@ export default function CameraScreen() {
       savingRef.current = false
       setSaving(false)
     }
-  }, [recordId])
+  }, [attachPhoto, recordId])
 
-  // No route navigates here without a `recordId` yet (latent until Task 10),
-  // but the seam validates nothing, and `useLocalSearchParams` yields
+  // No route navigates here without a `recordId` yet (latent until Task 11),
+  // but nothing validates the param, and `useLocalSearchParams` yields
   // `undefined` in practice however the type is spelled. Render something
   // honest rather than a viewfinder with nowhere to attach its photo.
   if (recordId === undefined) {

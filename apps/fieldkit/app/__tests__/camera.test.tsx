@@ -17,16 +17,21 @@ import { field } from '@corymbia/tokens'
  * `useCameraPermissions`'s return value and `takePictureAsync`'s mock
  * directly, through `setPermission` and the fixtures below.
  *
- * Mocked: `../../src/media/attachPhoto`, the seam Task 10 fills in with the
- * real pipeline (file copy, media id, `attachMedia`). This screen's job is to
- * call it with the right arguments, handle its rejection on screen, and
- * navigate back on success — none of which needs a real file system or a
- * real database.
+ * Mocked: `../../src/media/useAttachMedia`, the hook that is the real
+ * pipeline (file write, media id, `attachMedia`). This screen's job is to
+ * call the `attachPhoto` it returns with the right arguments, handle its
+ * rejection on screen, and navigate back on success — none of which needs a
+ * real file system or a real database. The pipeline itself is proved by
+ * `src/media/__tests__/useAttachMedia.test.ts`, and the wiring from a screen
+ * that watches the GPS through to the fix on the event by
+ * `ambient-wiring.test.tsx`.
  *
  * Mocked: `../../src/db/provider`'s `useSettings`, for the one field
  * (`handedness`) this screen reads to resolve the reach zone — the same
  * value `capture.tsx` reads, through the same `resolveReach`, which is
- * exercised for real.
+ * exercised for real — and `useDatabaseStatus`, which this screen now guards
+ * on: `useAttachMedia` reads the database and the device out of context, and
+ * both of those throw before the database is open.
  *
  * Mocked: `expo-router`'s `router` singleton and `useLocalSearchParams`, so
  * navigation and the `recordId` param are observable without a real
@@ -74,8 +79,19 @@ jest.mock('expo-camera', () => {
 
 const mockAttachPhoto = jest.fn()
 
-jest.mock('../../src/media/attachPhoto', () => ({
+/**
+ * One stable object for the life of the file, the way the real hook's
+ * `useCallback`s are stable across renders — a fresh object per render would
+ * quietly re-create the screen's `shoot` callback every time and hide a
+ * missing dependency.
+ */
+const mockAttachMediaValue = {
   attachPhoto: (...args: unknown[]) => mockAttachPhoto(...args),
+  attachVoice: () => Promise.reject(new Error('the camera screen never attaches a voice note')),
+}
+
+jest.mock('../../src/media/useAttachMedia', () => ({
+  useAttachMedia: () => mockAttachMediaValue,
 }))
 
 const mockSettings = {
@@ -86,8 +102,20 @@ const mockSettings = {
 }
 const mockUseSettings = { settings: mockSettings, updateSetting: () => Promise.resolve() }
 
+/**
+ * `let`, not `const`: the database-guard test below sets this to `opening`
+ * for its one render. Reset in `beforeEach` rather than trusted to be put
+ * back, so one test changing it can never leak into the next.
+ */
+type MockStatus =
+  | { state: 'opening'; error: null; applied: string[] }
+  | { state: 'ready'; error: null; applied: string[] }
+  | { state: 'failed'; error: Error; applied: string[] }
+let mockStatus: MockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
+
 jest.mock('../../src/db/provider', () => ({
   useSettings: () => mockUseSettings,
+  useDatabaseStatus: () => mockStatus,
 }))
 
 const mockRouterBack = jest.fn()
@@ -131,6 +159,7 @@ async function renderScreen() {
 beforeEach(() => {
   mockPermission = null
   mockRecordId = 'rec_a'
+  mockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
   mockTakePictureAsync.mockReset()
   mockRequestPermission.mockReset()
   mockAttachPhoto.mockReset()
@@ -288,16 +317,16 @@ describe('CameraScreen', () => {
   })
 
   it('does not double the full stop when the cause already ends in one', async () => {
-    // `attachPhoto`'s own message ends in a period, and glued to this
-    // sentence uncorrected it read "...implements this seam.. Try the
-    // shutter again." — the same defect `voice.tsx` carried.
+    // A cause whose own message ends in a period, glued to this sentence
+    // uncorrected, read "...was deleted.. Try the shutter again." — the same
+    // defect `voice.tsx` carried.
     takePictureAsync.mockResolvedValue({ uri: 'file:///tmp/shot.jpg' })
-    attachPhoto.mockRejectedValue(new Error('Task 10 implements this seam.'))
+    attachPhoto.mockRejectedValue(new Error('The record was deleted.'))
     setPermission({ granted: true, canAskAgain: false, status: 'granted' })
     await renderScreen()
     await fireEvent.press(screen.getByTestId('camera-shutter'))
     expect(screen.getByTestId('camera-error')).toHaveTextContent(
-      'The photo could not be saved: Task 10 implements this seam. Try the shutter again.',
+      'The photo could not be saved: The record was deleted. Try the shutter again.',
     )
   })
 
@@ -368,10 +397,24 @@ describe('CameraScreen', () => {
     expect(screen.getByTestId('camera-shutter')).toHaveTextContent('Capture')
   })
 
+  it('shows no viewfinder until the database is open', async () => {
+    // `useAttachMedia` reads the database and the registered device out of
+    // context, and both of those hooks THROW before the database is open. A
+    // screen that rendered its body anyway would not show a viewfinder with a
+    // dead shutter — it would crash on the first render. That is why the
+    // guard is a separate component, and this is what proves it is there.
+    mockStatus = { state: 'opening', error: null, applied: [] }
+    setPermission({ granted: true, canAskAgain: false, status: 'granted' })
+    await renderScreen()
+    expect(screen.getByTestId('camera-database')).toHaveTextContent('Database opening')
+    expect(screen.queryByTestId('camera-view')).toBeNull()
+    expect(screen.queryByTestId('camera-shutter')).toBeNull()
+  })
+
   it('renders something honest when opened without a record to attach to', async () => {
-    // Latent until Task 10 wires up navigation to this screen, but
+    // Latent until Task 11 wires up navigation to this screen, but
     // `useLocalSearchParams` yields `undefined` in practice regardless of
-    // how the generic is spelled, and the seam validates nothing — an
+    // how the generic is spelled, and nothing validates the param — an
     // `undefined` foreign key should never reach `attachPhoto`.
     mockRecordId = undefined
     setPermission({ granted: true, canAskAgain: false, status: 'granted' })

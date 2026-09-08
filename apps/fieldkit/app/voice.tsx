@@ -13,20 +13,20 @@ import {
 } from 'expo-audio'
 import { spacing } from '@corymbia/tokens'
 import { Button, CORNER_BLOCK_MAX_W, Screen, Type, resolveReach, useLayout, useTheme } from '@corymbia/ui'
-import { useSettings } from '../src/db/provider'
-import { attachVoice } from '../src/media/attachVoice'
+import { useDatabaseStatus, useSettings } from '../src/db/provider'
+import { useAttachMedia } from '../src/media/useAttachMedia'
 
 /**
  * The voice note screen (Plan 4, Task 9): one toggle that starts and stops a
  * recording and attaches it to a record, the sibling of `camera.tsx` (Task
- * 8). Task 10 fills `attachVoice` (`src/media`) in with the pipeline that
- * writes the file and the row; this screen only needs something to call and
- * await once a recording has been stopped to a temporary file.
+ * 8). `useAttachMedia` (`src/media`) is the pipeline that writes the file and
+ * the row; this screen only calls and awaits it once a recording has been
+ * stopped to a temporary file.
  *
  * `RecordingPresets.HIGH_QUALITY` writes `.m4a` on Android (SDK 57 docs,
- * https://docs.expo.dev/versions/v57.0.0/sdk/audio/) — `attachVoice`'s doc
- * comment carries that fact forward for Task 10, since this screen never
- * needs to know the extension itself.
+ * https://docs.expo.dev/versions/v57.0.0/sdk/audio/) — `mediaFileName`
+ * (`@corymbia/media`) is where that extension is decided, since this screen
+ * never needs to know it itself.
  *
  * **THE RECORDER IS THE TRUTH; `useAudioRecorderState` IS A POLLER.** The
  * hook runs `setInterval(..., 500)` and commits a new object once
@@ -102,15 +102,14 @@ const MINIMUM_NOTE_MS = 1000
 
 /**
  * A human sentence first, the technical cause subordinate to it rather than
- * the whole message (doctrine rule 6). Until Task 10 lands, every attach
- * surfaces the seam's own placeholder message — and a native recorder
- * failure will be equally raw — so this is what stands between that text and
- * a field ecologist who needs to know what happened and what to do, not what
- * threw.
+ * the whole message (doctrine rule 6). A failed attach surfaces whatever
+ * SQLite or the file system said, and a native recorder failure is equally
+ * raw — so this is what stands between that text and a field ecologist who
+ * needs to know what happened and what to do, not what threw.
  *
  * Trailing sentence punctuation is stripped from the cause before this
- * sentence adds its own: `attachVoice`'s message ends in a full stop, and
- * glued together uncorrected they read "...implements this seam.. Try
+ * sentence adds its own: a cause whose message ends in a full stop, glued
+ * together uncorrected, reads "...disk full.. Try
  * recording again." A native cause is not guaranteed to end in a full stop
  * at all — "Still loading…" ends in an ellipsis, a thrown message can end
  * in "?" or "!" — and any of those left in place reads just as oddly:
@@ -276,6 +275,33 @@ function interruptionNotSaved(cause: string | null): string {
 }
 
 export default function VoiceScreen() {
+  const status = useDatabaseStatus()
+
+  // `useAttachMedia` reads the database and the registered device out of
+  // context, and `useDatabase`/`useDevice` both throw before the database is
+  // open — so the guard has to come before the body that calls them, hence
+  // the split into two components rather than an early return inside one
+  // (`capture.tsx` and `diagnostics.tsx` do the same, for the same reason).
+  // It is also what keeps the recorder from ever being started against a
+  // record that has nowhere to be written.
+  if (status.state !== 'ready') {
+    return (
+      <Screen
+        testID="voice-screen"
+        spokenDescription={`Voice note. The database is ${status.state}, so there is nowhere to attach a note yet.`}
+      >
+        <Type testID="voice-database" variant="title">
+          Database {status.state}
+        </Type>
+        {status.error ? <Type dim>{status.error.message}</Type> : null}
+      </Screen>
+    )
+  }
+
+  return <VoiceBody />
+}
+
+function VoiceBody() {
   const { recordId } = useLocalSearchParams<{ recordId?: string }>()
   // A bare forwarder, deliberately. `useAudioRecorder` subscribes inside an
   // effect keyed on `[recorder.id]`, so whatever function is passed on the
@@ -352,6 +378,7 @@ export default function VoiceScreen() {
   const { theme } = useTheme()
   const { deviceClass, orientation } = useLayout()
   const { settings } = useSettings()
+  const { attachVoice } = useAttachMedia()
 
   const mountedRef = useRef(true)
   useEffect(() => {
@@ -531,7 +558,7 @@ export default function VoiceScreen() {
       } catch (cause) {
         // The attach is the only thing that can throw in here, and it has:
         // the message below tells her to record again, so nothing will ever
-        // come back for this file. Safe whatever Task 10's `attachVoice` does
+        // come back for this file. Safe whatever `attachVoice` did
         // with the source, because `discardFile` targets `sourceUri` and is
         // guarded on the file still existing: `MediaStore.save` MOVES, so
         // after a successful move there is nothing left at `sourceUri` and
@@ -548,7 +575,7 @@ export default function VoiceScreen() {
         busyRef.current = false
       }
     },
-    [recorder, recordId, setPhase],
+    [attachVoice, recorder, recordId, setPhase],
   )
 
   // Re-pointed every render, because the subscription itself cannot be: see
@@ -611,8 +638,8 @@ export default function VoiceScreen() {
   const toggle = useCallback(async () => {
     if (busyRef.current) return
     // Unreachable behind the render guard below — which never shows a toggle
-    // without a `recordId` — but this closure outlives a render, the seam
-    // validates nothing, and an `undefined` foreign key must never reach
+    // without a `recordId` — but this closure outlives a render, nothing
+    // validates the param, and an `undefined` foreign key must never reach
     // `attachVoice`. The type-level backstop, kept for the same reason
     // `camera.tsx` keeps its own.
     if (recordId === undefined) return
@@ -687,10 +714,10 @@ export default function VoiceScreen() {
     } finally {
       busyRef.current = false
     }
-  }, [recorder, recordId, setPhase])
+  }, [attachVoice, recorder, recordId, setPhase])
 
-  // No route navigates here without a `recordId` yet, but the seam
-  // validates nothing, and `useLocalSearchParams` yields `undefined` in
+  // No route navigates here without a `recordId` yet, but nothing
+  // validates the param, and `useLocalSearchParams` yields `undefined` in
   // practice however the type is spelled. Render something honest rather
   // than a toggle with nowhere to attach its recording.
   if (recordId === undefined) {
