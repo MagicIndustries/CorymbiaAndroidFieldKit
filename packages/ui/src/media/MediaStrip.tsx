@@ -1,7 +1,7 @@
 import React from 'react'
 import { Image, Pressable, ScrollView, View } from 'react-native'
 import Svg, { Line, Path, Rect } from 'react-native-svg'
-import { field, radii, spacing, touch } from '@corymbia/tokens'
+import { field, radii, spacing } from '@corymbia/tokens'
 // Type-only: `@corymbia/media` owns the `MediaKind` union (photo | voice —
 // see packages/media/src/naming.ts, spec §12.1). Re-declaring it here would
 // be a fourth copy alongside the discriminated `Fix` union pattern this repo
@@ -149,23 +149,39 @@ export function MediaStrip({
             accessibilityRole="button"
             accessibilityLabel={`Remove ${KIND_LABEL[item.kind].toLowerCase()}`}
             onPress={() => onRemove(item.id)}
-            hitSlop={spacing.sm}
-            // `touch.min` (48dp), not half of it: `touch.min` is documented
-            // as "Absolute minimum for any interactive element", and this is
-            // a `Pressable` on a device used gloved and one-handed — nothing
-            // about it is exempt from that floor. A 64dp `mediaTile` cannot
-            // hold a 48dp control in a corner without covering most of the
-            // thumbnail; the tension is resolved by letting it overlap
-            // (`position: 'absolute'` over the image) rather than by
-            // shrinking the control below the floor or growing the tile
-            // past `field.mediaTile`'s own considered size (see that
-            // token's doc comment in `packages/tokens/src/scales.ts`).
+            // `touch.min` (48dp, "Absolute minimum for any interactive
+            // element") still governs the *touch target* — a `Pressable`
+            // used gloved and one-handed is not exempt from that floor. What
+            // changed from the earlier fix is that `touch.min` is no longer
+            // what gets painted: a 48dp opaque circle in a 64dp tile's corner
+            // covers 56% of the thumbnail (see `field.mediaTileRemove`'s doc
+            // comment in `packages/tokens/src/scales.ts`), which reintroduces
+            // by occlusion the exact failure `field.mediaTile` exists to
+            // prevent — a photo that no longer reads as a photo.
+            //
+            // `hitSlop` expands only the responder area a thumb has to hit,
+            // never what is painted (React Native's `normalizeRect`,
+            // `Libraries/StyleSheet/Rect.js` — a numeric `hitSlop` becomes
+            // `{top, bottom, left, right}` all equal to that number). With a
+            // `field.mediaTileRemove` (24dp) painted box, `spacing.md` (12dp)
+            // on every edge brings the effective target to
+            // 24 + 12 + 12 = 48dp in both axes — `touch.min` exactly, not the
+            // ~40dp the previous 24dp-box-with-8dp-hitSlop version reached.
+            //
+            // Tile spacing: tiles sit `spacing.sm` (8dp) apart
+            // (`contentContainerStyle`'s `gap` below) and this control is
+            // inset `spacing.xs` (4dp) from the tile's right edge, so the
+            // hit region's right edge lands at
+            // tileRight - spacing.xs + spacing.md = tileRight + 8dp —
+            // exactly the neighbouring tile's left edge, not past it. The
+            // expanded regions meet, they do not overlap.
+            hitSlop={spacing.md}
             style={{
               position: 'absolute',
               top: spacing.xs,
               right: spacing.xs,
-              minWidth: touch.min,
-              minHeight: touch.min,
+              minWidth: field.mediaTileRemove,
+              minHeight: field.mediaTileRemove,
               alignItems: 'center',
               justifyContent: 'center',
               borderRadius: radii.pill,

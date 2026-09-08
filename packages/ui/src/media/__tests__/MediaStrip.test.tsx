@@ -1,6 +1,6 @@
 import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react-native'
-import { touch } from '@corymbia/tokens'
+import { field, spacing, touch } from '@corymbia/tokens'
 import { ThemeProvider } from '../../theme'
 import { MediaStrip, type MediaStripItem } from '../MediaStrip'
 
@@ -92,19 +92,57 @@ describe('MediaStrip', () => {
     expect(onRemove).toHaveBeenCalledWith('c')
   })
 
-  it('gives the remove control a real touch target, not half of one', async () => {
-    // `touch.min` (48dp) is documented as "Absolute minimum for any
-    // interactive element" — a `Pressable` used gloved and one-handed is not
-    // exempt from that floor. Pinned directly against the token rather than
-    // an arithmetic derivation of it, so the size stays a decision someone
-    // made rather than something that can silently drift.
+  it('paints the remove control as a small badge, not a lid over the photo', async () => {
+    // A 48dp painted circle in a 64dp tile's corner covers 56% of the
+    // thumbnail — a coloured square standing in for the photo it is meant
+    // to identify. `field.mediaTileRemove` (24dp) is what actually gets
+    // painted; `touch.min` is met a different way (below), so pinning this
+    // half alone against `touch.min` — the pre-fix regression — must fail.
     await wrap(<MediaStrip items={[photo('a')]} onRemove={() => {}} testID="strip" />)
     const control = screen.getByTestId('media-remove-a')
     const style = Array.isArray(control.props.style)
       ? Object.assign({}, ...control.props.style)
       : control.props.style
-    expect(style.minWidth).toBe(touch.min)
-    expect(style.minHeight).toBe(touch.min)
+    expect(style.minWidth).toBe(field.mediaTileRemove)
+    expect(style.minHeight).toBe(field.mediaTileRemove)
+  })
+
+  it('gives the remove control a real touch target via hitSlop, not by painting it', async () => {
+    // `hitSlop` expands only the *responder* area, never what is painted
+    // (React Native's `normalizeRect`, `Libraries/StyleSheet/Rect.js`: a
+    // numeric `hitSlop` becomes `{top, bottom, left, right}` all equal to
+    // that number). The effective target is the painted box plus hitSlop on
+    // both opposing edges per axis, and that — not the painted box alone —
+    // is what `touch.min` (48dp, "Absolute minimum for any interactive
+    // element") actually measures.
+    //
+    // This fails if `hitSlop` is removed (insets fall to 0, effective size
+    // collapses to the painted 24dp) and fails independently of the
+    // previous test if the painted box alone were changed without updating
+    // `hitSlop` to compensate, since it recomputes the total from both
+    // props rather than trusting either one alone.
+    await wrap(<MediaStrip items={[photo('a')]} onRemove={() => {}} testID="strip" />)
+    const control = screen.getByTestId('media-remove-a')
+    const style = Array.isArray(control.props.style)
+      ? Object.assign({}, ...control.props.style)
+      : control.props.style
+
+    const hitSlop: unknown = control.props.hitSlop
+    const insets =
+      typeof hitSlop === 'number'
+        ? { top: hitSlop, bottom: hitSlop, left: hitSlop, right: hitSlop }
+        : {
+            top: (hitSlop as { top?: number } | undefined)?.top ?? 0,
+            bottom: (hitSlop as { bottom?: number } | undefined)?.bottom ?? 0,
+            left: (hitSlop as { left?: number } | undefined)?.left ?? 0,
+            right: (hitSlop as { right?: number } | undefined)?.right ?? 0,
+          }
+
+    // Pinned to the exact figure, not just "at least touch.min": a hitSlop
+    // that undershoots by even 2dp is the finding this replaces, not a pass.
+    expect(insets).toEqual({ top: spacing.md, bottom: spacing.md, left: spacing.md, right: spacing.md })
+    expect(style.minWidth + insets.left + insets.right).toBe(touch.min)
+    expect(style.minHeight + insets.top + insets.bottom).toBe(touch.min)
   })
 
   it('does not also trigger the tile when the remove control inside it is pressed', async () => {

@@ -190,6 +190,26 @@ export const field = {
    * controls.
    */
   mediaTile: 64,
+  /**
+   * `MediaStrip`'s per-tile remove control, painted size only, in dp — the
+   * ergonomic question it answers is "how big can the visible circle be and
+   * still read as a badge on the corner of a photograph, rather than a lid
+   * dropped over most of it." Deliberately *not* `touch.min` (48dp): a 48dp
+   * opaque circle in the corner of a 64dp `mediaTile` covers 56% of the
+   * thumbnail (`touch.min` squared over `mediaTile` squared) and leaves only
+   * a thin L-shaped sliver of the photo visible — which is the exact defect
+   * `mediaTile`'s own doc comment describes a 56dp tile causing, reintroduced
+   * by occlusion instead of by shrinking the tile.
+   *
+   * `touch.min` is not dropped, only separated from what gets painted: the
+   * control's `Pressable` carries a `hitSlop` (`spacing.md`, 12dp per edge)
+   * so the *responder* area — what a gloved thumb actually has to hit — is
+   * `mediaTileRemove + 2 * spacing.md` = 24 + 24 = 48dp in both axes, meeting
+   * `touch.min` exactly. `hitSlop` expands hit-testing only (React Native's
+   * `normalizeRect`, `Libraries/StyleSheet/Rect.js`); it paints nothing, so
+   * the thumbnail underneath is unaffected by it.
+   */
+  mediaTileRemove: 24,
 } as const
 
 /**
