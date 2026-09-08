@@ -18,7 +18,8 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+        "ACCESS_COARSE_LOCATION",
+        "CAMERA"
       ]
     },
     "web": {
@@ -27,7 +28,13 @@
     "plugins": [
       "expo-router",
       "expo-sqlite",
-      "expo-audio"
+      "expo-audio",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Corymbia Field Kit uses the camera to attach photos to a survey record."
+        }
+      ]
     ]
   }
 }
