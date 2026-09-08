@@ -1043,9 +1043,54 @@ close-spaced pin.
 
 ### 9.6 After the pin
 
-A saved confirmation naming the activity, then the four standard affordances: location
-(already complete), title, voice note, photo. Identical icons, identical order, everywhere
-in the application.
+A saved confirmation, then the standard affordances: title, notes, voice note, photo.
+Identical icons, identical order, everywhere in the application.
+
+**Location is not one of them here, because it is what this screen just did.** An earlier
+draft of this section listed location as a fifth affordance rendered already-complete. On the
+capture screen that is a chip that does nothing, in a row whose whole job is to teach that
+these are things you tap — and doctrine rule 5 is about one signature per *input kind*, which
+a position already taken is not.
+
+#### 9.6.1 Where a record starts decides whether location is offered
+
+A record does not always begin with a pin. She may start from a voice memo, a photo, or a
+note, and those want coordinates just as much — they simply must not stop to ask for them.
+
+- **Started from the capture screen.** The fix is **deliberate** (§8.2): held, averaged,
+  accuracy-gated. Location is not offered, because it is done.
+- **Started from a note, a voice memo or a photo.** The record saves immediately with an
+  **ambient** fix from the cached position (§8.2), stamped with its age, and never blocks on
+  the GPS. **Location then appears as an affordance**, and its job is to upgrade that ambient
+  fix to a deliberate one: it opens the dial and runs a real hold, for when she decides this
+  spot is worth the best accuracy the device can reach.
+- **No position available at all.** The fix is **none**. Location is still offered, and it is
+  the way out.
+
+Everything saves linked to whatever coordinates exist and to the currently active project and
+activity if there is one — the context activity of §8.3, captured automatically. With none
+active, it lands in the Inbox on its capture number alone (§8.4), which is what the Inbox is
+for.
+
+#### 9.6.2 An upgrade is not a refinement, and the code currently cannot tell them apart
+
+This is a trap laid for the media work, not a defect in what exists today.
+
+`refineRecordFix` keeps the better fix, and `accuracy_m` is its sole criterion (§9.2.1). That
+is right for what it was built for — two deliberate holds over the same point, where the
+sharper number is simply the better measurement. It is **wrong for an ambient-to-deliberate
+upgrade**, because the two numbers are not comparable: a cached ambient fix can report an
+optimistic ±3 m, and an honest deliberate hold that reaches ±4 m would then be *refused*. The
+record keeps the ambient coordinates, stays stamped ambient, and exports as ambient — after
+she deliberately stood still to fix it.
+
+That is precisely the blurring §8.2 says must never happen, arrived at through a guard that
+was correct in its own context.
+
+**A deliberate fix therefore always supersedes an ambient or absent one, whatever the two
+accuracy figures say.** The accuracy comparison applies only between fixes of the same class.
+Whatever implements this must add `quality` to the guard, and the fix classes' three-places
+rule applies (the `Fix` union, migration 003's CHECK constraints, and `ContextStamp`).
 
 ---
 
