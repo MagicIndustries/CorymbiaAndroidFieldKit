@@ -833,8 +833,10 @@ export const migration005: Migration = {
        kind         TEXT NOT NULL
                     CONSTRAINT media_kind_known CHECK (kind IN ('photo', 'voice')),
 
-       -- The name in the media directory, derived from `id` at capture. Never
+       -- The name in the media directory, derived from the id at capture. Never
        -- rewritten: see media_file_name_is_immutable below.
+       -- (No backticks in this SQL: the migration is a backtick-delimited JS
+       -- template literal, and one inside a comment ends the string early.)
        file_name    TEXT NOT NULL,
 
        -- What the file actually took on disk, measured after the write. Zero
