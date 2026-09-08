@@ -1072,25 +1072,42 @@ activity if there is one — the context activity of §8.3, captured automatical
 active, it lands in the Inbox on its capture number alone (§8.4), which is what the Inbox is
 for.
 
-#### 9.6.2 An upgrade is not a refinement, and the code currently cannot tell them apart
+#### 9.6.2 An upgrade is not a refinement, and the guard now tells them apart
 
-This is a trap laid for the media work, not a defect in what exists today.
+`refineRecordFix` keeps the better fix. Its guard ranks the incoming fix's class against the
+stored one first — deliberate outranks ambient outranks none — and only when the two ranks
+tie does it fall through to comparing `accuracy_m` (§9.2.1). A strictly higher-ranked incoming
+fix always applies; a strictly lower-ranked one never does; whatever the two accuracy figures
+say.
 
-`refineRecordFix` keeps the better fix, and `accuracy_m` is its sole criterion (§9.2.1). That
-is right for what it was built for — two deliberate holds over the same point, where the
-sharper number is simply the better measurement. It is **wrong for an ambient-to-deliberate
-upgrade**, because the two numbers are not comparable: a cached ambient fix can report an
-optimistic ±3 m, and an honest deliberate hold that reaches ±4 m would then be *refused*. The
-record keeps the ambient coordinates, stays stamped ambient, and exports as ambient — after
-she deliberately stood still to fix it.
+Class first, because the two accuracy figures are answers to different questions and are not
+otherwise comparable. A deliberate fix's `accuracy_m` is a held, averaged, accuracy-gated
+measurement (§8.2). An ambient fix's is whatever position was already cached — it never waited
+for anything, and it carries its own age (§9.6.1) precisely because it may no longer be where
+she is standing: a ±38 m reading from four minutes ago could be three hundred metres up the
+track, while a ±50 m deliberate fix is, at worst, still at the point she stood on to take it.
+A deliberate fix is therefore never worse than an ambient one in any sense a survey record
+cares about, whatever the numbers claim — and treating the two as comparable is exactly the
+trap this section used to describe: a cached ambient fix reporting an optimistic ±3 m could
+refuse an honest deliberate hold reaching ±4 m, leaving the record stamped ambient after she
+deliberately stood still to fix it. The reverse direction is the more dangerous one and is
+refused unconditionally, even when the ambient figure is the smaller of the two: a fresh
+ambient reading overwriting a survey-grade fix would put an unwaited-for coordinate into a
+biodiversity dataset under a chip that still claims deliberate, and would silently discard the
+fact that she deliberately positioned there — itself the evidence §8.2 exists to protect.
 
-That is precisely the blurring §8.2 says must never happen, arrived at through a guard that
-was correct in its own context.
+The rank the guard reads is the same rank the fix classes are enforced by everywhere else —
+the three-places rule applies here too: the `Fix` discriminated union (`packages/data`),
+migration 003's CHECK constraints, and `ContextStamp` in `@corymbia/ui`. This is not a fourth,
+independent notion of "better" invented for this guard; it is the same three-way distinction
+those three places already agree a fix carries.
 
-**A deliberate fix therefore always supersedes an ambient or absent one, whatever the two
-accuracy figures say.** The accuracy comparison applies only between fixes of the same class.
-Whatever implements this must add `quality` to the guard, and the fix classes' three-places
-rule applies (the `Fix` union, migration 003's CHECK constraints, and `ContextStamp`).
+One direction this leaves unreachable through `refineRecordFix`: a deliberate fix is never
+replaced by an ambient one, so the column-clearing that would fire for that transition
+(nulling the averaging evidence, writing an age) has no caller. The columns themselves are
+still written as a set on every accepted refinement — a record must never be left wearing half
+its old position and half its new one — but that particular direction of the clearing is dead
+code by design, not an oversight.
 
 ---
 
