@@ -96,4 +96,39 @@ describe('InputAffordanceRow', () => {
     expect(completeStyle.borderStyle).not.toEqual(incompleteStyle.borderStyle)
     expect(completeLabel).not.toEqual(incompleteLabel)
   })
+
+  it('shows how many of a kind are attached, not merely that some are', async () => {
+    await wrap(<InputAffordanceRow onPress={() => {}} counts={{ photo: 4 }} />)
+    // `toHaveTextContent` defaults to an EXACT match in this RNTL version
+    // (see the comment atop ContextStamp.test.tsx) — the label is
+    // `Photo · 4`, not the bare digit, so this is a substring check.
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('4', { exact: false })
+  })
+
+  it('says done without a number for a kind that can only happen once', async () => {
+    // A record has one title. "Title · 1" is noise.
+    await wrap(<InputAffordanceRow onPress={() => {}} completed={['title']} />)
+    expect(screen.getByTestId('affordance-title-label')).not.toHaveTextContent('1')
+  })
+
+  it('refuses a second press while a kind is busy', async () => {
+    // Saving a photo writes a file and a row. A second tap during that write is
+    // a second attachment she did not ask for.
+    const onPress = jest.fn()
+    await wrap(<InputAffordanceRow onPress={onPress} busy={['photo']} />)
+    await fireEvent.press(screen.getByTestId('affordance-photo'))
+    expect(onPress).not.toHaveBeenCalled()
+  })
+
+  it('marks a busy affordance disabled to a screen reader, not merely dim', async () => {
+    await wrap(<InputAffordanceRow onPress={() => {}} busy={['photo']} />)
+    expect(screen.getByTestId('affordance-photo').props.accessibilityState.disabled).toBe(true)
+  })
+
+  it('leaves the other affordances live while one is busy', async () => {
+    const onPress = jest.fn()
+    await wrap(<InputAffordanceRow onPress={onPress} busy={['photo']} />)
+    await fireEvent.press(screen.getByTestId('affordance-voice'))
+    expect(onPress).toHaveBeenCalledWith('voice')
+  })
 })
