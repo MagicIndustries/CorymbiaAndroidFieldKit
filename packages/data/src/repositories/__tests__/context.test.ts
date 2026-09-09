@@ -121,6 +121,18 @@ describe('the current context', () => {
     await setCurrentActivity(db, null)
     const context = await readCurrentContext(db)
     expect(context?.activity.id).toBe(mostRecentlyStarted.id)
+
+    // The row is GONE, not overwritten with something unresolvable. The
+    // assertion above cannot tell the two apart: storing the literal string
+    // 'null' resolves to no activity and falls through to the same fallback,
+    // so one launch behaves identically either way. `setting.value` is
+    // NOT NULL (migration 004), so deletion is the only honest way to say
+    // "never chosen" — and a stored placeholder would be a value the next
+    // reader has to know is special.
+    const row = await db.first<{ value: string }>('SELECT value FROM setting WHERE key = ?', [
+      'currentActivityId',
+    ])
+    expect(row).toBeNull()
   })
 
   it('refuses an activity that does not exist, rather than storing it', async () => {
