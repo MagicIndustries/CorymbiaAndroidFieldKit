@@ -41,7 +41,7 @@ describe('ToolTiles', () => {
   })
 
   it('renders nothing for a tool that does not exist yet', async () => {
-    // Doctrine rule 3: an unbuilt destination must not have a live-looking tile.
+    // Doctrine rule 18: an unbuilt destination must not have a live-looking tile.
     await wrap(<ToolTiles activityKind="survey" available={['capture', 'records']} onOpen={() => {}} testID="tools" />)
     expect(screen.queryByTestId('tool-batching')).toBeNull()
     expect(screen.queryByTestId('tool-media')).toBeNull()

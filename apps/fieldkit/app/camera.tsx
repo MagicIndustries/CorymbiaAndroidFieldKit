@@ -107,9 +107,10 @@ function CameraBody() {
       await attachPhoto({ recordId, sourceUri: shot.uri })
       router.back()
     } catch (cause) {
-      // On screen, not an Alert (doctrine rule 3): a modal that dismisses
-      // takes the message with it, and a camera screen that closes on
-      // failure loses the photo and the explanation together.
+      // On screen, not an Alert — no numbered doctrine rule covers this, but
+      // the reasoning is the same shape as several that do: a modal that
+      // dismisses takes the message with it, and a camera screen that closes
+      // on failure loses the photo and the explanation together.
       setError(messageFor(cause))
     } finally {
       savingRef.current = false

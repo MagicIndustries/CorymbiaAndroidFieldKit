@@ -42,7 +42,7 @@ const DEFAULT_ORDER: readonly ToolKind[] = Object.freeze(['capture', 'records', 
  *
  * **`batching` sinking for `survey` cannot be observed yet.** `batching` has
  * no built destination, so no caller can ever pass it in `available` (see
- * doctrine rule 3 on the component below) — there is currently no way to
+ * doctrine rule 18 on the component below) — there is currently no way to
  * exercise the branch of this table that places it. The row is still
  * written correctly, on the day the tool exists this needs no revisiting.
  */
@@ -62,13 +62,13 @@ function orderFor(activityKind: CarryOnActivityKind | null): readonly ToolKind[]
  * The launcher's tool tiles beneath `CarryOnCard` (spec §10.1), reordered
  * per activity kind by `orderFor` above.
  *
- * **`available` is doctrine rule 3 made structural.** Batching and the media
+ * **`available` is doctrine rule 18 made structural.** Batching and the media
  * library are not built yet, so a caller with nothing to open for them
  * passes only the kinds that exist — this component filters `available`
  * against the order table and renders nothing for the rest. A tile for an
  * unbuilt destination is not rendered disabled and carries no "coming soon"
  * badge; a control that looks pressable and does nothing is exactly what
- * doctrine rule 3 forbids, whether that "nothing" is silence or a badge
+ * doctrine rule 18 forbids, whether that "nothing" is silence or a badge
  * explaining the silence.
  */
 export function ToolTiles({

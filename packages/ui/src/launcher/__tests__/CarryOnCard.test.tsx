@@ -104,7 +104,7 @@ describe('CarryOnCard', () => {
 
   it('says there is nothing to carry on with on a first run, and offers a way forward', async () => {
     // Not an error, and not a disabled CAPTURE — a control that looks
-    // pressable and does nothing is what doctrine rule 3 forbids.
+    // pressable and does nothing is what doctrine rule 18 forbids.
     await wrap(<CarryOnCard carryOn={null} {...handlers} testID="carry-on" />)
     expect(screen.queryByTestId('carry-on-capture')).toBeNull()
     expect(screen.getByTestId('carry-on')).toHaveTextContent(/no project/i)
