@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, ScrollView, View } from 'react-native'
 import { useRouter } from 'expo-router'
 import {
-  createAmbientCache,
   createExpoLocationSource,
   averageReadings,
   gradeAccuracy,
@@ -32,6 +31,8 @@ import {
 import { field, radii, spacing } from '@corymbia/tokens'
 import { Button, Card, Screen, Type, useTheme } from '@corymbia/ui'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
+import { ambientCache, type AmbientCache } from '../src/geo/ambient'
+import { buildAmbientFix } from '../src/geo/ambientFix'
 
 /**
  * The project and activity this screen owns, found by name.
@@ -694,7 +695,12 @@ export default function Diagnostics() {
   const [mocked, setMocked] = useState<boolean | undefined>(undefined)
 
   const source = useRef(createExpoLocationSource()).current
-  const ambient = useRef(createAmbientCache(source)).current
+  // The one app-wide ambient cache (`src/geo/ambient.ts`), not a private one.
+  // This screen used to build its own, which made it a producer feeding a
+  // cache no other screen could read while `useAttachMedia` read a different
+  // cache nobody fed — so every photo and voice note would have been stamped
+  // `{ quality: 'none' }`. Two caches is the defect; there is only ever one.
+  const ambient: AmbientCache = ambientCache
   const collected = useRef<Reading[]>([])
   // The anchor for the reading log's "elapsed seconds" column below. Set once,
   // from the first reading this screen ever sees, and never from `readings[0]`
@@ -804,9 +810,10 @@ export default function Diagnostics() {
       cancelled = true
       stop?.()
     }
-    // `source` and `ambient` are each a `useRef(...).current` established once
-    // above, so their identity never changes across renders — listing them
-    // satisfies exhaustive-deps without causing a resubscribe on every render.
+    // `source` is a `useRef(...).current` established once above and `ambient`
+    // is a module singleton, so neither identity ever changes across renders —
+    // listing them satisfies exhaustive-deps without causing a resubscribe on
+    // every render.
   }, [ambient, source])
 
   const latest = readings[readings.length - 1] ?? null
@@ -854,7 +861,7 @@ type BodyProps = {
   transcript: React.MutableRefObject<TranscriptRow[]>
   captureStartMs: React.MutableRefObject<number | null>
   sessionStartMs: React.MutableRefObject<number | null>
-  ambient: ReturnType<typeof createAmbientCache>
+  ambient: AmbientCache
   records: FieldRecord[]
   setRecords: (r: FieldRecord[]) => void
   message: string | null
@@ -1630,24 +1637,16 @@ function DiagnosticsBody(props: BodyProps) {
       props.setMessage(describeFailure('Could not open the diagnostics activity', error))
       return
     }
+    // Guarded above: fixNow is truthy here, so the guard already returned if
+    // the cached reading never reported a mocked flag. No cast and no `??
+    // false` — the verdict is a string union precisely so this line has to
+    // state what it does about "never said". The field-by-field construction
+    // itself lives in `buildAmbientFix` (`../src/geo/ambientFix.ts`),
+    // shared with `useAttachMedia.ts`'s own ambient save — see that
+    // function's doc comment for why this screen's refusal above and that
+    // hook's downgrade-to-`'none'` are both kept as they are.
     const fix: Fix = fixNow
-      ? {
-          quality: 'ambient',
-          latitude: fixNow.latitude,
-          longitude: fixNow.longitude,
-          accuracyM: fixNow.accuracyM,
-          datum: 'WGS84',
-          ageSeconds: fixNow.ageSeconds,
-          verticalAccuracyM: fixNow.verticalAccuracyM,
-          // Guarded above: fixNow is truthy here, so the guard already
-          // returned if the cached reading never reported a mocked flag. No
-          // cast and no `?? false` — the verdict is a string union precisely
-          // so this line has to state what it does about "never said".
-          isMocked: fixNow.isMocked === 'mocked',
-          gpsTime: null,
-          ...CONDITIONS,
-          ...altitudeEvidence(fixNow.altitudeM),
-        }
+      ? buildAmbientFix(fixNow, fixNow.isMocked === 'mocked')
       : { quality: 'none' }
     // Guarded for the same reason as the capture path above: this one had no
     // guard at all, so a refused insert vanished as an unhandled rejection.

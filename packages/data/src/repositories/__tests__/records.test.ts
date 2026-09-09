@@ -1432,34 +1432,45 @@ describe('filing, reordering and refiling', () => {
       expect(row?.fix_hold_ms).toBe(0)
     })
 
-    it('clears the averaging evidence when a deliberate fix is refined to an ambient one', async () => {
-      // The class discriminant swaps which set of columns is legal: a
-      // deliberate fix has sample count, spread and hold and no age; an ambient
-      // one has an age and none of the three. record_deliberate_is_survey_grade
-      // and record_ambient_carries_age each police their own half, so a stale
-      // sample count left behind by the update aborts the transaction rather
-      // than surviving — which is the same failure, caught one layer down.
-      // Started coarser than AMBIENT below (±50 m, rather than DELIBERATE's own
-      // ±4 m) for the same reason as the BARE test above: this is a
-      // column-clearing test, and a starting accuracy sharper than AMBIENT's
-      // ±38 m would trip the `keeps the better fix` guard and leave AMBIENT
-      // discarded rather than applied.
-      const record = await createRecord(db, {
-        activityId,
-        kind: 'pin',
-        fix: { ...DELIBERATE, accuracyM: 50 },
-        deviceId,
-      })
+    it('clears the ambient age when an ambient fix is upgraded to a deliberate one', async () => {
+      // The class discriminant swaps which set of columns is legal: an
+      // ambient fix has an age and none of a deliberate one's averaging
+      // evidence; a deliberate fix has sample count, spread and hold and no
+      // age. record_ambient_carries_age and record_deliberate_is_survey_grade
+      // each police their own half, so a stale age left behind by the update
+      // aborts the transaction rather than surviving — which is the same
+      // failure, caught one layer down.
+      //
+      // This test used to run the other way — a deliberate fix refined down
+      // to an ambient one, started at a coarse ±50 m purely to get past the
+      // old accuracy-only guard. Spec §9.6.2 now forbids that direction
+      // outright: a deliberate fix is never replaced by an ambient one,
+      // whatever the accuracy figures say. That version is not adjusted here,
+      // it is gone — it was proving a transition that can no longer happen,
+      // and restoring it would be restoring the defect this file exists to
+      // close. An upgrade (ambient to deliberate) is the direction §9.6.2
+      // leaves legal, and is the transition the application will actually
+      // perform once Plan 5's media-first entry points land — so it is what
+      // exercises this clearing now.
+      //
+      // This instance goes ±38 m (AMBIENT) to ±4 m (DELIBERATE), which would
+      // also have applied under the old accuracy-only guard — so on its own
+      // this test is not evidence that rank decided the outcome, only that
+      // the clearing is correct on an upgrade. The `refineRecordFix across
+      // fix classes` describe block below is what actually pins rank over
+      // accuracy, including the case where the ambient number is the sharper
+      // one and still loses.
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: AMBIENT, deviceId })
 
       const { record: refined, applied } = await refineRecordFix(db, {
         recordId: record.id,
-        fix: AMBIENT,
+        fix: DELIBERATE,
         deviceId,
       })
 
       expect(applied).toBe(true)
-      expect(refined.fix).toEqual(AMBIENT)
-      expect((await getRecord(db, record.id))?.fix).toEqual(AMBIENT)
+      expect(refined.fix).toEqual(DELIBERATE)
+      expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
 
       const row = await db.first<{
         fix_quality: string
@@ -1472,11 +1483,11 @@ describe('filing, reordering and refiling', () => {
          FROM record WHERE id = ?`,
         [record.id],
       )
-      expect(row?.fix_quality).toBe('ambient')
-      expect(row?.fix_age_seconds).toBe(240)
-      expect(row?.fix_sample_count).toBeNull()
-      expect(row?.fix_spread_m).toBeNull()
-      expect(row?.fix_hold_ms).toBeNull()
+      expect(row?.fix_quality).toBe('deliberate')
+      expect(row?.fix_age_seconds).toBeNull()
+      expect(row?.fix_sample_count).toBe(DELIBERATE.sampleCount)
+      expect(row?.fix_spread_m).toBe(DELIBERATE.spreadM)
+      expect(row?.fix_hold_ms).toBe(DELIBERATE.holdMs)
     })
 
     // TRY AGAIN's whole promise: a second countdown over a record that already
@@ -1648,6 +1659,164 @@ describe('filing, reordering and refiling', () => {
 
       expect((await getRecord(db, record.id))?.fix).toEqual(DELIBERATE)
       expect((await listEvents(db, record.id)).map((e) => e.action)).toEqual(['created'])
+    })
+  })
+
+  // §9.6.2's rule: a deliberate fix always supersedes an ambient or absent
+  // one, whatever the two accuracy numbers say — the accuracy comparison
+  // above is only a same-class rule, and these prove it stays that way.
+  // Nothing in the app can reach this today (every record starts from a
+  // deliberate capture), which is exactly why it needs its own coverage
+  // rather than waiting for a caller to exercise it by accident.
+  describe('refineRecordFix across fix classes (spec §9.6.2)', () => {
+    it('applies a deliberate fix over an ambient one that claims to be sharper', async () => {
+      // The trap this rule exists for. The ambient number comes off a cached
+      // reading that never waited for anything; the deliberate one is a held,
+      // averaged, accuracy-gated measurement. They are not comparable, and
+      // comparing them leaves the record stamped ambient after she stood
+      // still to fix it — exactly what §8.2 forbids.
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: { ...AMBIENT, accuracyM: 3 },
+        deviceId,
+      })
+      const sharperDeliberate: Fix = { ...DELIBERATE, accuracyM: 4 }
+
+      const { record: refined, applied } = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: sharperDeliberate,
+        deviceId,
+      })
+
+      expect(applied).toBe(true)
+      expect(refined.fix).toEqual(sharperDeliberate)
+      expect((await getRecord(db, record.id))?.fix).toEqual(sharperDeliberate)
+
+      // Both outcomes of this guard append an 'edited' event (see the
+      // refusal tests below, which pin their half); this is the applied
+      // half. And its wording is the point of this test: the two accuracy
+      // numbers must not sit side by side as if they were being compared —
+      // that is the exact misreading §9.6.2 exists to prevent — so the class
+      // transition, not the numbers, is what follows the fixed
+      // `fix refined from ` prefix.
+      const events = await listEvents(db, record.id)
+      expect(events.map((e) => e.action)).toEqual(['created', 'edited'])
+      expect(events[1]?.detail).toBe('fix refined from ambient to deliberate (±3.0 m to ±4.0 m)')
+    })
+
+    it('applies a deliberate fix over no position at all', async () => {
+      // Unlike the test above, this is not evidence for the rank rule: a
+      // 'none' record's accuracy_m is always NULL, so the pre-existing
+      // `existing.accuracy_m === null` branch already applied any positioned
+      // fix, before this task's rank comparison existed at all. It passes
+      // unchanged on the old implementation and stays as regression cover for
+      // refining from 'none' — the rank-over-accuracy claim is what the
+      // ambient-vs-deliberate tests in this block are for.
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: { quality: 'none' },
+        deviceId,
+      })
+      const looseDeliberate: Fix = { ...DELIBERATE, accuracyM: 12 }
+
+      const { record: refined, applied } = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: looseDeliberate,
+        deviceId,
+      })
+
+      expect(applied).toBe(true)
+      expect(refined.fix).toEqual(looseDeliberate)
+      expect((await getRecord(db, record.id))?.fix).toEqual(looseDeliberate)
+    })
+
+    it('still refuses a blunter deliberate fix over a sharper deliberate one', async () => {
+      // Same class, so the accuracy comparison is the right one and keeps
+      // working. This is the rule from the `keeps the better fix` block above
+      // and it is not being relaxed by the class rank sitting in front of it.
+      const sharper: Fix = { ...DELIBERATE, accuracyM: 2 }
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: sharper, deviceId })
+      const blunter: Fix = { ...DELIBERATE, accuracyM: 5 }
+
+      const { record: refined, applied } = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: blunter,
+        deviceId,
+      })
+
+      expect(applied).toBe(false)
+      expect(refined.fix).toEqual(sharper)
+      expect((await getRecord(db, record.id))?.fix).toEqual(sharper)
+    })
+
+    it('never downgrades a deliberate fix to an ambient one, however sharp', async () => {
+      // The other direction, and the more dangerous one: an ambient fix
+      // overwriting a survey-grade measurement would put an unwaited-for
+      // coordinate into a biodiversity dataset under a solid teal chip.
+      const original: Fix = { ...DELIBERATE, accuracyM: 9 }
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: original, deviceId })
+      const sharpAmbient: Fix = { ...AMBIENT, accuracyM: 1 }
+
+      const { record: refined, applied } = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: sharpAmbient,
+        deviceId,
+      })
+
+      expect(applied).toBe(false)
+      expect(refined.fix).toEqual(original)
+      expect((await getRecord(db, record.id))?.fix).toEqual(original)
+
+      // The wording has to differ from the same-class refusal: this run was
+      // not beaten on accuracy — on the numbers it looks sharper — it was
+      // outranked. A message that said "kept the sharper" here would be a
+      // lie about what actually happened.
+      const events = await listEvents(db, record.id)
+      expect(events[events.length - 1]?.detail).toBe(
+        'fix refinement reached ±1.0 m, but an ambient fix cannot supersede the deliberate ' +
+          '±9.0 m already on the record',
+      )
+    })
+
+    it('still refuses a blunter ambient fix over a sharper ambient one', async () => {
+      // The equal-rank fallback has to still be a real comparison, not "same
+      // rank always applies" — this is the ambient-side twin of the
+      // deliberate-side test above, catching a guard that ranks correctly
+      // but stops comparing accuracy once the ranks tie.
+      const sharper: Fix = { ...AMBIENT, accuracyM: 12 }
+      const record = await createRecord(db, { activityId, kind: 'pin', fix: sharper, deviceId })
+      const blunter: Fix = { ...AMBIENT, accuracyM: 30 }
+
+      const { record: refined, applied } = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: blunter,
+        deviceId,
+      })
+
+      expect(applied).toBe(false)
+      expect(refined.fix).toEqual(sharper)
+    })
+
+    it('compares accuracy between two ambient fixes', async () => {
+      const record = await createRecord(db, {
+        activityId,
+        kind: 'pin',
+        fix: { ...AMBIENT, accuracyM: 30 },
+        deviceId,
+      })
+      const sharperAmbient: Fix = { ...AMBIENT, accuracyM: 12 }
+
+      const { record: refined, applied } = await refineRecordFix(db, {
+        recordId: record.id,
+        fix: sharperAmbient,
+        deviceId,
+      })
+
+      expect(applied).toBe(true)
+      expect(refined.fix).toEqual(sharperAmbient)
+      expect((await getRecord(db, record.id))?.fix).toEqual(sharperAmbient)
     })
   })
 

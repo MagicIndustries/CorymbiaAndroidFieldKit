@@ -9,6 +9,9 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@corymbia/media": "workspace:*"
+  },
   "peerDependencies": {
     "expo-sqlite": "~57.0.2"
   },

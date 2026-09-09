@@ -396,6 +396,15 @@ const SELECT = `SELECT id, activity_id, context_activity_id, kind, capture_numbe
  * wearing half of its old position and half of its new one — a row every CHECK
  * constraint in migration 003 accepts, because each half is individually legal,
  * and which nothing downstream could tell from a real measurement.
+ *
+ * Since spec §9.6.2's class rank, `refineRecordFix` can never reach the
+ * deliberate-to-ambient direction of this clearing — a deliberate fix is
+ * refused as an update target for any incoming ambient fix, whatever its
+ * accuracy, so the branch that would null a deliberate fix's averaging
+ * evidence in favour of an ambient one's age has no caller. This list still
+ * writes every column as a set on every direction that *is* reachable, which
+ * is what stops that half-and-half row; the deliberate-to-ambient direction
+ * being unreached is by design, not a gap in this list's coverage.
  */
 const FIX_COLUMNS = [
   'latitude',
@@ -1069,6 +1078,29 @@ function describeAccuracy(accuracyM: number | null): string {
 }
 
 /**
+ * "a" or "an" for a fix class name, so a sentence built from `Fix['quality']`
+ * stays grammatical without hardcoding today's one answer.
+ *
+ * The cross-class refusal below is the only caller, and today's only
+ * reachable value is `'ambient'` ("an ambient"). `FIX_RANK` is generic over
+ * `Fix['quality']`, so a fourth class is a compile error at the rank map and
+ * nowhere else — this is what stops that fourth class also needing a fix here
+ * before its sentence reads correctly.
+ */
+function indefiniteArticle(word: string): 'a' | 'an' {
+  return /^[aeiou]/i.test(word) ? 'an' : 'a'
+}
+
+/**
+ * The ordering `refineRecordFix`'s guard ranks fix classes by (spec §9.6.2):
+ * deliberate outranks ambient outranks none. Not the display order and not
+ * arbitrary — it is "how much was this position earned", and it is what lets
+ * the guard ask "is this a better-earned fix?" before it ever asks "is this a
+ * more accurate number?".
+ */
+const FIX_RANK: Record<Fix['quality'], number> = { none: 0, ambient: 1, deliberate: 2 }
+
+/**
  * What a call to `refineRecordFix` settled: the record as it now stands, and
  * whether this run's fix is the one now stored.
  *
@@ -1121,8 +1153,10 @@ export type FixRefinement = {
  * So this function writes the incoming fix only when it is not worse than
  * what is already on the record — `fix.accuracyM <= existing accuracy_m` — and
  * otherwise leaves every fix column untouched and reports `applied: false`.
- * `accuracy_m` is the sole criterion, because it is the figure that travels
- * downstream; `fix_spread_m` is deliberately not consulted as a tiebreak.
+ * That accuracy comparison is the whole rule for two fixes of the *same*
+ * class, which is what every TRY AGAIN retry is. It is not the whole rule
+ * across classes — see "Class before accuracy" below, spec §9.6.2 —
+ * `fix_spread_m` is deliberately not consulted as a tiebreak.
  * Spread measures a run's *internal* disagreement — how far its own readings
  * sit from their own average — not distance from the truth, and two runs'
  * spreads are not comparable to each other: a tight spread around a
@@ -1138,6 +1172,43 @@ export type FixRefinement = {
  * `'none'` quality, or a positionless one) has nothing to lose: any positioned
  * fix applies. This is what lets refining *from* `'none'` keep working exactly
  * as before.
+ *
+ * ## Class before accuracy
+ *
+ * The accuracy comparison above answers "which of these two figures is
+ * sharper", and that question only makes sense when both figures were
+ * produced the same way. A deliberate fix's `accuracyM` is a held, averaged,
+ * accuracy-gated measurement (spec §8.2); an ambient fix's is whatever
+ * position was already cached, which never waited for anything and can
+ * report an optimistic figure a genuine hold cannot match. They are answers
+ * to different questions, not two attempts at the same one, so comparing
+ * them numerically is not a stricter version of the same rule — it is the
+ * wrong rule. Spec §9.6.2 is explicit that this distinction must never be
+ * blurred: a cached ambient reading of ±3 m refusing an honest deliberate
+ * hold of ±4 m would leave the record stamped ambient after she deliberately
+ * stood still to fix it, and the reverse — a fresh ambient reading silently
+ * overwriting a survey-grade fix — is the more dangerous direction, putting
+ * an unwaited-for coordinate into a biodiversity dataset under a chip that
+ * claims otherwise.
+ *
+ * So the guard ranks class first: deliberate outranks ambient outranks none
+ * (`FIX_RANK`). A strictly higher-ranked incoming fix always applies, a
+ * strictly lower-ranked one never does, whatever the two accuracy figures
+ * say, and only a tie in rank — the TRY AGAIN case this section started
+ * with — falls through to the accuracy comparison. This is the same
+ * three-places rule the fix classes are enforced everywhere by (the `Fix`
+ * union here, migration 003's CHECK constraints, `ContextStamp` in
+ * `@corymbia/ui`): the rank this guard reads is the same rank those three
+ * places already agree a fix carries, not a fourth, independent notion of
+ * "better" invented for this function alone.
+ *
+ * One direction this rank leaves unreachable through this function: a
+ * deliberate fix is never replaced by an ambient one, so the branch of
+ * `FIX_COLUMNS`'s clearing that would null a deliberate fix's averaging
+ * evidence in favour of an ambient one's age has no caller. `FIX_COLUMNS`'s
+ * own doc comment carries the full reasoning; noted here too because this is
+ * the function whose guard is the reason, and a reader of the guard alone
+ * should not have to go looking for what it makes unreachable.
  *
  * The gate lives here rather than in the hook (`useCapture.ts`) deliberately:
  * this project puts its other provenance guarantees at this layer — the
@@ -1197,6 +1268,21 @@ export type FixRefinement = {
  * for that reason, so a rewrite here fails there rather than silently making
  * every past refinement indistinguishable from a hand edit.
  *
+ * What follows the prefix is not fixed, and differs for a cross-class upgrade
+ * that carries a real "before" figure — an ambient fix upgraded to a
+ * deliberate one, the scenario §9.6.2 exists for. `fix refined from ±3.0 m to
+ * ±4.0 m` sets the two numbers side by side as if they were being compared,
+ * which is the one reading §9.6.2 says must never happen: the numbers are
+ * answers to different questions, and what actually changed first is the
+ * class. So that case reads `fix refined from ambient to deliberate (±3.0 m
+ * to ±4.0 m)` — the class transition is what follows `from`, and the accuracy
+ * pair moves into parentheses as supporting detail rather than the sentence's
+ * subject. A same-class refinement, and an upgrade *from* `'none'` (which has
+ * no real accuracy to set beside the new one, so there is nothing to misread
+ * as a comparison), keep the plain `<before> to <after>` accuracy wording.
+ * `records.test.ts` pins the cross-class string too, the same way it pins the
+ * same-class one.
+ *
  * That contract covers the *applied* detail only. A discarded run — `applied:
  * false` — writes a differently-worded detail, starting `fix refinement
  * reached `, precisely so it cannot be mistaken for the applied case by a
@@ -1255,7 +1341,10 @@ export async function refineRecordFix(
       deleted_at: string | null
       accuracy_m: number | null
       activity_id: string | null
-    }>('SELECT deleted_at, accuracy_m, activity_id FROM record WHERE id = ?', [input.recordId])
+      fix_quality: Fix['quality']
+    }>('SELECT deleted_at, accuracy_m, activity_id, fix_quality FROM record WHERE id = ?', [
+      input.recordId,
+    ])
     if (!existing) {
       throw new Error(`Record ${input.recordId} does not exist, so there is no fix to refine.`)
     }
@@ -1267,10 +1356,26 @@ export async function refineRecordFix(
       )
     }
 
-    // Keep the better fix (see this function's doc comment). `accuracy_m` is
-    // the sole criterion — smaller is sharper — and NULL means the record has
-    // no accuracy to lose to, so any positioned fix applies.
-    applied = existing.accuracy_m === null || fix.accuracyM <= existing.accuracy_m
+    // Keep the better fix (see this function's doc comment) — but class first,
+    // accuracy second (spec §9.6.2). A deliberate fix's accuracy and an
+    // ambient fix's accuracy are answers to different questions: one is a
+    // held, averaged, accuracy-gated measurement; the other is whatever
+    // position was already cached, which never waited for anything and can
+    // report an optimistic figure that a genuine hold cannot match. The two
+    // numbers are not comparable, so comparing them can refuse an honest
+    // deliberate hold in favour of a cached ambient guess — or worse, let a
+    // fresh ambient reading overwrite a survey-grade fix — which is exactly
+    // the blurring §8.2 says must never happen. So rank decides first: a
+    // strictly higher-ranked incoming fix always applies, a strictly
+    // lower-ranked one never does, and only a tie in rank falls through to
+    // the `accuracy_m` comparison below, where the two figures are finally
+    // answers to the same question.
+    const existingRank = FIX_RANK[existing.fix_quality]
+    const incomingRank = FIX_RANK[fix.quality]
+    applied =
+      incomingRank > existingRank ||
+      (incomingRank === existingRank &&
+        (existing.accuracy_m === null || fix.accuracyM <= existing.accuracy_m))
 
     const at = nowIso()
     if (applied) {
@@ -1295,10 +1400,40 @@ export async function refineRecordFix(
       // activity this change happened inside.
       activityId: existing.activity_id,
       detail: applied
-        ? `fix refined from ${describeAccuracy(existing.accuracy_m)} ` +
-          `to ${describeAccuracy(fix.accuracyM)}`
-        : `fix refinement reached ${describeAccuracy(fix.accuracyM)}, kept the sharper ` +
-          `${describeAccuracy(existing.accuracy_m)} already on the record`,
+        ? existing.fix_quality !== fix.quality && existing.accuracy_m !== null
+          ? // A cross-class upgrade with a real "before" figure on the record —
+            // the exact §9.6.2 scenario (an ambient reading upgraded to a
+            // deliberate hold), and the one case where setting the two
+            // accuracy numbers side by side would read as a comparison that
+            // never happened: they are answers to different questions, and
+            // the class changed, not (only) the number. Naming the class
+            // transition right after the fixed `fix refined from ` prefix
+            // keeps the class the sentence's subject; the accuracy pair moves
+            // into parentheses as supporting detail rather than the claim
+            // itself. `existing.fix_quality !== fix.quality` on its own would
+            // also catch none→ambient and none→deliberate, but those carry no
+            // real "before" figure (`'none'` always has a null accuracy_m) —
+            // there is no numbers-as-comparison trap to avoid there, so the
+            // plain wording below is both correct and unchanged for them.
+            `fix refined from ${existing.fix_quality} to ${fix.quality} ` +
+            `(${describeAccuracy(existing.accuracy_m)} to ${describeAccuracy(fix.accuracyM)})`
+          : `fix refined from ${describeAccuracy(existing.accuracy_m)} ` +
+            `to ${describeAccuracy(fix.accuracyM)}`
+        : incomingRank < existingRank
+          ? // A cross-class refusal: this run was not beaten on accuracy, it was
+            // outranked. Saying "kept the sharper" here would claim an accuracy
+            // comparison that never happened, and could even be a lie on the
+            // numbers — an ambient reading can claim ±1 m against a deliberate
+            // ±9 m and still be the one refused. Both class names are read off
+            // the rows rather than hardcoded, so a fourth fix class does not
+            // silently leave this sentence naming a transition that did not
+            // happen.
+            `fix refinement reached ${describeAccuracy(fix.accuracyM)}, but ` +
+            `${indefiniteArticle(fix.quality)} ${fix.quality} fix cannot supersede the ` +
+            `${existing.fix_quality} ${describeAccuracy(existing.accuracy_m)} already on ` +
+            'the record'
+          : `fix refinement reached ${describeAccuracy(fix.accuracyM)}, kept the sharper ` +
+            `${describeAccuracy(existing.accuracy_m)} already on the record`,
     })
   })
 

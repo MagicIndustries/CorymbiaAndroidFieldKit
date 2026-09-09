@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Slot } from 'expo-router'
+import { Stack } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 import { ThemeProvider, useTheme } from '@corymbia/ui'
@@ -32,12 +32,38 @@ function ThemePreferenceBridge() {
   return null
 }
 
+/**
+ * A native stack, deliberately — not `Slot`.
+ *
+ * `Slot` renders exactly one route: `SlotNavigator`
+ * (`expo-router/build/views/Navigator.js`) returns
+ * `descriptors[state.routes[state.index].key].render()` and nothing else, and
+ * each descriptor's element is keyed by route, so the moment the index moves
+ * React unmounts the previous subtree outright. There is no stack of mounted
+ * screens under it. That is fatal for this application specifically: the
+ * capture screen holds the whole capture state machine
+ * (`src/capture/useCapture.ts`) in component-local `useState` — the phase, the
+ * record, the readings, the countdown — so pushing `/camera` from the recorded
+ * state destroyed it, and `router.back()` returned her to a blank `ready`
+ * screen with no route back to the record she had just photographed. The photo
+ * and the record were both safely in SQLite; the app simply showed no evidence
+ * either had happened.
+ *
+ * A native stack keeps every route in the stack mounted, which is the
+ * precondition for `useFocusEffect` in `capture.tsx` to mean anything: a
+ * refresh on return is only a refresh if there is still something there to
+ * refresh.
+ *
+ * `headerShown: false` preserves the appearance exactly — no screen in this
+ * application has ever drawn a navigation header, and the stack's default is
+ * to draw one.
+ */
 function Frame() {
   const { theme, name } = useTheme()
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }}>
       <StatusBar style={name === 'dark' ? 'light' : 'dark'} />
-      <Slot />
+      <Stack screenOptions={{ headerShown: false }} />
     </SafeAreaView>
   )
 }

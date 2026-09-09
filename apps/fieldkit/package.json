@@ -6,11 +6,15 @@
     "@corymbia/brand": "workspace:*",
     "@corymbia/data": "workspace:*",
     "@corymbia/geo": "workspace:*",
+    "@corymbia/media": "workspace:*",
     "@corymbia/tokens": "workspace:*",
     "@corymbia/ui": "workspace:*",
     "expo": "~57.0.20",
     "expo-application": "~57.0.2",
+    "expo-audio": "~57.0.4",
+    "expo-camera": "~57.0.4",
     "expo-device": "~57.0.1",
+    "expo-file-system": "~57.0.6",
     "expo-location": "~57.0.16",
     "expo-router": "~57.0.19",
     "expo-sqlite": "~57.0.2",
@@ -22,10 +26,10 @@
     "react-native-svg": "15.15.4"
   },
   "devDependencies": {
-    "@types/react": "~19.2.2",
-    "typescript": "~6.0.3",
     "@testing-library/react-native": "^14.0.1",
-    "jest-expo": "~57.0.0"
+    "@types/react": "~19.2.2",
+    "jest-expo": "~57.0.0",
+    "typescript": "~6.0.3"
   },
   "scripts": {
     "start": "expo start",

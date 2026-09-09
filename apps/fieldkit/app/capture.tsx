@@ -1,6 +1,15 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, TextInput, View, type ViewStyle } from 'react-native'
-import { useRouter } from 'expo-router'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  BackHandler,
+  KeyboardAvoidingView,
+  ScrollView,
+  StyleSheet,
+  TextInput,
+  View,
+  type ViewStyle,
+} from 'react-native'
+import { useFocusEffect, useRouter } from 'expo-router'
+import { useAudioPlayer } from 'expo-audio'
 import {
   createExpoLocationSource,
   distanceMetres,
@@ -10,23 +19,39 @@ import {
   type HoldVerdict,
   type LocationSource,
 } from '@corymbia/geo'
-import { radii, spacing, touch } from '@corymbia/tokens'
+import { field, radii, spacing, touch } from '@corymbia/tokens'
 import {
   Button,
   CaptureDial,
+  CORNER_BLOCK_MAX_W,
   HelpAffordance,
-  INPUT_AFFORDANCE_ORDER,
+  InputAffordanceRow,
+  MediaStrip,
   Screen,
   Type,
   isLocked,
+  mediaStripLabel,
   radiusForMetres,
   resolveReach,
   useLayout,
   useTheme,
   type FixGradeName,
   type InputAffordanceKind,
+  type MediaStripItem,
 } from '@corymbia/ui'
-import { renameRecord, type Database, type FieldRecord, type StoredFix } from '@corymbia/data'
+import {
+  appendEvent,
+  listMedia,
+  renameRecord,
+  softDeleteMedia,
+  type Attachment,
+  type Database,
+  type FieldRecord,
+  type StoredFix,
+} from '@corymbia/data'
+import { mediaStore } from '../src/media/store'
+import { ambientCache, feedingAmbientCache } from '../src/geo/ambient'
+import { ambientFixOrNone } from '../src/geo/ambientFix'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useSteadyGrade } from '../src/capture/steadyGrade'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
@@ -225,57 +250,10 @@ function positionOf(fix: StoredFix): Coordinate | null {
 /** How many readings went into the fix the record actually holds. */
 function describeRecordedSamples(fix: StoredFix): string {
   if (fix.quality !== 'deliberate') return 'no readings averaged'
-  return fix.sampleCount === 1 ? '1 reading averaged' : `${String(fix.sampleCount)} readings averaged`
+  return fix.sampleCount === 1
+    ? '1 reading averaged'
+    : `${String(fix.sampleCount)} readings averaged`
 }
-
-/**
- * The four affordances of spec §9.6 — location (already complete), title, voice
- * note, photo — in the order that section pins them.
- *
- * The last three come from `INPUT_AFFORDANCE_ORDER`, the constant
- * `InputAffordanceRow` itself renders from, rather than being written out
- * again here. Doctrine rule 5's "identically everywhere, in the same order" is
- * a claim about the whole application, and a second literal list is precisely
- * how such a claim stops being true.
- *
- * `'description'` is filtered out because §9.6 does not count it among the
- * four: the row's fourth entry is notes, and this screen's is the location —
- * which is not an input at all here but the fix the capture has already made,
- * shown complete. That divergence is real and is worth knowing about before
- * changing either list.
- */
-type RecordedAffordanceKind = 'location' | Exclude<InputAffordanceKind, 'description'>
-
-function offeredHere(kind: InputAffordanceKind): kind is Exclude<InputAffordanceKind, 'description'> {
-  return kind !== 'description'
-}
-
-const RECORDED_AFFORDANCES: RecordedAffordanceKind[] = [
-  'location',
-  ...INPUT_AFFORDANCE_ORDER.filter(offeredHere),
-]
-
-/** The glyph and the words for each, matching `InputAffordanceRow`'s exactly. */
-const AFFORDANCE_FACE: Record<RecordedAffordanceKind, { glyph: string; label: string }> = {
-  location: { glyph: '◎', label: 'Location' },
-  title: { glyph: '✏️', label: 'Title' },
-  voice: { glyph: '🎙️', label: 'Voice' },
-  photo: { glyph: '📷', label: 'Photo' },
-}
-
-/**
- * How wide the capture block may grow when the reach zone anchors it to a
- * corner rather than stretching it across a band.
- *
- * A tablet in landscape is the only case that reaches this (see `resolveReach`),
- * and there the whole point is that the block sits under one thumb: allowed to
- * span a ten-inch screen it would put its own far edge further from the control
- * than the panel this design replaced. This is a fixed physical size in dp, not
- * a fraction of the window — nothing here may branch on a raw width (doctrine's
- * layout rule), and the ergonomic question is how far a thumb reaches, which is
- * a distance rather than a proportion.
- */
-const CORNER_BLOCK_MAX_W = 420
 
 export default function CaptureScreen() {
   const status = useDatabaseStatus()
@@ -286,7 +264,10 @@ export default function CaptureScreen() {
   // (`diagnostics.tsx` does the same, for the same reason).
   if (status.state !== 'ready') {
     return (
-      <Screen spokenDescription={`Capture. The database is ${status.state}.`}>
+      <Screen
+        testID="capture-screen"
+        spokenDescription={`Capture. The database is ${status.state}.`}
+      >
         <Type variant="title">Database {status.state}</Type>
         {status.error ? <Type dim>{status.error.message}</Type> : null}
       </Screen>
@@ -312,9 +293,39 @@ function CaptureBody() {
    * of a countdown. Lazily initialised through the ref rather than passed as
    * `useRef(createExpoLocationSource()).current`, so the factory is not called
    * on every render merely to have its result discarded.
+   *
+   * **And it is wrapped, because this screen is the app's main producer of
+   * ambient positions** (spec §8.2). `feedingAmbientCache` copies every
+   * reading into the one shared cache (`src/geo/ambient.ts`) on its way to
+   * `useCapture`, which is what lets a photo or a voice note attached a
+   * minute later carry a position at all — without it every `media_added`
+   * event is stamped `{ quality: 'none' }`. The wrap goes here rather than
+   * inside `useCapture` on purpose: that hook is handed its dependencies and
+   * unit-tested against a scripted source, and reaching a module singleton
+   * from inside it would take that away.
    */
   const sourceRef = useRef<LocationSource | null>(null)
-  const source: LocationSource = (sourceRef.current ??= createExpoLocationSource())
+  const source: LocationSource = (sourceRef.current ??= feedingAmbientCache(
+    createExpoLocationSource(),
+  ))
+
+  /**
+   * The other half of spec §8.2's "refreshes opportunistically" (see
+   * `src/geo/ambient.ts`'s doc comment for the half this is not — the
+   * low-frequency refresh while an activity is running, which needs Plan 5's
+   * activity machinery and is not built yet).
+   *
+   * A cold app launch has no `watch` reading yet: the countdown has not
+   * started, so `feedingAmbientCache` above has fed the cache nothing, and a
+   * photo taken in the first seconds after opening the app would be stamped
+   * `{ quality: 'none' }` even though the device may already know a perfectly
+   * good last-known position. `void` because this must not, and cannot,
+   * block or gate anything the screen does — nothing awaits it, and every
+   * other read of the cache stays synchronous.
+   */
+  useEffect(() => {
+    void ambientCache.refresh()
+  }, [])
 
   const capture = useCapture({ db, device, source })
   const acquiring = capture.phase === 'acquiring'
@@ -707,7 +718,10 @@ function CaptureBody() {
 
   if (acquiring) {
     return (
-      <Screen spokenDescription="Acquiring a fix. The reading is already saved and is being refined while you stand still. The accuracy and the seconds remaining, how much sharper the fix is than the tap, how far apart the readings are, and a control that accepts what has accumulated and ends the wait.">
+      <Screen
+        testID="capture-screen"
+        spokenDescription="Acquiring a fix. The reading is already saved and is being refined while you stand still. The accuracy and the seconds remaining, how much sharper the fix is than the tap, how far apart the readings are, and a control that accepts what has accumulated and ends the wait."
+      >
         {/*
           The acquiring state scrolls. Rotation is unlocked and a phone in
           landscape has roughly 360dp of height, where non-scrolling content
@@ -746,7 +760,10 @@ function CaptureBody() {
   }
 
   return (
-    <Screen spokenDescription="Capture. The live position and its accuracy, and one control that records the fix immediately and then counts down while you stand still and sharpens the record.">
+    <Screen
+      testID="capture-screen"
+      spokenDescription="Capture. The live position and its accuracy, and one control that records the fix immediately and then counts down while you stand still and sharpens the record."
+    >
       {/*
         Ready is bottom-anchored, which is what `bottomBand` means: the control
         sits where the thumb already is, with the context above it.
@@ -774,16 +791,17 @@ function CaptureBody() {
       >
         {/*
           Doctrine rule 7: a tappable help affordance per screen, never a hover
-          — there is no hover in a paddock. It lives in the ready state and only
-          there. `acquiring` is exempt by rule 17, which requires that nothing
-          else is on screen while she stands still. `recorded` does ask one
-          thing of her — a name — but asks it with a labelled text box whose
-          placeholder says what to type, so there is nothing a `?` beside it
-          would explain; the moment that state asks for something whose meaning
-          is not on its face, filing to an activity or attaching media, it
-          takes a help affordance with it. Both exemptions are written down in
-          `docs/ui-doctrine.md` so their absence reads as a decision rather than
-          as an oversight.
+          — there is no hover in a paddock. `acquiring` is the one state with
+          none, and it is exempt by rule 17, which requires that nothing else
+          is on screen while she stands still. `recorded` used to be exempt
+          too, on the reasoning that the one thing it asked for — a name —
+          asked it with a labelled text box whose placeholder says what to
+          type. That exemption came with a written pre-commitment, in this
+          comment and in `docs/ui-doctrine.md`: it held only until the state
+          asked for something whose meaning is not on its face, and named
+          attaching media as such a thing. It now does, so it now carries its
+          own affordance (`capture-media-help`, in `RecordedAffordances`) and
+          the exemption is gone rather than quietly outlived.
         */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
           <Type variant="label" dim>
@@ -818,100 +836,40 @@ function CaptureBody() {
 }
 
 /**
- * One of the four affordances of spec §9.6, in three states.
+ * The recorded state, said out loud (doctrine rule 16).
  *
- * ## Why this is not `InputAffordanceRow`
- *
- * It should be, and it will be. `InputAffordanceRow` (`@corymbia/ui`) is the
- * component that owns doctrine rule 5 — one visual signature per input kind,
- * used identically everywhere — and this screen deliberately borrows its
- * glyphs, its wording, its dashed-versus-solid border and its `affordance-*`
- * test handles rather than inventing a second look.
- *
- * What it does not yet have is an *unavailable* state, and this screen has two
- * of them: there is no media table in `@corymbia/data`, so a voice note and a
- * photo have nowhere to be stored. Present-and-disabled is the honest way to
- * show that (doctrine rule 3: every level of disclosure is a legitimate
- * stopping point, and a level that is not built must not pretend otherwise) —
- * a tile that looked live and did nothing would be worse than no tile.
- *
- * **PLAN 4 (media) attaches here.** When photo and voice capture land, the
- * right change is to teach `InputAffordanceRow` the disabled state — or to
- * find it no longer needs one — and replace this row with that component,
- * rather than to grow a third variant of the same four tiles. `location` stays
- * this screen's own: it is not an input, it is the fix the capture already
- * made, shown complete.
+ * Everything before the media clause is what this sentence has always said.
+ * What follows it is what this branch added to the state and what the
+ * sentence did not previously mention at all: how many of each kind are
+ * attached, that they sit in a strip that can be played back and removed
+ * from, and — the one that matters most to say — that a destructive question
+ * is open and which attachment it is about. A screen-reader user who cannot
+ * see the marked tile has nothing else to tell her which of ten photos REMOVE
+ * would take.
  */
-function AffordanceTile({
-  kind,
-  state,
-  spokenLabel,
-  onPress,
-}: {
-  kind: RecordedAffordanceKind
-  state: 'done' | 'available' | 'unavailable'
-  spokenLabel: string
-  onPress?: () => void
-}) {
-  const { theme } = useTheme()
-  const face = AFFORDANCE_FACE[kind]
-  const testID = `affordance-${kind}`
-
-  // Doctrine rule 9: the state is carried by the border style AND by the
-  // words, never by colour alone — the same two channels `InputAffordanceRow`
-  // uses, so a colour-vision-deficient user, or anyone in direct sunlight,
-  // reads it the same way.
-  const label =
-    state === 'done' ? `${face.label} ✓` : state === 'unavailable' ? `${face.label} · later` : face.label
-
-  const style: ViewStyle = {
-    flex: 1,
-    minHeight: touch.comfortable,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radii.md,
-    borderWidth: 2,
-    borderStyle: state === 'done' ? 'solid' : 'dashed',
-    borderColor: state === 'done' ? theme.colors.accent : theme.colors.border,
-    backgroundColor: theme.colors.surfaceRaised,
-    paddingVertical: spacing.sm,
-    opacity: state === 'unavailable' ? 0.45 : 1,
+function describeRecordedScreen(media: RecordMedia): string {
+  const total = media.photoCount + media.voiceCount
+  const kinds: string[] = []
+  if (media.photoCount > 0) {
+    kinds.push(media.photoCount === 1 ? '1 photo' : `${String(media.photoCount)} photos`)
   }
-
-  const faceContent = (
-    <>
-      <Type variant="heading">{face.glyph}</Type>
-      <Type variant="label" dim testID={`${testID}-label`}>
-        {label}
-      </Type>
-    </>
-  )
-
-  // A statement rather than a control. The location is already recorded, so
-  // there is nothing to press and no `accessibilityRole="button"` to claim.
-  if (onPress === undefined && state === 'done') {
-    return (
-      <View testID={testID} accessible accessibilityLabel={spokenLabel} style={style}>
-        {faceContent}
-      </View>
-    )
+  if (media.voiceCount > 0) {
+    kinds.push(media.voiceCount === 1 ? '1 voice note' : `${String(media.voiceCount)} voice notes`)
   }
-
-  // Deliberately no `onPress` in the unavailable case — not an empty handler.
-  // There is nothing for it to call, and a stub is how a screen ends up with a
-  // control that silently does nothing once someone removes the `disabled`.
+  const attached =
+    total === 0
+      ? 'Nothing is attached to it yet.'
+      : `${kinds.join(' and ')} ${total === 1 ? 'is' : 'are'} attached, in a strip of tiles you ` +
+        'can play back or remove.'
+  const question =
+    media.removalLabel === null
+      ? ''
+      : ` You are being asked whether to remove ${media.removalLabel.toLowerCase()}, with one ` +
+        'control that removes it and one that keeps it.'
   return (
-    <Pressable
-      testID={testID}
-      accessibilityRole="button"
-      accessibilityLabel={spokenLabel}
-      accessibilityState={{ disabled: state === 'unavailable', selected: state === 'done' }}
-      disabled={state === 'unavailable'}
-      onPress={onPress}
-      style={style}
-    >
-      {faceContent}
-    </Pressable>
+    'A survey point has been recorded and its position is final. Where the capture got to, ' +
+    'its capture number, final accuracy and how the wait ended, a name you can give it, and ' +
+    `the ways onward: take another reading, or leave. ${attached}${question}`
   )
 }
 
@@ -970,8 +928,48 @@ function RecordedState({
    */
   const finalFix = record !== null && record.fix.quality !== 'none' ? record.fix : null
 
+  /**
+   * What is attached, and the removal question a tile can open — owned here
+   * rather than inside `RecordedAffordances` because the spoken description
+   * two lines below has to say both. See `useRecordMedia`.
+   */
+  const media = useRecordMedia(db, record?.id ?? null, deviceId)
+
+  /**
+   * The title and the notes, and the editor that writes them — owned here
+   * rather than inside `RecordedAffordances` because the editor has to be
+   * rendered outside `capture-recorded-scroll`, and the tiles inside it. See
+   * `useFieldEditing`.
+   */
+  const editor = useFieldEditing(db, record, deviceId)
+  const editing = editor.open !== null
+
   return (
-    <Screen spokenDescription="A survey point has been recorded and its position is final. Where the capture got to, its capture number, final accuracy and how the wait ended, a name you can give it, and the ways onward: take another reading, or leave.">
+    <Screen
+      testID="capture-screen"
+      /*
+        Doctrine rule 16. This sentence used to name the capture number, the
+        accuracy, how the wait ended and the two ways onward — and stopped
+        there, which was a complete description of this state before this
+        branch and an incomplete one after it. Attaching media is the thing
+        this branch added to this state, and a spoken description that never
+        mentions the attachments, the strip they sit in, or an open
+        destructive question describes a screen that no longer exists.
+        Asserted in all three of those states by `capture.test.tsx`.
+
+        AND WITHDRAWN WHILE THE EDITOR IS OPEN, which is doctrine rule 16
+        rather than an optimisation. The editor used to be a `Modal` — a
+        separate Android window, which a screen reader does not read behind —
+        so it replaced this sentence for free. An overlay is in this same
+        window, so nothing withdraws this sentence unless it is withdrawn
+        here, and two descriptions of two different surfaces both announcing
+        themselves is exactly the inaccuracy rule 16 forbids. The editor
+        carries its own (`describeEditor`), and the column behind it is taken
+        out of a reader's reach by `importantForAccessibility` on the scroll
+        view below.
+      */
+      spokenDescription={editing ? undefined : describeRecordedScreen(media)}
+    >
       {/*
         This state scrolls for the same reason the acquiring one does: rotation
         is unlocked, a phone in landscape has roughly 360dp of height, and this
@@ -981,6 +979,50 @@ function RecordedState({
       */}
       <ScrollView
         testID="capture-recorded-scroll"
+        /*
+          THE FIRST TAP ON SAVE, AS IT WAS DIAGNOSED — and no longer the line
+          that fixes it. Field-reported: "I try to tap save but it just closes
+          the keyboard as the focus changes, then i hit save again".
+
+          `ScrollView`'s `_handleStartShouldSetResponderCapture` (`ScrollView.js`,
+          RN 0.86.3) returns `true` — taking the responder and blurring the
+          input instead of letting the press through — when
+          `keyboardShouldPersistTaps` is unset or `'never'`, a dismissible soft
+          keyboard is up, and the target is not a text input. Its own comment
+          in RN says so: "the first tap should be sent to the scroll view and
+          dismiss the keyboard, then the second tap goes to the actual interior
+          view". The editor's SAVE was a DESCENDANT of this scroll view at the
+          time, because React Native's responder system builds its propagation
+          path from the React tree rather than the native one — so even though
+          the editor's card was in a separate Android window, this prop
+          governed the tap on it.
+
+          THE EDITOR IS NO LONGER A DESCENDANT. It renders below, as a sibling
+          of this scroll view, which is what actually holds the fix: the
+          capture path for a touch on SAVE no longer passes through here at
+          all. This prop is therefore no longer load-bearing for that tap, and
+          it is kept rather than removed for the case it always also covered —
+          a control inside THIS column pressed while some future keyboard is
+          up. `'handled'` and not `'always'`: a tap on nothing in particular
+          should still put a keyboard away; `'handled'` only spares the taps a
+          control actually handles.
+        */
+        keyboardShouldPersistTaps="handled"
+        /*
+          Doctrine rule 16, the half a `Modal` used to give for free. A dialog
+          is a separate Android window and a screen reader does not read the
+          window behind it; an overlay is in this same window, so this column
+          stays traversable — a reader could wander out of the editor, through
+          the tiles and the strip, and be told about controls the scrim is
+          covering. `accessibilityViewIsModal` is the iOS mechanism for this
+          and is genuinely iOS-only in RN 0.86.3 (it appears in
+          `BaseViewConfig.ios.js`, is absent from `BaseViewConfig.android.js`,
+          and has no implementation anywhere under `ReactAndroid/`), so on the
+          device this app is for it would be a silent no-op. This is the
+          Android mechanism, implemented in `BaseViewManager.java` and
+          `ReactAccessibilityDelegate.kt`.
+        */
+        importantForAccessibility={editing ? 'no-hide-descendants' : 'auto'}
         contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
       >
         <View style={{ gap: spacing.md }}>
@@ -1082,7 +1124,7 @@ function RecordedState({
           )}
 
           {record === null ? null : (
-            <RecordedAffordances record={record} db={db} deviceId={deviceId} />
+            <RecordedAffordances record={record} media={media} editor={editor} />
           )}
 
           {/*
@@ -1133,6 +1175,45 @@ function RecordedState({
           />
         </View>
       </ScrollView>
+
+      {/*
+        THE EDITING SURFACE, HERE AND NOT IN THE COLUMN ABOVE.
+
+        Two things follow from this position and neither is cosmetic. It is a
+        SIBLING of `capture-recorded-scroll`, so a touch on its SAVE never
+        runs that scroll view's `onStartShouldSetResponderCapture` — the first
+        tap is the tap. And it is a child of `Screen`, which is inside the
+        `SafeAreaView` that `_layout.tsx` wraps every route in, so the insets
+        a `Modal` had to ask for again are already applied.
+
+        It fills `Screen` completely despite `Screen`'s own `spacing.lg`
+        padding: an absolutely positioned child with all four insets set is
+        measured against its containing block's PADDING box, not its content
+        box (Yoga `AbsoluteLayout.cpp` — `positionAbsoluteChild` adds the
+        parent's border and not its padding, and `layoutAbsoluteChild` sizes
+        it as `measuredDimension - borders - insets`). So the scrim reaches the
+        edge of the screen rather than stopping a gutter short of it.
+      */}
+      {editor.open === null ? null : (
+        <FieldEditor
+          kind={editor.open.kind}
+          draft={editor.open.draft}
+          saving={editor.saving}
+          // Only a failure belonging to the editor that is open. The two
+          // cannot disagree today (`openEditor` clears the error and the write
+          // re-sets it for the kind being written), but the editor renders the
+          // message and must not render one addressed to the other field if
+          // that ever stops being true.
+          error={
+            editor.error !== null && editor.error.kind === editor.open.kind
+              ? editor.error.message
+              : null
+          }
+          onChangeDraft={editor.changeDraft}
+          onSave={editor.save}
+          onCancel={editor.closeEditor}
+        />
+      )}
     </Screen>
   )
 }
@@ -1199,36 +1280,86 @@ function RecordedSummary({ record }: { record: FieldRecord }) {
 }
 
 /**
- * The four affordances, and the one of them that is real.
+ * What is attached to a recorded point, and the removal question one of its
+ * tiles can open.
  *
- * Spec §9.6 requires all four to be present, in the same order, everywhere in
- * the application — which is why voice and photo are rendered at all when
- * neither can do anything. `renameRecord` is the whole of what Plan 3
- * completes here: it is the only setter for a record's title, and it writes
- * the change through the same append-only event log as everything else that
- * happens to a record (spec §8.5), because a title is part of the observation
- * rather than incidental metadata.
+ * **A hook, rather than state inside `RecordedAffordances`, and that is
+ * forced rather than tidy.** Doctrine rule 16 asks the recorded state's
+ * spoken description to describe that state, and since this branch the state
+ * includes what is attached, that there is a strip of it, and whether a
+ * destructive question is currently open. That description is a prop on
+ * `Screen`, which `RecordedState` renders — one level above the affordances
+ * that used to own the media. Two components cannot each own the same fact
+ * without one of them going stale, so the fact lives here and both read it.
+ *
+ * `recordId` is nullable because `RecordedState` renders before a record
+ * exists (a capture whose insert has not come back yet, which it draws as
+ * POINT RECORDED with no summary) and a hook cannot be called conditionally.
+ * With no record there is nothing to read and every operation below is a
+ * no-op.
  */
-function RecordedAffordances({
-  record,
-  db,
-  deviceId,
-}: {
-  record: FieldRecord
-  db: Database
-  deviceId: string
-}) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(record.title ?? '')
-  const [title, setTitle] = useState<string | null>(record.title)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const { theme } = useTheme()
+type RecordMedia = {
+  items: MediaStripItem[]
+  photoCount: number
+  voiceCount: number
+  /** The attachment a confirmation is open for, `null` when none is. */
+  pendingRemovalId: string | null
+  /**
+   * How that attachment is named — `Photo 3 of 10` — from `@corymbia/ui`'s
+   * own strip labelling, so the question and the tile it marks cannot drift
+   * apart. `null` when no removal is pending, and also when the pending id
+   * no longer names anything in `items` (a refresh that landed underneath
+   * the question), which the screen renders as no question at all rather
+   * than as a question about nothing.
+   */
+  removalLabel: string | null
+  removing: boolean
+  removeError: string | null
+  onTilePress: (id: string) => void
+  onRequestRemoval: (id: string) => void
+  onCancelRemoval: () => void
+  onConfirmRemoval: () => void
+}
+
+function useRecordMedia(db: Database, recordId: string | null, deviceId: string): RecordMedia {
+  const [media, setMedia] = useState<Attachment[]>([])
 
   /**
-   * Guards the two `setState`s that follow the write. She can leave the screen,
-   * or take another reading, while `renameRecord` is still in a transaction,
-   * and nothing may write into a component that has gone.
+   * The removal confirmation (spec, this task; doctrine rule 4).
+   *
+   * `pendingRemoval` is the id of the attachment a `media-remove-*` tile has
+   * been pressed for, and nothing more — it is not itself the confirmation
+   * being shown, it is what the confirmation would be shown *for*. Rendered
+   * inline, on this screen, rather than as an `Alert` (the same reason
+   * `camera.tsx`'s own error is inline): a modal that dismisses takes the
+   * question, and the answer, with it.
+   *
+   * `removeError` is kept separate from the title/notes save failure rather
+   * than sharing one slot with it — the two are shown in different places on
+   * the screen, next to what they are about, and clearing one must never
+   * clear the other. That is also why the save failure stayed in
+   * `RecordedAffordances` when the media state moved up here.
+   */
+  const [pendingRemoval, setPendingRemoval] = useState<string | null>(null)
+  const [removing, setRemoving] = useState(false)
+  const [removeError, setRemoveError] = useState<string | null>(null)
+
+  /**
+   * The one player this screen ever plays a voice note through.
+   *
+   * A single instance, not one per tile: `useAudioPlayer` starts loading
+   * whatever source it is given immediately, and a strip can hold several
+   * voice notes she may never tap. `null` here means "nothing loaded yet" —
+   * `playVoiceNote` below calls `player.replace(uri)` before `player.play()`
+   * on every press, which is what lets the same player stand in for whichever
+   * tile she actually taps.
+   */
+  const player = useAudioPlayer(null)
+
+  /**
+   * Guards the `setState`s that follow an await: she can leave the screen, or
+   * take another reading, while `listMedia` is still reading or
+   * `softDeleteMedia` is still in a transaction.
    */
   const mounted = useRef(true)
   useEffect(() => {
@@ -1238,77 +1369,641 @@ function RecordedAffordances({
     }
   }, [])
 
-  async function save(): Promise<void> {
+  /**
+   * Which `listMedia` call the state currently belongs to.
+   *
+   * `mounted` alone is not enough here. Camera → back → voice → back happens
+   * in a couple of seconds in the field, and each return starts a fetch
+   * without cancelling the one before it; two in-flight reads can resolve in
+   * either order, and the older one resolving last would overwrite the newer
+   * answer with a list that is one attachment short. Every fetch takes a
+   * ticket and only the holder of the current one is allowed to write, which
+   * is last-request-wins rather than last-response-wins.
+   */
+  const generation = useRef(0)
+
+  /**
+   * What is already attached, re-read every time this screen becomes the
+   * focused route — not once on mount.
+   *
+   * Nothing on this screen writes a photo or a voice note: pressing the tile
+   * pushes to `/camera` or `/voice`, and `useAttachMedia` writes the file and
+   * the row over there. So the only moment this component can learn that an
+   * attachment now exists is the moment she comes back, and a mount-only
+   * fetch never sees it — the screen was already mounted when she left.
+   * `useFocusEffect` fires on first focus too, so this REPLACES the mount
+   * fetch rather than sitting beside it; keeping both would double-fetch on
+   * every entry.
+   *
+   * This depends on the root layout being a `Stack` and not a `Slot` (see
+   * `_layout.tsx`): under `Slot` there is nothing left to refocus, because
+   * the push unmounted this screen and everything the capture is.
+   *
+   * **`refresh` is also what a successful removal calls**, below — not a
+   * second, independent fetch. A removal and a return from `/camera` can in
+   * principle race (she declines a removal, backgrounds the app onto the
+   * camera, and comes back), and routing both through the one ticketed
+   * function is what keeps them last-request-wins instead of two competing
+   * writers into `media`.
+   */
+  const refresh = useCallback((): Promise<void> => {
+    if (recordId === null) return Promise.resolve()
+    generation.current += 1
+    const ticket = generation.current
+    return listMedia(db, recordId)
+      .then((rows) => {
+        if (mounted.current && ticket === generation.current) setMedia(rows)
+      })
+      .catch(() => {
+        // The record itself is unaffected by a read that fails; the tiles
+        // simply carry on showing no count until the next successful fetch,
+        // which is honester than inventing a number that was never read.
+      })
+  }, [db, recordId])
+
+  useFocusEffect(
+    useCallback(() => {
+      void refresh()
+    }, [refresh]),
+  )
+
+  const photoCount = media.filter((item) => item.kind === 'photo').length
+  const voiceCount = media.filter((item) => item.kind === 'voice').length
+  const mediaItems: MediaStripItem[] = media.map((item) => ({
+    id: item.id,
+    kind: item.kind,
+    uri: mediaStore.uriFor(item.fileName),
+    durationMs: item.durationMs,
+  }))
+
+  /**
+   * How the attachment a removal is pending for is named in the strip —
+   * `Photo 3 of 10`. `mediaStripLabel` is `MediaStrip`'s own labelling,
+   * imported rather than restated: the confirmation names the tile the strip
+   * marks, and two independent numbering schemes drifting apart would point
+   * her at the wrong thumbnail on a strip of near-identical thumbnails with
+   * no undo behind it.
+   */
+  const removalLabel = pendingRemoval === null ? null : mediaStripLabel(mediaItems, pendingRemoval)
+
+  /**
+   * A voice tile's press (this task). `MediaStrip` takes one `onPress` for
+   * the whole strip, not one per kind, so a photo tile presses this too —
+   * see `handleMediaPress` below for what it does there.
+   *
+   * `replace` before `play`, on the one player this screen owns: see its own
+   * doc comment above for why there is only one. Both calls are synchronous
+   * (`AudioPlayer.replace`/`.play`, `expo-audio` v57 —
+   * `node_modules/expo-audio/build/AudioModule.types.d.ts`), so a decoder or
+   * source failure surfaces as a synchronous throw here, not a rejected
+   * promise — which is exactly what the `try` below is written to catch.
+   *
+   * **The event is appended only once `play()` has returned without
+   * throwing** — never before it, and never from a `.catch` on a promise
+   * that was never produced. `'played'` is a permitted `EventAction`
+   * (migration 003) precisely for this (spec §8.5): who listened to a field
+   * note and when is part of chain of custody, and an event log that cannot
+   * be edited or removed must never record a play that never started.
+   */
+  function playVoiceNote(uri: string): void {
+    try {
+      player.replace(uri)
+      player.play()
+    } catch {
+      // A voice note that will not play is not a fact about the record
+      // itself being wrong, and this screen has nowhere pinned to say so —
+      // the one thing that must not happen is logging a play that did not
+      // happen, which the early return here guarantees.
+      return
+    }
+    if (recordId === null) return
+    void appendEvent(db, {
+      recordId,
+      action: 'played',
+      deviceId,
+      fix: ambientFixOrNone(ambientCache),
+    })
+  }
+
+  /**
+   * A tile's press, dispatched by kind. A photo tile opens nothing: a
+   * full-screen viewer belongs with the browsing views Plan 5 builds, and
+   * `MediaStrip` has no per-item `onPress` to withhold from just the photo
+   * tiles — passing one at all makes every tile a `Pressable` (its own
+   * doctrine: never a `Pressable` around a handler with nothing to do), so
+   * the photo case is a deliberate no-op rather than an absent handler.
+   */
+  function handleMediaPress(id: string): void {
+    const item = mediaItems.find((entry) => entry.id === id)
+    if (item === undefined || item.kind !== 'voice') return
+    playVoiceNote(item.uri)
+  }
+
+  /** Opens the inline confirmation for one attachment (doctrine rule 4). */
+  function requestRemoval(id: string): void {
+    setRemoveError(null)
+    setPendingRemoval(id)
+  }
+
+  function cancelRemoval(): void {
+    setPendingRemoval(null)
+    setRemoveError(null)
+  }
+
+  /**
+   * Removes the pending attachment, once she has confirmed it.
+   *
+   * **Never optimistic.** `softDeleteMedia` is awaited before anything about
+   * `media` changes — no filtering the strip ahead of the result — so a
+   * refusal leaves the tile exactly as it was, with nothing to undo. Only
+   * once the removal has actually committed does this refetch through
+   * `refresh()` (the same ticketed fetch a focus return uses) and let what
+   * `listMedia` says replace `media` outright, rather than computing the new
+   * list itself by filtering the id out locally: the row is soft-deleted,
+   * not gone, and `listMedia`'s own `deleted_at IS NULL` filter is the one
+   * true statement of what she should still see — this screen does not
+   * restate it.
+   */
+  async function confirmRemoval(): Promise<void> {
+    if (pendingRemoval === null) return
+    const id = pendingRemoval
+    setRemoving(true)
+    setRemoveError(null)
+    try {
+      await softDeleteMedia(db, id, deviceId, ambientFixOrNone(ambientCache))
+      if (!mounted.current) return
+      setPendingRemoval(null)
+      await refresh()
+    } catch (caught) {
+      if (!mounted.current) return
+      const detail = caught instanceof Error ? caught.message : String(caught)
+      setRemoveError(
+        `The attachment was not removed: ${detail.replace(/[.?!…]+$/, '')}. It is still attached.`,
+      )
+    } finally {
+      if (mounted.current) setRemoving(false)
+    }
+  }
+
+  return {
+    items: mediaItems,
+    photoCount,
+    voiceCount,
+    pendingRemovalId: pendingRemoval,
+    removalLabel,
+    removing,
+    removeError,
+    onTilePress: handleMediaPress,
+    onRequestRemoval: requestRemoval,
+    onCancelRemoval: cancelRemoval,
+    onConfirmRemoval: () => {
+      void confirmRemoval()
+    },
+  }
+}
+
+/**
+ * The title and the notes: what is stored, what is being typed, and what the
+ * last write did.
+ *
+ * **A hook rather than state inside `RecordedAffordances`, and — like
+ * `useRecordMedia` above — that is forced rather than tidy.** The editor is
+ * no longer a `Modal`; it is an overlay drawn inside this Activity's own
+ * window (see `FieldEditor`), and it has to sit OUTSIDE
+ * `capture-recorded-scroll` in the React tree, because a `ScrollView`
+ * ancestor takes the first touch on a control while a dismissible keyboard is
+ * up. That is the whole of the two-taps-to-save fault, and moving the editor
+ * into the Activity's window without also moving it out of the scroll view
+ * would reproduce it exactly. The tiles, the confirmation sentence and the
+ * stored values all belong in that scrolling column; the editor does not. Two
+ * components cannot each own the same fact without one of them going stale,
+ * so the fact lives here and both read it.
+ *
+ * `record` is nullable for the same reason `useRecordMedia`'s `recordId` is:
+ * `RecordedState` renders before the insert comes back, and a hook cannot be
+ * called conditionally.
+ */
+type FieldEditing = {
+  /**
+   * The field the editor is open on and the text currently in its box, or
+   * `null` when it is closed. The draft is held here rather than inside the
+   * editor so that closing discards it — a cancel must not leave a half-typed
+   * name behind to reappear the next time the box is opened.
+   */
+  open: { kind: 'title' | 'description'; draft: string } | null
+  /** The stored name, as the last write left it. */
+  title: string | null
+  /** The stored notes, as the last write left them. */
+  description: string | null
+  saving: boolean
+  /** A failure and the field it belongs to; `null` when the last write landed. */
+  error: { kind: 'title' | 'description'; message: string } | null
+  /** The last save that actually landed, and what it wrote. */
+  saved: { kind: 'title' | 'description'; value: string | null } | null
+  openEditor: (kind: 'title' | 'description') => void
+  closeEditor: () => void
+  changeDraft: (text: string) => void
+  save: () => void
+}
+
+function useFieldEditing(db: Database, record: FieldRecord | null, deviceId: string): FieldEditing {
+  const [open, setOpen] = useState<{ kind: 'title' | 'description'; draft: string } | null>(null)
+  /**
+   * What the last write returned, or `null` while nothing has been written
+   * from this screen yet — in which case the record's own columns are read
+   * through live.
+   *
+   * Derived rather than seeded into `useState` from `record` at mount, which
+   * is what this was when it lived one level down inside `RecordedAffordances`.
+   * The seed had to go: this hook is called from `RecordedState`, which
+   * renders once BEFORE the record exists (a capture whose insert has not come
+   * back yet, drawn as POINT RECORDED with no summary), so a mount-time seed
+   * would capture `null` for both fields and never look again. Reading through
+   * until the first write is the same value in every case, and one fewer
+   * effect to keep in step.
+   */
+  const [written, setWritten] = useState<{
+    title: string | null
+    description: string | null
+  } | null>(null)
+  const title = written === null ? (record?.title ?? null) : written.title
+  const description = written === null ? (record?.description ?? null) : written.description
+
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<{ kind: 'title' | 'description'; message: string } | null>(
+    null,
+  )
+  /**
+   * The last save that actually landed, and what it wrote — the whole of the
+   * answer to "not sure they're being saved".
+   *
+   * **The editor closing is not the confirmation, and must never be made
+   * into one.** A cancel closes it identically, and the saved value itself
+   * lands further down the recorded column past the strip, which is the
+   * position she never saw it in. So this is the confirmation: a sentence
+   * rendered directly beneath the tile she pressed, naming which field was
+   * written and quoting the value back — built from what `renameRecord`
+   * returned rather than from her draft, so a repository that stored
+   * something other than what was typed cannot be confirmed as having stored
+   * what was typed. It is a `polite` live region so a screen reader says it
+   * at the moment the editor's own surface disappears from under the reader.
+   *
+   * Two channels, not colour (doctrine rule 9): this sentence, and the tile's
+   * own label turning `Title ✓` beside it.
+   *
+   * It persists rather than fading on a timer. A timed acknowledgement is one
+   * she can miss by looking up at the paddock for three seconds, which is the
+   * failure that produced this ticket in the first place; it is cleared by
+   * the next thing she does to a field, in `openEditor`.
+   */
+  const [saved, setSaved] = useState<{
+    kind: 'title' | 'description'
+    value: string | null
+  } | null>(null)
+  /**
+   * Guards the `setState`s that follow an await. She can leave the screen, or
+   * take another reading, while `renameRecord` is still in a transaction, and
+   * nothing may write into a component that has gone. (`useRecordMedia` keeps
+   * its own, for the reads and the removal it owns.)
+   */
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
+  function openEditor(kind: 'title' | 'description'): void {
+    // The previous failure goes with the editor that produced it. Without
+    // this, a failed title save leaves "The name was not saved…" sitting under
+    // a freshly opened notes box, where it reads as a refusal of the notes she
+    // has not typed yet.
+    setError(null)
+    // And the previous success goes with it, for the same reason: "Name
+    // saved: Frog pond outflow" standing under a freshly opened notes box
+    // reads as a confirmation of the notes she has not typed yet.
+    setSaved(null)
+    setOpen({ kind, draft: (kind === 'title' ? title : description) ?? '' })
+  }
+
+  /**
+   * Leaves the editor without writing anything — the overlay's own CANCEL,
+   * and the Android back button through `FieldEditor`'s `BackHandler`.
+   *
+   * The failure message goes with it, because the failure message lives on
+   * the editing surface (see `FieldEditor`) and there is nowhere else on this
+   * screen for it to be. Nothing is lost by that: what a failed save leaves
+   * behind is a record with no name on it, and the tile still reading `Title`
+   * with no value beneath it says exactly that, permanently, without a
+   * sentence.
+   */
+  function closeEditor(): void {
+    setOpen(null)
+    setError(null)
+  }
+
+  async function write(): Promise<void> {
+    if (open === null || record === null) return
+    const { kind, draft } = open
     const trimmed = draft.trim()
-    // An empty box is a cleared name, which `renameRecord` models explicitly as
-    // `title: null` — not as an empty string, which would be a name made of no
+    // An empty box is a cleared value, which `renameRecord` models explicitly
+    // as `null` — not as an empty string, which would be text made of no
     // characters.
     const next = trimmed.length === 0 ? null : trimmed
     setSaving(true)
     setError(null)
     try {
-      const renamed = await renameRecord(db, { recordId: record.id, title: next, deviceId })
+      const renamed = await renameRecord(
+        db,
+        kind === 'title'
+          ? // No `description` key at all, which is the whole of how
+            // `renameRecord` (`records.ts`: `'description' in input`) is told
+            // to leave the notes alone. Passing `description: undefined` would
+            // NOT be the same thing — the key would be present, and the notes
+            // would be cleared.
+            { recordId: record.id, title: next, deviceId }
+          : // A notes save must still carry a title, because `renameRecord`
+            // takes `title` unconditionally and would otherwise read this as
+            // "clear the title". `title` here is this screen's own state,
+            // which is correct for as long as this screen is the only thing
+            // that can rename this record — it is, today. The cost is that
+            // every notes save appends an `'edited'` event restating a title
+            // that did not change, and the moment anything else can rename a
+            // record (Plan 5's list, or a sync) this becomes a lost update:
+            // the notes save would overwrite the other rename with whatever
+            // title this screen last saw. Fixing it properly means either a
+            // notes-only input on `renameRecord` or a read-modify-write inside
+            // its transaction, not a change here.
+            { recordId: record.id, title, description: next, deviceId },
+      )
       if (!mounted.current) return
-      setTitle(renamed.title)
-      setEditing(false)
+      setWritten({ title: renamed.title, description: renamed.description })
+      // From the record that came back out of the transaction, not from
+      // `next`: the confirmation quotes what was actually written, so a
+      // repository that stored something other than what was typed cannot be
+      // confirmed as having stored what was typed.
+      setSaved({ kind, value: kind === 'title' ? renamed.title : renamed.description })
+      setOpen(null)
     } catch (caught) {
       if (!mounted.current) return
-      setError(
-        `The name was not saved: ${caught instanceof Error ? caught.message : String(caught)}. ` +
-          'The point itself is safe.',
-      )
+      const detail = caught instanceof Error ? caught.message : String(caught)
+      const subject = kind === 'title' ? 'name' : 'notes'
+      const verb = kind === 'title' ? 'was' : 'were'
+      setError({
+        kind,
+        // The trailing stop is stripped off `detail` for the same reason
+        // the removal failure beside it does so, and `camera.tsx` and
+        // `voice.tsx` do: a cause that already ends in punctuation
+        // ("database is locked!") otherwise renders "…was not saved:
+        // database is locked!. The point itself is safe." This was the one
+        // error sentence on the branch still interpolating a raw `${detail}.`
+        message: `The ${subject} ${verb} not saved: ${detail.replace(/[.?!…]+$/, '')}. The point itself is safe.`,
+      })
     } finally {
       if (mounted.current) setSaving(false)
     }
   }
 
+  return {
+    open,
+    title,
+    description,
+    saving,
+    error,
+    saved,
+    openEditor,
+    closeEditor,
+    changeDraft: (text: string) => {
+      // Keyed off the field that is open rather than taking a `kind`: there is
+      // only ever one box on the surface, and letting a caller name a
+      // different one would let a stale editor write into the live draft.
+      if (open === null) return
+      setOpen({ kind: open.kind, draft: text })
+    },
+    save: () => {
+      void write()
+    },
+  }
+}
+
+/**
+ * What can still be attached to a recorded point (spec §9.6), and what is
+ * already there.
+ *
+ * `InputAffordanceRow` (`@corymbia/ui`, Task 6) renders the four tiles this
+ * used to hand-roll one at a time: title, notes, voice, photo — none of them
+ * disabled, because none of them is unbuilt any more. Location is not among
+ * them: it is not an input on this screen, it is the fix the capture just
+ * made (spec §9.6), and that is shown by the dial and the accuracy readout
+ * above, not by a fifth tile that would do nothing when pressed.
+ *
+ * Title and notes are neither written nor held here any more. Both live in
+ * `useFieldEditing`, owned by `RecordedState`, because the editor itself has
+ * to render outside the scrolling column this component sits in — see the
+ * note at the foot of this component. What stays here is everything that does
+ * belong in the column: the four tiles, the confirmation sentence directly
+ * beneath them, the strip, and the two stored values. Photo and voice are not
+ * written here either: pressing either tile pushes to `/camera` or `/voice`
+ * with this record's id, and `useAttachMedia` — called from those screens,
+ * not this one — is the whole of what writes the file and the row (Task 10).
+ * This component's part with them is narrower: fetch what is already
+ * attached, through `listMedia`, so the tiles can say how many and
+ * `MediaStrip` can show them.
+ */
+function RecordedAffordances({
+  record,
+  media,
+  editor,
+}: {
+  record: FieldRecord
+  /**
+   * Owned by `RecordedState` (see `useRecordMedia`), not by this component,
+   * because `Screen`'s `spokenDescription` up there has to say what is
+   * attached and whether a removal question is open — doctrine rule 16.
+   */
+  media: RecordMedia
+  /**
+   * Owned by `RecordedState` too (see `useFieldEditing`), for a related
+   * reason: the editor these tiles open is rendered up there, as a sibling of
+   * `capture-recorded-scroll` rather than a descendant of it.
+   */
+  editor: FieldEditing
+}) {
+  const router = useRouter()
+  const { theme } = useTheme()
+
+  const { title, description, saved } = editor
+
+  const completed: InputAffordanceKind[] = [
+    ...(title !== null ? (['title'] as const) : []),
+    ...(description !== null ? (['description'] as const) : []),
+  ]
+
+  // Only the tile whose edit is actually in flight is busy — not both, and
+  // not the ones that only navigate, which never enter a saving state on
+  // this screen at all.
+  const busy: InputAffordanceKind[] =
+    editor.saving && editor.open !== null ? [editor.open.kind] : []
+
+  function handlePress(kind: InputAffordanceKind): void {
+    if (kind === 'title' || kind === 'description') {
+      editor.openEditor(kind)
+      return
+    }
+    // `camera.tsx` and `voice.tsx` both read `recordId` off the route params
+    // this way (`useLocalSearchParams<{ recordId?: string }>()`), and both
+    // are what actually attach the file — nothing here writes media.
+    router.push({
+      pathname: kind === 'photo' ? '/camera' : '/voice',
+      params: { recordId: record.id },
+    })
+  }
+
   return (
     <View style={{ gap: spacing.sm }}>
-      <Type variant="label" dim>
-        ADD TO THIS POINT
-      </Type>
-
-      <View testID="capture-affordances" style={{ flexDirection: 'row', gap: spacing.sm }}>
-        {RECORDED_AFFORDANCES.map((kind) => {
-          if (kind === 'location') {
-            return (
-              <AffordanceTile
-                key={kind}
-                kind={kind}
-                state="done"
-                spokenLabel="Location, already recorded"
-              />
-            )
+      {/*
+        Doctrine rule 7, and the pre-commitment that rule's own row in
+        `docs/ui-doctrine.md` made: the recorded state's help exemption held
+        only for as long as everything it asked for explained itself, and
+        that row named "attaching media" in advance as the change that would
+        end it. This branch made that change, so this is the affordance it
+        said would come with it. What a `?` has to say here that the tiles
+        cannot: that an attachment belongs to this point rather than to the
+        trip, and — the one thing she cannot see anywhere — that removing an
+        attachment does not give the storage back.
+      */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+        <Type variant="label" dim>
+          ADD TO THIS POINT
+        </Type>
+        <HelpAffordance
+          testID="capture-media-help"
+          title="Photos and voice notes"
+          // Plain language for the process (doctrine rule 6). No "purge",
+          // no "soft delete", no "orphan" — and no promise of a clean-up
+          // this application cannot perform.
+          body={
+            'A photo or a voice note belongs to this one point, not to the trip. It carries ' +
+            'where and when it was taken, and it travels with the point wherever the point is ' +
+            'filed later.\n\n' +
+            'Photo and Voice open the camera and the recorder. What you take comes back here as ' +
+            'a small tile below these four buttons, and tapping a voice tile plays it back.\n\n' +
+            'Removing a tile takes the attachment off this point, and asks first, because ' +
+            'nothing here can put it back. The file itself stays on the device: this app has ' +
+            'nothing that deletes it, so removing an attachment does not free up any space.'
           }
-          if (kind === 'title') {
-            return (
-              <AffordanceTile
-                key={kind}
-                kind={kind}
-                state={title === null ? 'available' : 'done'}
-                spokenLabel={title === null ? 'Add a title' : 'Change the title'}
-                onPress={() => {
-                  setDraft(title ?? '')
-                  setEditing(true)
-                }}
-              />
-            )
-          }
-          return (
-            <AffordanceTile
-              key={kind}
-              kind={kind}
-              state="unavailable"
-              spokenLabel={`${AFFORDANCE_FACE[kind].label} — not available until media capture is built`}
-            />
-          )
-        })}
+        />
       </View>
 
-      <Type variant="small" dim testID="capture-media-pending">
-        Voice notes and photos arrive with media capture. The point is a complete record without
-        them.
-      </Type>
+      <InputAffordanceRow
+        testID="capture-affordances"
+        onPress={handlePress}
+        completed={completed}
+        counts={{ photo: media.photoCount, voice: media.voiceCount }}
+        busy={busy}
+      />
+
+      {/*
+        THE SAVE CONFIRMATION — directly under the tile she pressed, which is
+        where her eye returns the instant the editor goes away. Not further
+        down beside the stored value: that is past the media strip, and being
+        below the strip is the exact reason she never saw the value and asked
+        whether anything had been saved at all.
+
+        AND THE EDITOR CLOSING IS NOT THIS. A cancel closes it identically, so
+        the surface going away says nothing about whether anything was
+        written. This sentence and the tile's own `Title ✓` are what say it,
+        and they are built from what `renameRecord` returned.
+
+        `accessibilityLiveRegion` is the screen-reader half of the same
+        moment. The editor carries its own spoken description, so a reader is
+        focused inside a surface that is about to be removed from the tree;
+        without a live region the removal is silent and the reader lands back
+        on the tiles with no statement that anything happened.
+      */}
+      {saved === null ? null : (
+        <Type variant="body" testID="capture-save-confirmation" accessibilityLiveRegion="polite">
+          {savedSentence(saved.kind, saved.value)}
+        </Type>
+      )}
+
+      <MediaStrip
+        testID="capture-media-strip"
+        items={media.items}
+        onPress={media.onTilePress}
+        onRemove={media.onRequestRemoval}
+        pendingRemovalId={media.pendingRemovalId}
+      />
+
+      {media.removalLabel === null ? null : (
+        <View
+          style={{
+            gap: spacing.sm,
+            padding: spacing.md,
+            borderRadius: radii.md,
+            borderWidth: 2,
+            // Amber, the same warn-never-block colour the duplicate-pin
+            // guard uses above — this is a question, not a refusal.
+            borderColor: theme.colors.statusFair,
+            backgroundColor: theme.colors.surfaceRaised,
+          }}
+        >
+          {/*
+            NAMED, not "this photo". Ten photos in a horizontal strip of
+            near-identical 64dp thumbnails, roughly five of them visible, the
+            strip back at offset 0 after every refresh, and no undo anywhere
+            in the app: "Remove this photo?" leaves her to guess which one is
+            about to go. The ordinal is the strip's own
+            (`mediaStripLabel`), and the tile it names is marked in the strip
+            at the same time, so the question and its subject are visibly one
+            thing.
+
+            And NO promise of a purge. There is no purge — no settings
+            route, no reconciliation, nothing anywhere in this application
+            that deletes a media file (see `docs/media-storage.md` §5). The
+            duplicate-pin warning above this panel is careful in exactly the
+            same way, and for the same reason: it stopped offering a deletion
+            the app cannot perform. "The file stays on the device" is the
+            whole of what is true, and it stops there.
+          */}
+          <Type variant="body">
+            {`Remove ${media.removalLabel.toLowerCase()}? It comes off this point. The file stays on the device.`}
+          </Type>
+          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+            {/*
+              `danger` here, `secondary` below (doctrine rule 9): the action
+              that cannot be undone from this screen and the one that costs
+              nothing must not read identically in glare. Two channels, not
+              one — a label difference alone ("REMOVE" vs. "KEEP IT") is
+              exactly what a colour-blind reader or a bright paddock erodes
+              first.
+            */}
+            <Button
+              testID="media-remove-confirm"
+              label={media.removing ? 'REMOVING…' : 'REMOVE'}
+              spokenLabel={`Remove ${media.removalLabel.toLowerCase()}`}
+              kind="danger"
+              disabled={media.removing}
+              onPress={media.onConfirmRemoval}
+            />
+            <Button
+              testID="media-remove-cancel"
+              label="KEEP IT"
+              spokenLabel="Keep this attachment"
+              kind="secondary"
+              disabled={media.removing}
+              onPress={media.onCancelRemoval}
+            />
+          </View>
+        </View>
+      )}
+
+      {media.removeError === null ? null : (
+        <Type variant="small" testID="media-remove-error">
+          {media.removeError}
+        </Type>
+      )}
 
       {title === null ? null : (
         <Type variant="body" testID="capture-title-value">
@@ -1316,43 +2011,396 @@ function RecordedAffordances({
         </Type>
       )}
 
-      {editing ? (
-        <View style={{ gap: spacing.sm }}>
-          <TextInput
-            testID="capture-title-input"
-            accessibilityLabel="A name for this point"
-            value={draft}
-            onChangeText={setDraft}
-            placeholder="A name for this point"
-            placeholderTextColor={theme.colors.textDim}
-            autoFocus
-            style={{
-              minHeight: touch.min,
-              borderRadius: radii.md,
-              borderWidth: 2,
-              borderColor: theme.colors.border,
-              backgroundColor: theme.colors.surfaceRaised,
-              color: theme.colors.textPrimary,
-              paddingHorizontal: spacing.md,
-            }}
-          />
-          <Button
-            testID="capture-title-save"
-            label={saving ? 'SAVING…' : 'SAVE NAME'}
-            spokenLabel="Save this name onto the point"
-            disabled={saving}
-            onPress={() => {
-              void save()
-            }}
-          />
-        </View>
-      ) : null}
-
-      {error === null ? null : (
-        <Type variant="small" testID="capture-title-error">
-          {error}
+      {description === null ? null : (
+        <Type variant="body" testID="capture-description-value">
+          {description}
         </Type>
       )}
+
+      {/*
+        AND NO EDITOR HERE ANY MORE — it is rendered by `RecordedState`, as a
+        SIBLING of `capture-recorded-scroll` rather than a descendant of it.
+
+        That is the fix for the first tap on SAVE. A `ScrollView` ancestor
+        takes the responder for the first touch on a control while a
+        dismissible soft keyboard is up (`ScrollView.js`,
+        `_handleStartShouldSetResponderCapture`), blurring the input instead
+        of letting the press through — which was the reported "I try to tap
+        save but it just closes the keyboard as the focus changes, then i hit
+        save again". Putting the editor back into this column would
+        reintroduce that fault, and no prop on the scroll view can be trusted
+        to keep holding it off once the editor is a descendant again.
+      */}
     </View>
   )
 }
+
+/** The confirmation sentence for a save that landed. */
+function savedSentence(kind: 'title' | 'description', value: string | null): string {
+  const subject = kind === 'title' ? 'Name' : 'Notes'
+  // An empty box is a deliberate clearing, not a save of nothing — the same
+  // distinction `renameRecord` models as `null` rather than `''` — and it has
+  // to read as one, or she is told "Notes saved:" followed by a blank.
+  return value === null ? `${subject} cleared` : `${subject} saved: ${value}`
+}
+
+/**
+ * What a screen reader hears when the editor opens (doctrine rule 16).
+ *
+ * The editor is a new surface, so it carries its own description rather than
+ * borrowing the capture screen's — `describeRecordedScreen` above describes
+ * the point, its attachments and the ways onward, none of which is reachable
+ * while this is up.
+ *
+ * A `Modal` used to make that true on its own, by being a separate Android
+ * window that a reader does not read behind. An overlay is in the same window
+ * as the column, so the other half is done by hand: `RecordedState` withdraws
+ * the screen's own description while this one exists, and the recorded column
+ * carries `importantForAccessibility="no-hide-descendants"`. All three move
+ * together or a reader hears two surfaces at once.
+ *
+ * State-dependent for the same reason that one is: a save in flight and a
+ * save that failed are the two moments where the surface and the sentence
+ * would otherwise disagree, and the failure text is the one thing on this
+ * surface a reader cannot get to by traversing controls.
+ */
+function describeEditor(kind: 'title' | 'description', saving: boolean, error: string | null) {
+  const heading =
+    kind === 'title'
+      ? 'Naming this point. A box for the name, a control that saves it onto the point, and one that closes without saving.'
+      : 'Notes for this point. A box for the notes, a control that saves them onto the point, and one that closes without saving.'
+  const state = saving ? ' Saving.' : ''
+  const failure = error === null ? '' : ` ${error}`
+  return `${heading}${state}${failure}`
+}
+
+/**
+ * The title/notes editor, as a surface of its own rather than a box appended
+ * to the bottom of the recorded state's column.
+ *
+ * **This is a field-reported blocker, not a preference.** Inline, the box
+ * rendered after everything else in that column — the tiles, the strip, the
+ * saved values — which is exactly the strip of screen the Android soft
+ * keyboard occupies. She typed blind. A surface of its own takes the input
+ * out of that column entirely, so the keyboard rises into empty space beneath
+ * it rather than over it.
+ *
+ * **AN OVERLAY, AND NOT A `Modal`, AND THAT IS THE KEYBOARD FIX.** The modal
+ * itself was judged right — "modal works well" — and nothing about the shape
+ * of this surface has changed. What changed is which Android window it lives
+ * in, because two faults came out of that one fact and one of them survived
+ * two attempts at it.
+ *
+ * The mechanism, read out of RN 0.86.3 rather than guessed at. It is NOT that
+ * a dialog fails to inherit `MainActivity`'s `android:windowSoftInputMode`:
+ * `ReactModalHostView.kt` sets `SOFT_INPUT_ADJUST_RESIZE` on the dialog's
+ * window itself, so the resize behaviour is the same either way. It is the
+ * focus flag. The dialog's window is created with `FLAG_NOT_FOCUSABLE` set,
+ * and that flag is cleared only AFTER `newDialog.show()` returns:
+ *
+ *     window.setFlags(FLAG_NOT_FOCUSABLE, FLAG_NOT_FOCUSABLE)   // on create
+ *     ...
+ *     newDialog.show()
+ *     updateSystemAppearance()
+ *     window.clearFlags(FLAG_NOT_FOCUSABLE)                     // after show
+ *
+ * A window carrying `FLAG_NOT_FOCUSABLE` cannot hold IME focus, and clearing
+ * the flag does not grant it synchronously — it schedules a relayout, and the
+ * window manager grants input focus across a process boundary some frames
+ * later. `InputMethodManager.showSoftInput` on a window that does not yet
+ * hold IME focus is dropped, silently and successfully. `onShow` is dispatched
+ * from the dialog's own `OnShowListener`, which `Dialog.show()` posts, and a
+ * `requestAnimationFrame` after it is one frame later; both can land inside
+ * that window of time. That is why the cursor appeared with no keyboard, why
+ * the two previous attempts each half-worked, and why the title behaved
+ * differently from the notes on the same build — it was a race, not a
+ * difference between single-line and multiline.
+ *
+ * In THIS Activity's window there is no grant to wait for: the window already
+ * holds input focus before the editor renders into it. So the plain, ordinary
+ * mechanism works, and that is what is used below.
+ *
+ * Six things about the way it is built are load-bearing:
+ *
+ * - **It is rendered outside `capture-recorded-scroll`**, by `RecordedState`
+ *   rather than by `RecordedAffordances`. That is the whole of the fix for
+ *   the first tap on SAVE — see the comments at both ends. Moving the editor
+ *   into this window without moving it out of that scroll view would have
+ *   kept the two-tap fault and made it harder to see.
+ *
+ * - **No `SafeAreaView` of its own, deliberately.** It needed one as a
+ *   `Modal`, whose window sits outside the `SafeAreaView` `_layout.tsx` wraps
+ *   every route in. An overlay is a child of `Screen`, inside that same safe
+ *   area, so a second one would inset the scrim twice. One cosmetic
+ *   consequence, recorded rather than worked around: a transparent `Modal`
+ *   dimmed the display edge to edge, and this dims the safe area only, so the
+ *   status- and navigation-bar strips stay undimmed. Nothing of the record is
+ *   behind those strips — `_layout.tsx`'s `SafeAreaView` paints them
+ *   `surface` — so nothing shows through and nothing there is pressable;
+ *   covering them as well would mean hoisting this above that `SafeAreaView`,
+ *   which is a change to every route and belongs to the design pass (#11),
+ *   not to a keyboard fix.
+ *
+ * - **`autoFocus`, which is now the simplest thing that works.** Reported:
+ *   "when the screen opens, the keyboard should already be open and the text
+ *   box focused". In RN 0.86.3 `autoFocus` is a native prop and not a JS
+ *   effect: `ReactEditText.onAttachedToWindow` calls
+ *   `requestFocusProgrammatically()`, which is `requestFocus()` followed by an
+ *   explicit `showSoftKeyboard()` — `inputMethodManager.showSoftInput(this, 0)`
+ *   — rather than a focus that hopes to imply a keyboard. Attached into the
+ *   Activity's already-focused window, that is exactly the right call at
+ *   exactly the right moment. There is no imperative `focus()` here and no
+ *   retry, because there is nothing left to retry against.
+ *
+ * - **Centred in the space the keyboard leaves, not pinned to the top.** The
+ *   first shipped version anchored the card to the top, on the reasoning that
+ *   a keyboard rising from the bottom could then never reach it. That was
+ *   reported back: "it's a pain to shift from bottom of screen to top". She is
+ *   holding the phone one-handed over a survey point, and the journey from the
+ *   keys at the bottom to a box at the very top and back is the complaint. So
+ *   the card is centred inside `KeyboardAvoidingView`'s content box, which is
+ *   the region *above* the keyboard: with `behavior="padding"` that view
+ *   carries a `paddingBottom` equal to the keyboard's height
+ *   (`KeyboardAvoidingView.js`, the `'padding'` case), so the flexed child
+ *   below it measures only the visible band. Where Android has resized the
+ *   window instead — `adjustResize`, which `AndroidManifest.xml` sets on
+ *   `MainActivity` and which now genuinely applies to this surface — that
+ *   padding computes to zero (`frame.y + frame.height - keyboardY`, floored at
+ *   0) and the centring lands in the same band anyway. Either way the input
+ *   and its two controls travel together as one block; they are one flex
+ *   child, never split across the fold.
+ *
+ * - **A bounded box.** `field.control` caps the height of the notes box, so a
+ *   long note scrolls inside it rather than growing the card downwards into
+ *   the keyboard — the inline layout's failure reproduced inside the fix.
+ *
+ * - **It claims the touch, so nothing behind it is pressable.** A `Modal` gave
+ *   that for free by being a window. `onStartShouldSetResponder` on the scrim
+ *   is the equivalent here: it is the BUBBLE phase, so the input and the two
+ *   buttons inside still take their own touches first (only a `*Capture`
+ *   handler would steal from them), and anything that reaches the scrim stops
+ *   there rather than falling through to the column underneath.
+ *
+ * The scrim is what answers "the record's content should not be competing for
+ * attention behind it": the same `overlay` token, at the same opacity, that
+ * `HelpAffordance` already dims this application's screens with.
+ */
+function FieldEditor({
+  kind,
+  draft,
+  saving,
+  error,
+  onChangeDraft,
+  onSave,
+  onCancel,
+}: {
+  kind: 'title' | 'description'
+  draft: string
+  saving: boolean
+  error: string | null
+  onChangeDraft: (text: string) => void
+  onSave: () => void
+  onCancel: () => void
+}) {
+  const { theme } = useTheme()
+  const label = kind === 'title' ? 'A name for this point' : 'Notes about this point'
+
+  /**
+   * The Android back button, which a `Modal` used to give for free through
+   * `onRequestClose`. An overlay is not a window, so nothing intercepts BACK
+   * unless this does — and without it BACK would pop the route, taking her off
+   * the recorded point entirely while an editor was open over it.
+   *
+   * It returns `true` in both branches, which is the same shape `Modal` had:
+   * BACK is consumed for as long as this surface is up, whether or not the
+   * press is allowed to close it.
+   *
+   * The guard is the same one CANCEL carries, and for the same reason —
+   * closing the editor takes the failure message with it, so a dismissal
+   * accepted while `renameRecord` is still out could land a failure on a
+   * surface that no longer exists. It is a guard and not a disabled control:
+   * doctrine rule 3 is about something that LOOKS pressable and does nothing,
+   * and a hardware key renders nothing to look at.
+   *
+   * `saving` and `onCancel` are in the dependency list rather than read
+   * through a ref: a listener registered while `saving` was `false` would
+   * otherwise go on believing that after the write started.
+   */
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!saving) onCancel()
+      return true
+    })
+    return () => {
+      subscription.remove()
+    }
+  }, [saving, onCancel])
+
+  return (
+    /*
+      THE SCRIM, AND THE SURFACE BOUNDARY.
+
+      `StyleSheet.absoluteFill` rather than `flex: 1`: this is a sibling of the
+      recorded column, not a replacement for it, so it has to be lifted out of
+      that column's flow and laid over the top of it.
+
+      `onStartShouldSetResponder` is what makes it a surface rather than a
+      tint. Returning `true` claims any touch that reaches the scrim, so a tap
+      on the dimmed column below does nothing at all — React Native does not
+      re-hit-test siblings underneath once a node has been hit, and a node that
+      claims nothing would simply drop the touch, which is the same outcome by
+      accident rather than on purpose. Stating it is what makes it assertable.
+      It is the bubble phase, so the box and the two buttons inside claim their
+      own touches first.
+
+      `accessibilityViewIsModal` is the iOS half of hiding what is behind, and
+      is honestly iOS-only here — it is in `BaseViewConfig.ios.js`, absent from
+      `BaseViewConfig.android.js`, and unimplemented anywhere under
+      `ReactAndroid/` in RN 0.86.3. The Android half is
+      `importantForAccessibility="no-hide-descendants"` on the scroll view, plus
+      `RecordedState` withdrawing the screen's own spoken description; both are
+      commented where they are.
+    */
+    <View
+      testID="capture-editor-overlay"
+      accessibilityViewIsModal
+      onStartShouldSetResponder={() => true}
+      style={[StyleSheet.absoluteFill, { backgroundColor: `${theme.colors.overlay}CC` }]}
+    >
+      <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>
+        {/*
+          `flex: 1` so this fills whatever height `KeyboardAvoidingView`
+          leaves once the keyboard is accounted for, and `justifyContent:
+          'center'` so the card sits in the middle of it rather than at
+          either edge. Both are required: without the flex there is no box
+          to centre in, and the card collapses back to the top.
+        */}
+        <View style={{ flex: 1, justifyContent: 'center', padding: spacing.lg }}>
+          <View
+            testID="capture-editor"
+            style={{
+              gap: spacing.md,
+              padding: spacing.lg,
+              borderRadius: radii.xl,
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              backgroundColor: theme.colors.surfaceRaised,
+            }}
+          >
+            {/*
+                Doctrine rule 16, the same shape `Screen` uses for a route:
+                present for a screen reader, invisible and out of flow for
+                everyone else. `Screen` itself is not reused here — it is a
+                flex-grown, padded page container, and this is a card.
+              */}
+            <View
+              testID="capture-editor-spoken-description"
+              accessible
+              accessibilityRole="header"
+              accessibilityLabel={describeEditor(kind, saving, error)}
+              style={styles.spokenDescription}
+            />
+
+            <Type variant="heading">
+              {kind === 'title' ? 'Name this point' : 'Notes for this point'}
+            </Type>
+
+            {/*
+                `autoFocus`, AND IT IS THE WHOLE OF THE FOCUS MECHANISM — no
+                imperative `focus()`, no retry a frame later. Both of those
+                were attempts to beat a race that only existed because the
+                editor was in a dialog window that did not yet hold IME focus
+                (see the note on this component). In the Activity's own window
+                there is no race: `ReactEditText.onAttachedToWindow` calls
+                `requestFocusProgrammatically()`, which is `requestFocus()`
+                followed by an explicit `showSoftKeyboard()`, and the window it
+                attaches into already holds input focus.
+
+                Adding an imperative `focus()` back alongside this would be
+                worse than useless: the native focus event sets
+                `TextInputState.currentlyFocusedInputRef`, and `focusTextInput`
+                returns early for a field that is already the current one — so
+                the second call would be the no-op, not this.
+              */}
+            <TextInput
+              autoFocus
+              testID={kind === 'title' ? 'capture-title-input' : 'capture-description-input'}
+              accessibilityLabel={label}
+              value={draft}
+              onChangeText={onChangeDraft}
+              placeholder={label}
+              placeholderTextColor={theme.colors.textDim}
+              multiline={kind === 'description'}
+              style={{
+                minHeight: kind === 'description' ? field.control : touch.min,
+                // See the note on the component: bounded so a long note
+                // scrolls rather than growing the card into the keyboard.
+                maxHeight: field.control,
+                borderRadius: radii.md,
+                borderWidth: 2,
+                borderColor: theme.colors.border,
+                backgroundColor: theme.colors.surface,
+                color: theme.colors.textPrimary,
+                paddingHorizontal: spacing.md,
+              }}
+            />
+
+            {/*
+                THE FAILURE, ON THE EDITING SURFACE. It used to render at the
+                foot of the recorded column; left there it would be behind the
+                scrim, unreadable, while the surface she is actually looking
+                at said nothing at all. A failed save keeps the editor open
+                with her text still in it, so this is both where she is
+                looking and where the retry is.
+              */}
+            {error === null ? null : (
+              <Type variant="small" testID={`capture-${kind}-error`}>
+                {error}
+              </Type>
+            )}
+
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <Button
+                testID={kind === 'title' ? 'capture-title-save' : 'capture-description-save'}
+                label={saving ? 'SAVING…' : kind === 'title' ? 'SAVE NAME' : 'SAVE NOTES'}
+                spokenLabel={
+                  kind === 'title'
+                    ? 'Save this name onto the point'
+                    : 'Save these notes onto the point'
+                }
+                disabled={saving}
+                onPress={onSave}
+              />
+              {/*
+                  Genuinely disabled mid-write, not inert (doctrine rule 3).
+                  It is disabled at all — rather than left live — because
+                  closing the editor takes the failure message with it, and a
+                  cancel accepted while the write is still out could land that
+                  failure on a surface that no longer exists.
+                */}
+              <Button
+                testID="capture-editor-cancel"
+                label="CANCEL"
+                spokenLabel="Close without saving"
+                kind="secondary"
+                disabled={saving}
+                onPress={onCancel}
+              />
+            </View>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  // Mirrors `Screen`'s own hidden description node: 1x1 rather than 0x0
+  // because some accessibility services skip zero-size nodes entirely.
+  spokenDescription: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+  },
+})

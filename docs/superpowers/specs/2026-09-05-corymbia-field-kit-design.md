@@ -1043,9 +1043,91 @@ close-spaced pin.
 
 ### 9.6 After the pin
 
-A saved confirmation naming the activity, then the four standard affordances: location
-(already complete), title, voice note, photo. Identical icons, identical order, everywhere
-in the application.
+A saved confirmation, then the standard affordances: title, notes, voice note, photo.
+Identical icons, identical order, everywhere in the application.
+
+**Location is not one of them here, because it is what this screen just did.** An earlier
+draft of this section listed location as a fifth affordance rendered already-complete. On the
+capture screen that is a chip that does nothing, in a row whose whole job is to teach that
+these are things you tap — and doctrine rule 5 is about one signature per *input kind*, which
+a position already taken is not.
+
+#### 9.6.1 Where a record starts decides whether location is offered
+
+A record does not always begin with a pin. She may start from a voice memo, a photo, or a
+note, and those want coordinates just as much — they simply must not stop to ask for them.
+
+- **Started from the capture screen.** The fix is **deliberate** (§8.2): held, averaged,
+  accuracy-gated. Location is not offered, because it is done.
+- **Started from a note, a voice memo or a photo.** The record saves immediately with an
+  **ambient** fix from the cached position (§8.2), stamped with its age, and never blocks on
+  the GPS. **Location then appears as an affordance**, and its job is to upgrade that ambient
+  fix to a deliberate one: it opens the dial and runs a real hold, for when she decides this
+  spot is worth the best accuracy the device can reach.
+- **No position available at all.** The fix is **none**. Location is still offered, and it is
+  the way out.
+
+Everything saves linked to whatever coordinates exist and to the currently active project and
+activity if there is one — the context activity of §8.3, captured automatically. With none
+active, it lands in the Inbox on its capture number alone (§8.4), which is what the Inbox is
+for.
+
+#### 9.6.2 An upgrade is not a refinement, and the guard now tells them apart
+
+`refineRecordFix` keeps the better fix. Its guard ranks the incoming fix's class against the
+stored one first — deliberate outranks ambient outranks none — and only when the two ranks
+tie does it fall through to comparing `accuracy_m` (§9.2.1). A strictly higher-ranked incoming
+fix always applies; a strictly lower-ranked one never does; whatever the two accuracy figures
+say.
+
+Class first, because the two accuracy figures are answers to different questions and are not
+otherwise comparable. A deliberate fix's `accuracy_m` is a held, averaged, accuracy-gated
+measurement (§8.2). An ambient fix's is whatever position was already cached — it never waited
+for anything, and it carries its own age (§9.6.1) precisely because it may no longer be where
+she is standing: a ±38 m reading from four minutes ago could be three hundred metres up the
+track, while a ±50 m deliberate fix is, at worst, still at the point she stood on to take it.
+A deliberate fix is therefore never worse than an ambient one in any sense a survey record
+cares about, whatever the numbers claim — and treating the two as comparable is exactly the
+trap this section used to describe: a cached ambient fix reporting an optimistic ±3 m could
+refuse an honest deliberate hold reaching ±4 m, leaving the record stamped ambient after she
+deliberately stood still to fix it. The reverse direction is the more dangerous one and is
+refused unconditionally, even when the ambient figure is the smaller of the two: a fresh
+ambient reading overwriting a survey-grade fix would put an unwaited-for coordinate into a
+biodiversity dataset under a chip that still claims deliberate, and would silently discard the
+fact that she deliberately positioned there — itself the evidence §8.2 exists to protect.
+
+The rank the guard reads is the same rank the fix classes are enforced by everywhere else —
+the three-places rule applies here too: the `Fix` discriminated union (`packages/data`),
+migration 003's CHECK constraints, and `ContextStamp` in `@corymbia/ui`. This is not a fourth,
+independent notion of "better" invented for this guard; it is the same three-way distinction
+those three places already agree a fix carries.
+
+One direction this leaves unreachable through `refineRecordFix`: a deliberate fix is never
+replaced by an ambient one, so the column-clearing that would fire for that transition
+(nulling the averaging evidence, writing an age) has no caller. The columns themselves are
+still written as a set on every accepted refinement — a record must never be left wearing half
+its old position and half its new one — but that particular direction of the clearing is dead
+code by design, not an oversight.
+
+**The applied event's own wording has to split by class too, for the same reason the guard
+does.** §9.6's `fix refined from … to …` prefix is pinned copy, and its default filling —
+the two `accuracy_m` figures, before then after — is right for a same-class refinement,
+where the two numbers really are answers to the same question. It is wrong for exactly the
+case this section exists for: an ambient fix upgraded to a deliberate one. `fix refined from
+±3.0 m to ±4.0 m` sets the two figures side by side as though smaller-is-better were being
+judged between them, which is the one reading this whole section says must never happen —
+and to an auditor who was not told a class changed, it reads as a degradation, not the
+upgrade it actually was. So when the applied refinement crosses classes and the record being
+replaced carries a real accuracy (an ambient fix's — a `'none'` record has none, so refining
+*from* `'none'` keeps the plain wording; there is no pair of numbers there to misread as a
+comparison), the class transition is named first and the accuracy pair demoted to a
+parenthetical:
+
+> `fix refined from ambient to deliberate (±3.0 m to ±4.0 m)`
+
+Pinned here as copy, the same way §9.6's discarded-run sentence is: the class names are read
+off the stored and incoming fix quality, not hardcoded, so a fourth fix class does not
+silently leave this sentence describing a transition that never happened.
 
 ---
 
@@ -1122,8 +1204,25 @@ instructions and data aloud.
 
 ### 12.1 Storage
 
-Files live in **app-owned storage** under a project directory, named by record UUID plus an
-index.
+Files live in **app-owned storage** in one flat media directory, named by the media row's own
+id.
+
+**Flat, not under a project directory.** An earlier draft put files under the project they
+belonged to. That cannot hold once records are refilable: filing an Inbox record, or moving
+one between activities, would have to move its files too, and a half-finished move on a dying
+battery leaves rows pointing at files that are no longer there. It is the same failure §12.1
+already rejects below for naming files by title — a stored path that depends on mutable
+metadata — arrived at one level up. Project structure is applied at export time, where
+human-readable naming already happens.
+
+**Named by the media id, not by record plus an index.** An earlier draft used the record UUID
+and an ordinal. The record UUID is stable, but the *index* is not: removing the first of three
+photos, or reordering them, moves every index after it — and with it every filename, which is
+the third time the same mutable-metadata-in-a-path failure appears in this section. Worse, a
+soft-deleted attachment keeps its file until purge, so a reused index would collide with bytes
+that are still on disk. The media row's id is minted once and never changes, which makes the
+name unique for the life of the database and the ordering free to change without touching a
+file. The record it belongs to is a column, which is where a mutable relationship belongs.
 
 **Not a public shared folder.** Scoped storage on Android 10+ prevents free writes to
 arbitrary public directories, and anything placed there is swept into the gallery and cloud

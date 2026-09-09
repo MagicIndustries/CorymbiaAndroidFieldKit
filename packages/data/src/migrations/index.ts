@@ -3,6 +3,13 @@ import { migration001 } from './001-projects'
 import { migration002 } from './002-devices'
 import { migration003 } from './003-records'
 import { migration004 } from './004-settings'
+import { migration005 } from './005-media'
 
 /** Ordered. Never reorder or edit a shipped migration — add a new one. */
-export const migrations: Migration[] = [migration001, migration002, migration003, migration004]
+export const migrations: Migration[] = [
+  migration001,
+  migration002,
+  migration003,
+  migration004,
+  migration005,
+]

@@ -175,6 +175,41 @@ export const field = {
    * short of what the device can do.
    */
   dialSettledGap: 7,
+  /**
+   * The side of a square media tile in `MediaStrip`, in dp — the ergonomic
+   * question it answers is "how big does an attached photo's thumbnail need
+   * to be to actually be *recognisable* as that photo, at arm's length,
+   * while staying a control she can hit one-handed and gloved without
+   * looking closely." `touch.comfortable` (56dp) covers the second half of
+   * that alone — it is where `InputAffordanceRow`'s glyph-and-label tiles
+   * stop, and a bare label needs no more — but a photo shrunk to 56dp reads
+   * as a coloured square, not a photo, which defeats the reason `MediaStrip`
+   * shows a thumbnail at all rather than a filename. Sized above
+   * `touch.comfortable`, short of `field.control` (72dp, reserved for the
+   * primary capture boxes) so a row of these never reads as more capture
+   * controls.
+   */
+  mediaTile: 64,
+  /**
+   * `MediaStrip`'s per-tile remove control, painted size only, in dp — the
+   * ergonomic question it answers is "how big can the visible circle be and
+   * still read as a badge on the corner of a photograph, rather than a lid
+   * dropped over most of it." Deliberately *not* `touch.min` (48dp): a 48dp
+   * opaque circle in the corner of a 64dp `mediaTile` covers 56% of the
+   * thumbnail (`touch.min` squared over `mediaTile` squared) and leaves only
+   * a thin L-shaped sliver of the photo visible — which is the exact defect
+   * `mediaTile`'s own doc comment describes a 56dp tile causing, reintroduced
+   * by occlusion instead of by shrinking the tile.
+   *
+   * `touch.min` is not dropped, only separated from what gets painted: the
+   * control's `Pressable` carries a `hitSlop` (`spacing.md`, 12dp per edge)
+   * so the *responder* area — what a gloved thumb actually has to hit — is
+   * `mediaTileRemove + 2 * spacing.md` = 24 + 24 = 48dp in both axes, meeting
+   * `touch.min` exactly. `hitSlop` expands hit-testing only (React Native's
+   * `normalizeRect`, `Libraries/StyleSheet/Rect.js`); it paints nothing, so
+   * the thumbnail underneath is unaffected by it.
+   */
+  mediaTileRemove: 24,
 } as const
 
 /**

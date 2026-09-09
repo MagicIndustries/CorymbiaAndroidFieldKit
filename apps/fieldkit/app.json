@@ -16,14 +16,32 @@
         "backgroundImage": "./assets/adaptive-icon-background.png"
       },
       "predictiveBackGestureEnabled": false,
-      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "CAMERA",
+        "RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-router",
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Corymbia Field Kit uses the microphone to attach voice notes to a survey record."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Corymbia Field Kit uses the camera to attach photos to a survey record.",
+          "barcodeScannerEnabled": false
+        }
+      ]
     ]
   }
 }

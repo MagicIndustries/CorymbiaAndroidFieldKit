@@ -45,6 +45,15 @@ export type {
 export { appendEvent, listEvents } from './repositories/events'
 export type { EventAction, EventEntry } from './repositories/events'
 
+export {
+  attachMedia,
+  listMedia,
+  softDeleteMedia,
+  newMediaId,
+  AttachmentPersistError,
+} from './repositories/media'
+export type { Attachment } from './repositories/media'
+
 export { readSettings, writeSetting, DEFAULT_SETTINGS } from './repositories/settings'
 export type {
   Settings,

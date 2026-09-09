@@ -1,0 +1,21 @@
+{
+  "name": "@corymbia/media",
+  "version": "0.0.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "jest",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "expo-file-system": "~57.0.6"
+  },
+  "devDependencies": {
+    "expo-file-system": "~57.0.6",
+    "jest-expo": "~57.0.0",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  }
+}

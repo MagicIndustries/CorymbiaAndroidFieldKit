@@ -9,11 +9,13 @@ import {
   ContextStamp,
   HelpAffordance,
   InputAffordanceRow,
+  MediaStrip,
   NameChip,
   ProjectName,
   Type,
   useLayout,
   useTheme,
+  type MediaStripItem,
 } from '@corymbia/ui'
 import { CorymbiaMark } from '@corymbia/brand'
 
@@ -32,6 +34,35 @@ const CHIP_NAME = 'Yarra Flats Riparian Restoration — North Reach Stage 2'
 // Narrow enough to force NameChip to truncate; wide enough that the clipped
 // result is still legible as "still recognisably a name".
 const CHIP_CONSTRAINED_WIDTH = 160
+
+// `MediaStrip` sample data. These `file:///` URIs are not real files, the
+// same fictional shape `MediaStrip.test.tsx` uses — this section exists to
+// prove out the strip's states and layout, not photo decoding. Whether a
+// photo actually *renders* on a device is exactly the thing Jest cannot see
+// (the `field.mediaTile` height trap this component's own comments describe),
+// so that question belongs to the hardware checklist, not this gallery.
+const MEDIA_PHOTOS: MediaStripItem[] = [
+  { id: 'gallery-photo-1', kind: 'photo', uri: 'file:///gallery-photo-1.jpg', durationMs: null },
+  { id: 'gallery-photo-2', kind: 'photo', uri: 'file:///gallery-photo-2.jpg', durationMs: null },
+  { id: 'gallery-photo-3', kind: 'photo', uri: 'file:///gallery-photo-3.jpg', durationMs: null },
+  { id: 'gallery-photo-4', kind: 'photo', uri: 'file:///gallery-photo-4.jpg', durationMs: null },
+]
+
+// A single voice note. There is nothing to look at — the tile's only legible
+// content is its length (see `VoiceGlyph`'s doc comment in `MediaStrip.tsx`
+// for why that is drawn as SVG, not an emoji `Text` node).
+const MEDIA_VOICE: MediaStripItem[] = [
+  { id: 'gallery-voice-1', kind: 'voice', uri: 'file:///gallery-voice-1.m4a', durationMs: 47000 },
+]
+
+// Mixed, in attachment order — the order this section renders them, not
+// grouped by kind — because that is the order a real record accumulates them
+// in and the strip never reorders what it is given.
+const MEDIA_MIXED: MediaStripItem[] = [
+  { id: 'gallery-photo-5', kind: 'photo', uri: 'file:///gallery-photo-5.jpg', durationMs: null },
+  { id: 'gallery-voice-2', kind: 'voice', uri: 'file:///gallery-voice-2.m4a', durationMs: 8200 },
+  { id: 'gallery-photo-6', kind: 'photo', uri: 'file:///gallery-photo-6.jpg', durationMs: null },
+]
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -121,8 +152,7 @@ export function GallerySections() {
 
         <Card>
           <Type variant="label" dim>
-            CHIP, CORRECT — MIDDLE TRUNCATION KEEPS THE SITE AND THE
-            DISTINGUISHING SUFFIX
+            CHIP, CORRECT — MIDDLE TRUNCATION KEEPS THE SITE AND THE DISTINGUISHING SUFFIX
           </Type>
           <View style={{ height: spacing.xs }} />
           <NameChip name={CHIP_NAME} maxWidth={CHIP_CONSTRAINED_WIDTH} />
@@ -130,8 +160,8 @@ export function GallerySections() {
           <View style={{ height: spacing.md }} />
 
           <Type variant="label" dim>
-            CHIP, FOR COMPARISON — TAIL TRUNCATION LOSES WHAT MAKES THIS
-            PROJECT DIFFERENT FROM ANY OTHER "YARRA FLATS…"
+            CHIP, FOR COMPARISON — TAIL TRUNCATION LOSES WHAT MAKES THIS PROJECT DIFFERENT FROM ANY
+            OTHER "YARRA FLATS…"
           </Type>
           <View style={{ height: spacing.xs }} />
           <View
@@ -162,11 +192,7 @@ export function GallerySections() {
             CHIP WITH A USER-SET SHORT LABEL — NO TRUNCATION NEEDED
           </Type>
           <View style={{ height: spacing.xs }} />
-          <NameChip
-            name={CHIP_NAME}
-            shortLabel="Yarra Nth 2"
-            maxWidth={CHIP_CONSTRAINED_WIDTH}
-          />
+          <NameChip name={CHIP_NAME} shortLabel="Yarra Nth 2" maxWidth={CHIP_CONSTRAINED_WIDTH} />
         </Card>
       </Section>
 
@@ -231,8 +257,95 @@ export function GallerySections() {
         />
       </Section>
 
-      <Section title="Input affordances — fixed order">
-        <InputAffordanceRow onPress={() => {}} completed={['title']} />
+      <Section title="Media strip — every state">
+        <View style={{ gap: spacing.md }}>
+          <View>
+            <Type variant="label" dim>
+              EMPTY — RENDERS NOTHING AT ALL
+            </Type>
+            <Type dim>
+              An unattached record shows no strip: no frame, no placeholder box, no "nothing here
+              yet". A frame around a void costs vertical space and says only that something she did
+              not do has not been done — so `MediaStrip` returns `null` rather than an empty
+              container, and the line below this text is genuinely blank, not a rendering gap.
+            </Type>
+            <MediaStrip items={[]} testID="gallery-media-empty" />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              PHOTOS ONLY — FOUR, SO THE STRIP SCROLLS RATHER THAN SHRINKING THE TILES
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <MediaStrip items={MEDIA_PHOTOS} onPress={() => {}} testID="gallery-media-photos" />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              A VOICE NOTE, SHOWN AS ITS LENGTH — THERE IS NOTHING ELSE TO SHOW
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <MediaStrip items={MEDIA_VOICE} onPress={() => {}} testID="gallery-media-voice" />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              MIXED — PHOTOS AND A VOICE NOTE, IN THE ORDER THEY WERE ATTACHED
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <MediaStrip items={MEDIA_MIXED} onPress={() => {}} testID="gallery-media-mixed" />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              WITH REMOVAL OFFERED — `onRemove` GIVEN, SO EVERY TILE CARRIES ITS ✕
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <MediaStrip
+              items={MEDIA_MIXED}
+              onPress={() => {}}
+              onRemove={() => {}}
+              testID="gallery-media-removable"
+            />
+          </View>
+        </View>
+      </Section>
+
+      <Section title="Input affordances — fixed order, counts, and a busy tile">
+        <View style={{ gap: spacing.md }}>
+          <View>
+            <Type variant="label" dim>
+              A TITLE ALREADY WRITTEN, NOTHING ELSE ATTACHED YET
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <InputAffordanceRow onPress={() => {}} completed={['title']} />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              A KIND THAT CAN REPEAT SHOWS A COUNT, NOT JUST A CHECK — THREE PHOTOS, ONE VOICE NOTE
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <InputAffordanceRow
+              onPress={() => {}}
+              completed={['title']}
+              counts={{ photo: 3, voice: 1 }}
+            />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              A PHOTO MID-SAVE — GENUINELY DISABLED, NOT A TAP THAT SILENTLY DOES NOTHING
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <InputAffordanceRow
+              onPress={() => {}}
+              completed={['title']}
+              counts={{ photo: 2 }}
+              busy={['photo']}
+            />
+          </View>
+        </View>
       </Section>
 
       <Section title="Help">

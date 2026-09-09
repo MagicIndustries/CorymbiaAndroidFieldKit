@@ -96,4 +96,103 @@ describe('InputAffordanceRow', () => {
     expect(completeStyle.borderStyle).not.toEqual(incompleteStyle.borderStyle)
     expect(completeLabel).not.toEqual(incompleteLabel)
   })
+
+  it('shows how many of a kind are attached, not merely that some are', async () => {
+    // Two different, non-zero counts on two different kinds in the same
+    // render: a hardcoded `· 4` (or any other single literal) that ignores
+    // the `count` prop can satisfy at most one of these two assertions, so
+    // this bounds the same hardcoding risk finding 1's fix left open.
+    await wrap(<InputAffordanceRow onPress={() => {}} counts={{ photo: 4, voice: 2 }} />)
+    // `toHaveTextContent` defaults to an EXACT whole-string match in this
+    // RNTL version (see the comment atop ContextStamp.test.tsx), and these
+    // two labels are known exactly, so they are asserted exactly. The
+    // earlier `{ exact: false }` against a bare `'4'` made this a substring
+    // check for one digit — satisfied by `Photo · 44`, by `Photo · 4 of 7`,
+    // and by a label that dropped the kind name altogether. Nothing here
+    // needed that latitude: the format is this component's own.
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Photo · 4')
+    expect(screen.getByTestId('affordance-voice-label')).toHaveTextContent('Voice · 2')
+  })
+
+  it('says done without a number for a kind that can only happen once', async () => {
+    // A record has one title. "Title · 1" is noise.
+    await wrap(<InputAffordanceRow onPress={() => {}} completed={['title']} />)
+    // `toHaveTextContent` defaults to an EXACT whole-string match in this RNTL
+    // version (see the comment atop ContextStamp.test.tsx and the comment on
+    // the sibling assertion above). Without `{ exact: false }`, `.not.toHaveTextContent('1')`
+    // only fails if the label were the single character "1" — never true,
+    // since the label always carries the kind name — so it cannot catch the
+    // regression it is named for. `{ exact: false }` makes it a substring
+    // check, which does catch it.
+    expect(screen.getByTestId('affordance-title-label')).not.toHaveTextContent('1', {
+      exact: false,
+    })
+  })
+
+  it('refuses a second press while a kind is busy', async () => {
+    // Saving a photo writes a file and a row. A second tap during that write is
+    // a second attachment she did not ask for.
+    const onPress = jest.fn()
+    await wrap(<InputAffordanceRow onPress={onPress} busy={['photo']} />)
+    await fireEvent.press(screen.getByTestId('affordance-photo'))
+    expect(onPress).not.toHaveBeenCalled()
+  })
+
+  it('marks a busy affordance disabled to a screen reader, not merely dim', async () => {
+    await wrap(<InputAffordanceRow onPress={() => {}} busy={['photo']} />)
+    expect(screen.getByTestId('affordance-photo').props.accessibilityState.disabled).toBe(true)
+  })
+
+  it('leaves the other affordances live while one is busy', async () => {
+    const onPress = jest.fn()
+    await wrap(<InputAffordanceRow onPress={onPress} busy={['photo']} />)
+    await fireEvent.press(screen.getByTestId('affordance-voice'))
+    expect(onPress).toHaveBeenCalledWith('voice')
+  })
+
+  // Doctrine rule 9: `opacity: 0.6` is one visual channel, and the one most
+  // likely to wash out in field glare. Modelled on the colour-alone test
+  // above: the SAME tile ('photo') is rerendered from idle to busy, holding
+  // the kind constant, so the difference can't be blamed on comparing two
+  // different tiles.
+  it('gives busy a word, not merely a dimmer look', async () => {
+    const { rerender } = await wrap(<InputAffordanceRow onPress={() => {}} busy={[]} />)
+    const idleLabel = screen.getByTestId('affordance-photo-label').props.children
+
+    await rerender(
+      <ThemeProvider>
+        <InputAffordanceRow onPress={() => {}} busy={['photo']} />
+      </ThemeProvider>,
+    )
+    const busyLabel = screen.getByTestId('affordance-photo-label').props.children
+
+    expect(busyLabel).not.toEqual(idleLabel)
+    expect(screen.getByTestId('affordance-photo-label')).toHaveTextContent('Saving', {
+      exact: false,
+    })
+  })
+
+  it('tells a screen-reader user a save is in flight, not merely disabled', async () => {
+    await wrap(<InputAffordanceRow onPress={() => {}} busy={['photo']} />)
+    expect(screen.getByTestId('affordance-photo').props.accessibilityLabel).toEqual(
+      expect.stringContaining('saving'),
+    )
+  })
+
+  it('tells a screen-reader user how many of a kind are already attached', async () => {
+    await wrap(<InputAffordanceRow onPress={() => {}} counts={{ photo: 4, voice: 2 }} />)
+    // Two counts on two different kinds, which is the anti-hardcoding shape
+    // the visible-label sibling above has and this one did not: with only
+    // `{ photo: 3 }` and `stringContaining('3')`, a literal `, 3 attached`
+    // appended to every spoken name passed. Two different non-zero counts on
+    // two different kinds cannot both be satisfied by one literal, and the
+    // spoken names are known exactly, so they are asserted exactly rather
+    // than by containment.
+    expect(screen.getByTestId('affordance-photo').props.accessibilityLabel).toBe(
+      'Take a photo, 4 attached',
+    )
+    expect(screen.getByTestId('affordance-voice').props.accessibilityLabel).toBe(
+      'Record a voice note, 2 attached',
+    )
+  })
 })
