@@ -311,6 +311,37 @@ type MockStatus =
   | { state: 'failed'; error: Error; applied: string[] }
 let mockStatus: MockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
 
+/**
+ * What the current-context hook answers for one test.
+ *
+ * The hook itself is proved in `src/context/__tests__/useCurrentContext.test.ts`
+ * — which query answers which question, and the ordering that stops a slow
+ * read overwriting a newer one — and running the real one here would need the
+ * whole repository layer that `@corymbia/data` is mocked out of above. What
+ * this file is about is the other end of the wire: that whatever the context
+ * says is what the record is actually filed into, and what the recorded state
+ * says it was filed into.
+ *
+ * `let`, not `const`: the two filing tests below set it for their one render,
+ * and `beforeEach` puts it back to "no activity running" — the state every
+ * other test in this file was written against.
+ */
+type MockCurrentContext = ReturnType<
+  typeof import('../../src/context/useCurrentContext').useCurrentContext
+>
+const NO_ACTIVITY: MockCurrentContext = {
+  carryOn: null,
+  activityId: null,
+  unfiledCount: 0,
+  loading: false,
+  refresh: () => Promise.resolve(),
+}
+let mockCurrentContext: MockCurrentContext = NO_ACTIVITY
+
+jest.mock('../../src/context/useCurrentContext', () => ({
+  useCurrentContext: () => mockCurrentContext,
+}))
+
 jest.mock('../../src/db/provider', () => ({
   // A handle, not a database. Nothing here calls a method on it: the two
   // repository functions that would are replaced above, and the screen only
@@ -366,12 +397,20 @@ let mockCaptureNumber = 0
  */
 const mockRecords = new Map<string, FieldRecord>()
 
-function recordFrom(fix: Fix): FieldRecord {
+function recordFrom(
+  fix: Fix,
+  activityId: string | null,
+  contextActivityId: string | null,
+): FieldRecord {
   mockCaptureNumber += 1
   const record: FieldRecord = {
     id: `record-${String(mockCaptureNumber)}`,
-    activityId: null,
-    contextActivityId: null,
+    // The row carries what the caller asked for, rather than a hardcoded
+    // null. A fixture that always answered "unfiled" would let the recorded
+    // state's destination line be asserted against the fixture's own opinion
+    // instead of against what the screen filed.
+    activityId,
+    contextActivityId,
     kind: 'pin',
     captureNumber: mockCaptureNumber,
     sequence: null,
@@ -419,6 +458,7 @@ beforeEach(() => {
   // behind for the next test's `refocus()` to fire into.
   mockFocusEffects.clear()
   mockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
+  mockCurrentContext = NO_ACTIVITY
   mockCreateSourceSpy.mockClear()
   watchCallCount = 0
   mockRouter.push.mockClear()
@@ -436,8 +476,11 @@ beforeEach(() => {
   play.mockReset()
   pause.mockReset()
   replace.mockReset()
-  mockRepo.createRecord.mockImplementation((_db: unknown, input: { fix: Fix }) =>
-    Promise.resolve(recordFrom(input.fix)),
+  mockRepo.createRecord.mockImplementation(
+    (
+      _db: unknown,
+      input: { fix: Fix; activityId: string | null; contextActivityId: string | null },
+    ) => Promise.resolve(recordFrom(input.fix, input.activityId, input.contextActivityId)),
   )
   // Mirrors the real `refineRecordFix`'s `{ record, applied }` shape
   // (`packages/data`); the guard itself is proved against real SQL in
@@ -822,6 +865,28 @@ function insideTheDial() {
 }
 
 /** The single string a readout renders, for assertions about its exact shape. */
+/**
+ * The context hook's answer for a device with an activity running. The id and
+ * the name are deliberately different strings: a screen that filed by name,
+ * or named by id, fails rather than coincidentally passing.
+ */
+function runningActivity(activityId: string, activityName: string): MockCurrentContext {
+  return {
+    carryOn: {
+      projectName: 'Yarra Flats eDNA',
+      activityName,
+      activityKind: 'survey',
+      startedAt: '2026-09-07T00:40:00.000Z',
+      captureCount: 2,
+      clientName: 'Parks Victoria',
+    },
+    activityId,
+    unfiledCount: 0,
+    loading: false,
+    refresh: () => Promise.resolve(),
+  }
+}
+
 function readoutText(testID: string): string {
   const value: unknown = screen.getByTestId(testID).props.children
   if (typeof value !== 'string') {
@@ -1449,14 +1514,56 @@ describe('the recorded state (spec §9.6, doctrine rule 17)', () => {
     await tap()
     await acceptNow()
 
-    // `useCapture` files every capture to the Inbox, which §10.2 treats as a
-    // supported destination rather than an error state. Naming it is the
-    // point: a state that reads as finished has to say where the thing it
-    // finished with has gone, and this is the line Plan 5 turns into the
-    // activity name §9.6 asks for.
+    // Nothing is running (`NO_ACTIVITY`), so this one really did go to the
+    // Inbox — a supported destination rather than an error state (§10.2).
+    // Naming it is the point: a state that reads as finished has to say where
+    // the thing it finished with has gone.
     expect(readoutText('capture-recorded-destination')).toBe(
       'Saved to the Inbox. You can file it from there later.',
     )
+  })
+
+  it('files the capture into the activity that is running', async () => {
+    mockCurrentContext = runningActivity('act_reach_3', 'Reach 3 transect')
+    await arriveWithAFix()
+    await tap()
+
+    // BOTH fields, because they are two different facts that happen to share
+    // a value here (spec §8.3): `activityId` is where it is filed, which she
+    // can change later by refiling, and `contextActivityId` is where she was,
+    // which nothing may ever revise. An implementation that stamped only one
+    // of them would leave a later Inbox screen unable to say where an
+    // unfiled record probably belongs.
+    expect(mockRepo.createRecord).toHaveBeenLastCalledWith(
+      mockDb,
+      expect.objectContaining({ activityId: 'act_reach_3', contextActivityId: 'act_reach_3' }),
+    )
+  })
+
+  it('files to the Inbox when no activity is running', async () => {
+    // The other half of the pair above, with the same assertion shape: a
+    // screen that hardcoded an activity id would pass one of these and fail
+    // the other, and one that hardcoded null would fail the first.
+    await arriveWithAFix()
+    await tap()
+
+    expect(mockRepo.createRecord).toHaveBeenLastCalledWith(
+      mockDb,
+      expect.objectContaining({ activityId: null, contextActivityId: null }),
+    )
+  })
+
+  it('names the activity it was filed into, rather than the Inbox', async () => {
+    mockCurrentContext = runningActivity('act_reach_3', 'Reach 3 transect')
+    await arriveWithAFix()
+    await tap()
+    await acceptNow()
+
+    // The sentence a person actually reads. Until an activity could be
+    // running this line said "Saved to the Inbox" whatever had happened, and
+    // an activity that files correctly while the screen goes on naming the
+    // Inbox is a lie she has no way to catch.
+    expect(readoutText('capture-recorded-destination')).toBe('Saved to Reach 3 transect.')
   })
 
   it('scrolls too, so its two ways onward cannot fall below the fold in landscape', async () => {

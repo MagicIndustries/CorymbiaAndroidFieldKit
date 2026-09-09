@@ -158,6 +158,29 @@ jest.mock('expo-router', () => ({
 }))
 
 /**
+ * The current-context hook, mocked to "nothing running" — the state every
+ * assertion in this file was written against, since none of them is about
+ * filing.
+ *
+ * It has to be mocked rather than left real for the same reason `expo-router`
+ * above is only partly implemented: the real hook reads the database through
+ * `readCurrentContext`, and `mockDb` below is a handle with no methods on it.
+ * Its own behaviour is proved in
+ * `src/context/__tests__/useCurrentContext.test.ts`.
+ */
+const mockCurrentContext = {
+  carryOn: null,
+  activityId: null,
+  unfiledCount: 0,
+  loading: false,
+  refresh: () => Promise.resolve(),
+}
+
+jest.mock('../../src/context/useCurrentContext', () => ({
+  useCurrentContext: () => mockCurrentContext,
+}))
+
+/**
  * `expo-audio`, mocked whole — not because this file ever plays a voice note
  * (no test here taps CAPTURE, so `capture.tsx` never reaches the `recorded`
  * phase and `RecordedAffordances`'s `useAudioPlayer(null)` call never runs)

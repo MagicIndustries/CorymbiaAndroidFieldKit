@@ -55,6 +55,7 @@ import { ambientFixOrNone } from '../src/geo/ambientFix'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useSteadyGrade } from '../src/capture/steadyGrade'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
+import { useCurrentContext } from '../src/context/useCurrentContext'
 
 /**
  * The capture screen (spec §9.1–§9.4): the one thing a field ecologist looks at
@@ -327,10 +328,24 @@ function CaptureBody() {
     void ambientCache.refresh()
   }, [])
 
-  // No activity to hand `useCapture` yet — Plan 5's launcher and its running
-  // activity arrive in a later task, so every capture from this screen still
-  // files to the Inbox (see `CaptureDeps.activityId`).
-  const capture = useCapture({ db, device, source, activityId: null })
+  /**
+   * WHERE THIS CAPTURE IS FILED (spec §8.3, §10.1).
+   *
+   * The same hook the launcher resumes with, read here rather than passed as
+   * a navigation parameter. That is deliberate: a parameter would be a copy
+   * of the answer taken at the moment she left the launcher, and this screen
+   * can be reached without passing through it at all — a cold launch onto
+   * `/capture`, or a return from `/camera`. Reading the context here means
+   * the destination is whatever the database currently says it is, and
+   * `useCurrentContext` re-reads it on every focus, so an activity started or
+   * switched elsewhere is in force by the time she taps.
+   *
+   * `null` is not an error state: it is the Inbox, which §10.2 is explicit is
+   * a supported destination rather than something that went wrong.
+   */
+  const { activityId, carryOn } = useCurrentContext()
+
+  const capture = useCapture({ db, device, source, activityId })
   const acquiring = capture.phase === 'acquiring'
 
   /**
@@ -697,6 +712,9 @@ function CaptureBody() {
         db={db}
         deviceId={device.id}
         message={message}
+        // What the destination line below the summary names, when the record
+        // has one. Null while nothing is running, which is the Inbox.
+        activityName={carryOn === null ? null : carryOn.activityName}
         // Shown only for the record it is actually about — see the guard above
         // — and only until she has said she meant both points.
         duplicate={
@@ -708,11 +726,10 @@ function CaptureBody() {
           setDuplicateAccepted(true)
         }}
         onLeave={() => {
-          // Plan 5 builds the launcher; until it exists `/` is the gallery, and
-          // it is the only route this screen knows. `replace` rather than
-          // `push`: leaving a finished capture is going back to where she came
-          // from, and pushing would stack a second gallery on top of the one
-          // already underneath.
+          // `/` is the launcher now that Plan 5 has built it. `replace` rather
+          // than `push`: leaving a finished capture is going back to where she
+          // came from, and pushing would stack a second launcher on top of the
+          // one already underneath.
           router.replace('/')
         }}
       />
@@ -897,6 +914,7 @@ function RecordedState({
   db,
   deviceId,
   message,
+  activityName,
   duplicate,
   onAcceptDuplicate,
   onLeave,
@@ -905,6 +923,8 @@ function RecordedState({
   db: Database
   deviceId: string
   message: React.ReactNode
+  /** The running activity's name, or null when none is running. */
+  activityName: string | null
   duplicate: { metresApart: number } | null
   onAcceptDuplicate: () => void
   onLeave: () => void
@@ -1071,7 +1091,7 @@ function RecordedState({
               POINT RECORDED
             </Type>
           ) : (
-            <RecordedSummary record={record} />
+            <RecordedSummary record={record} activityName={activityName} />
           )}
 
           {capture.message === null ? null : (
@@ -1221,8 +1241,40 @@ function RecordedState({
   )
 }
 
+/**
+ * Where the capture was filed, in one sentence (spec §9.6, §10.2).
+ *
+ * Read off the RECORD rather than off the current context, because it is the
+ * row that was written that this sentence is about. The two agree today — the
+ * activity handed to `useCapture` is the one the context reported — but a
+ * sentence derived from the context would go on describing the context if
+ * they ever stopped agreeing, which is the one thing it must not do: this
+ * line is how she knows a capture did not land in the Inbox.
+ *
+ * `activityName` is null only when nothing is running, in which case the
+ * record has no activity either and the first branch answers. The middle
+ * branch is for the pair disagreeing — a filed record with no name to hand —
+ * and says the honest thing rather than naming the Inbox, which would be
+ * false.
+ */
+function describeDestination(record: FieldRecord, activityName: string | null): string {
+  if (record.activityId === null) {
+    return 'Saved to the Inbox. You can file it from there later.'
+  }
+  if (activityName === null) {
+    return 'Saved to the activity you are working in.'
+  }
+  return `Saved to ${activityName}.`
+}
+
 /** What was saved, in the four facts that make it read as finished. */
-function RecordedSummary({ record }: { record: FieldRecord }) {
+function RecordedSummary({
+  record,
+  activityName,
+}: {
+  record: FieldRecord
+  activityName: string | null
+}) {
   const point = positionOf(record.fix)
   return (
     <View style={{ gap: spacing.xs }}>
@@ -1242,18 +1294,17 @@ function RecordedSummary({ record }: { record: FieldRecord }) {
         This position is final. Nothing after this will change it.
       </Type>
       {/*
-        WHERE IT WENT. `useCapture` files every capture to the Inbox — it is
-        handed a database, a device and a source and has no activity to file
-        to — and that is a supported destination rather than an error state
-        (§10.2): capturing without context is a legitimate way to work, and
-        the Inbox is somewhere she works with and files from later.
-        Somewhere is not nowhere, though, and a recorded state that named no
-        destination at all left her to guess. This is also the line Plan 5
-        grows when activities exist: the name §9.6 asks for goes here, in
-        place of "the Inbox".
+        WHERE IT WENT — the activity's name when it has one, and the Inbox
+        when it does not (§9.6). This is the line Plan 5 grew: until the
+        launcher existed there was no activity to file into, so it read
+        "Saved to the Inbox" unconditionally. Both destinations are supported
+        (§10.2) — capturing with nothing running is a legitimate way to work
+        — but which one a capture actually went to is not something to leave
+        her to guess, and it is the one fact that changes the moment an
+        activity is running.
       */}
       <Type variant="small" dim testID="capture-recorded-destination">
-        Saved to the Inbox. You can file it from there later.
+        {describeDestination(record, activityName)}
       </Type>
 
       {/*
