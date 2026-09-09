@@ -1,5 +1,5 @@
 import React from 'react'
-import { processColor } from 'react-native'
+import { StyleSheet, TextInput, processColor, type ViewStyle } from 'react-native'
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native'
 import { INPUT_AFFORDANCE_ORDER, ThemeProvider, isLocked, radiusForMetres } from '@corymbia/ui'
 import { darkTheme, type as typeScale } from '@corymbia/tokens'
@@ -640,6 +640,38 @@ function modalAround(
   }
   throw new Error(
     `Expected the element to be inside a Modal. Its ancestors were: ${seen.join(' < ')}.`,
+  )
+}
+
+/**
+ * The `ScrollView` an element is rendered inside, or a failure.
+ *
+ * The same tree walk as `modalAround`, and for a related reason: the claim
+ * being made is about an ANCESTOR RELATIONSHIP in the React tree, which no
+ * prop-matching query can express. It matters here because that relationship
+ * is the whole of why a prop on the recorded column's scroll view governs a
+ * tap on a button inside a `Modal` — on a device the modal is a separate
+ * Android window, but React Native's responder system builds its propagation
+ * path from the React tree, so the scroll view's
+ * `onStartShouldSetResponderCapture` still runs first for that tap.
+ *
+ * `'RCTScrollView'` and not `'ScrollView'`: `@react-native/jest-preset`'s
+ * mock renders `<RCTScrollView {...props}>`, spreading the props straight
+ * onto the host element, so that is both the type that survives and the node
+ * the props can be read from.
+ */
+function scrollViewAround(
+  element: ReturnType<typeof screen.getByTestId>,
+): ReturnType<typeof screen.getByTestId> {
+  let node = element.parent
+  const seen: string[] = []
+  while (node !== null) {
+    if (node.type === 'RCTScrollView') return node
+    if (typeof node.type === 'string') seen.push(node.type)
+    node = node.parent
+  }
+  throw new Error(
+    `Expected the element to be inside a ScrollView. Its ancestors were: ${seen.join(' < ')}.`,
   )
 }
 
@@ -2175,6 +2207,149 @@ describe('the editor, which is a modal and not the foot of the column', () => {
     expect(screen.getByTestId('capture-save-confirmation')).toHaveTextContent(
       'Name saved: Frog pond outflow',
     )
+  })
+})
+
+/**
+ * The three keyboard faults reported off the S25 release build, once the modal
+ * itself was judged right ("modal works well"):
+ *
+ *   1. "it's a pain to shift from bottom of screen to top. make the text box
+ *      and controls appear in the middle of the screen above where the
+ *      keyboard appears."
+ *   2. "when the screen opens, the keyboard should already be open and the
+ *      text box focused so the user can just start typing."
+ *   3. "I try to tap save but it just closes the keyboard as the focus
+ *      changes, then i hit save again, which is bad ux."
+ *
+ * WHAT THESE TESTS CANNOT SEE, STATED PLAINLY. Jest has no keyboard and no
+ * layout engine. Nothing below proves any of the three faults is fixed on a
+ * device — there is no soft keyboard to sit above, no measured frame for
+ * `KeyboardAvoidingView` to shrink, no input method to open, and RNTL's
+ * `fireEvent.press` calls `onPress` directly rather than running the touch
+ * through the responder system that eats the real tap. What they prove is
+ * that the specific mechanism each fix rests on is present and cannot be
+ * deleted in silence:
+ *
+ * - the card is centred in a flexed box rather than hugging the top,
+ * - the input is focused from the modal's `onShow` and nothing has focused it
+ *   earlier (which would make that call a no-op),
+ * - the scroll view the modal is a React child of persists handled taps.
+ *
+ * Whether each of those actually produces the behaviour she asked for is a
+ * device check, and is written up as one.
+ */
+describe('the editor’s keyboard behaviour (the second S25 report)', () => {
+  it('centres the box and its controls in the space left above the keyboard, as one block', async () => {
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+
+    // ONE BLOCK. The complaint was the eye travelling between the keys at the
+    // bottom and a box at the top, so the box and both controls that act on
+    // it have to be inside the same card — not merely both somewhere in the
+    // modal, which the surrounding suite already asserts and which a layout
+    // that split them across the surface would still satisfy.
+    const card = screen.getByTestId('capture-editor')
+    expect(within(card).getByTestId('capture-title-input')).toBeTruthy()
+    expect(within(card).getByTestId('capture-title-save')).toBeTruthy()
+    expect(within(card).getByTestId('capture-editor-cancel')).toBeTruthy()
+
+    // And that card is centred in whatever height it is handed, rather than
+    // pinned to the top of it — which is what shipped, and what was reported
+    // back. The height it is handed is `KeyboardAvoidingView`'s content box,
+    // which on a device is the band above the keyboard; that part is not
+    // visible from here.
+    const holder = card.parent
+    if (holder === null) {
+      throw new Error('The editor card is not inside anything.')
+    }
+    const style = StyleSheet.flatten<ViewStyle>(holder.props.style)
+    // Both, and both load-bearing: without `flex: 1` there is no box to
+    // centre in and the card collapses back to the top of the surface.
+    expect(style.flex).toBe(1)
+    expect(style.justifyContent).toBe('center')
+  })
+
+  it('focuses the box when the modal is shown, and leaves it unfocused until then', async () => {
+    // The mocked `TextInput`'s `focus` lives on its prototype
+    // (`@react-native/jest-preset`'s `mockComponent` assigns `MockNativeMethods`
+    // there), so this is the call the component's own ref makes. Restored by
+    // hand: this file deliberately does not `restoreAllMocks` between tests.
+    const focus = jest.spyOn(TextInput.prototype, 'focus')
+    try {
+      await renderRecorded()
+      await fireEvent.press(screen.getByTestId('affordance-title'))
+
+      const input = screen.getByTestId('capture-title-input')
+
+      // NO `autoFocus`, AND ITS ABSENCE IS THE FIX. In RN 0.86.3 `autoFocus`
+      // is a native prop applied in `ReactEditText.onAttachedToWindow` — too
+      // early for the dialog's window to take the input method, so it focuses
+      // without opening a keyboard, which is the reported symptom ("I have to
+      // click in the text box to open the keyboard"). It then *prevents* the
+      // repair: the focus event it causes sets
+      // `TextInputState.currentlyFocusedInputRef`, and `focusTextInput`
+      // returns early for the field that is already current, so the `onShow`
+      // call below would do nothing. Putting `autoFocus` back would silently
+      // disarm the mechanism, so it is asserted absent rather than left to a
+      // comment.
+      expect(input.props.autoFocus).toBeUndefined()
+      expect(focus).not.toHaveBeenCalled()
+
+      // `onShow` is dispatched from the dialog's own `OnShowListener`
+      // (`ReactModalHostView`), i.e. after the window is up, which is the
+      // point at which asking for focus can actually raise a keyboard.
+      const modal = modalAround(input)
+      await fireEvent(modal, 'show')
+
+      expect(focus).toHaveBeenCalledTimes(1)
+    } finally {
+      focus.mockRestore()
+    }
+  })
+
+  it('leaves the first tap on SAVE to the button, not to the scroll view the modal hangs under', async () => {
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+
+    // THE ANCESTOR IS THE POINT. On a device the modal is a separate Android
+    // window, so it is tempting to think a prop on the capture screen's
+    // scroll view cannot reach it. It can: React Native's responder system
+    // builds its propagation path from the REACT tree, and in that tree the
+    // modal is a child of this scroll view — so the scroll view's
+    // `onStartShouldSetResponderCapture` runs first for a touch on SAVE, and
+    // with `keyboardShouldPersistTaps` unset or `'never'` it takes the
+    // responder and blurs the input instead of letting the press through
+    // (`ScrollView.js`, `_handleStartShouldSetResponderCapture`). That is the
+    // reported "it just closes the keyboard … then i hit save again".
+    const scroll = scrollViewAround(screen.getByTestId('capture-title-save'))
+    expect(scroll.props.testID).toBe('capture-recorded-scroll')
+    // `'handled'`, not `'always'`: a tap on nothing in particular should
+    // still put the keyboard away.
+    expect(scroll.props.keyboardShouldPersistTaps).toBe('handled')
+  })
+
+  it('saves and closes on that one press, with the confirmation left standing behind it', async () => {
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+
+    // ONE press. Not a press to dismiss a keyboard and a second to hit the
+    // button. Jest cannot make the first kind of press happen — `fireEvent`
+    // calls `onPress` — so what this pins is the other half of the report:
+    // that a save which does land is a single action, writing and closing,
+    // with nothing further to press.
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    expect(mockRepo.renameRecord).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('capture-title-input')).toBeNull()
+    // And the closing modal is still not the confirmation — a cancel closes
+    // it identically. The sentence and the tick are.
+    expect(screen.getByTestId('capture-save-confirmation')).toHaveTextContent(
+      'Name saved: Frog pond outflow',
+    )
+    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title ✓')
   })
 })
 

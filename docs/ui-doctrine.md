@@ -69,8 +69,19 @@ Corymbia app rather than reinvented per screen.
     bottom of a screen's own column is a box under the Android soft keyboard: the keyboard
     arrives exactly where the last thing in a column is, and she types blind. Any field she
     types into opens as its own surface — entered and left, not a column that shifts — with
-    the input near the top of it, so it stays clear of the keyboard whether or not keyboard
-    avoidance behaves. And a save that landed must say so where she is looking when that
+    the input and the controls that act on it centred as one block in the space the keyboard
+    leaves, not pinned to either edge of the surface. The first build of this rule put the
+    input at the top, reasoning that a keyboard rising from the bottom could then never reach
+    it; that was reported back from the field as its own fault ("it's a pain to shift from
+    bottom of screen to top"), because she is holding the phone one-handed and the journey
+    from the keys to the top of the screen and back is as costly as typing blind was. Such a
+    surface opens ready to type — the keyboard up and the box focused, which on Android means
+    asking for the focus once the surface's window exists rather than declaring `autoFocus` —
+    and its save must land on the first tap. On that last point: a `ScrollView` anywhere above
+    the surface **in the React tree** eats that first tap unless it carries
+    `keyboardShouldPersistTaps="handled"`, and it does so even when the surface is a `Modal` in
+    a window of its own, because React Native routes touches by the React tree and not the
+    native one. And a save that landed must say so where she is looking when that
     surface goes away: the surface closing is not the confirmation, because a cancel closes
     it identically. Two channels under rule 9 — a sentence naming what was written, and the
     affordance's own `✓` — never the value appearing somewhere further down the page, which

@@ -960,6 +960,33 @@ function RecordedState({
       */}
       <ScrollView
         testID="capture-recorded-scroll"
+        /*
+          THE FIRST TAP ON SAVE. Field-reported: "I try to tap save but it
+          just closes the keyboard as the focus changes, then i hit save
+          again". That tap is eaten here, not in the editor, and the reason is
+          not obvious enough to leave uncommented.
+
+          `FieldEditor` renders a `Modal`, so on a device its card is in a
+          separate Android window — but it is still a child of this
+          `ScrollView` in the React tree, and React Native's responder system
+          builds its propagation path from that tree, not from the native one.
+          So a touch on the modal's SAVE button runs this `ScrollView`'s
+          `onStartShouldSetResponderCapture` first. `ScrollView`'s
+          implementation of it (`ScrollView.js`,
+          `_handleStartShouldSetResponderCapture`, RN 0.86.3) returns `true` —
+          taking the responder and blurring the input instead of letting the
+          press through — when `keyboardShouldPersistTaps` is unset or
+          `'never'`, a dismissible soft keyboard is up, and the target is not
+          a text input. That is exactly the reported sequence, and its own
+          comment in RN says so: "the first tap should be sent to the scroll
+          view and dismiss the keyboard, then the second tap goes to the
+          actual interior view".
+
+          `'handled'` instead of `'always'`: a tap on nothing in particular —
+          the scrim, a gap in this column — should still put the keyboard
+          away. `'handled'` only spares the taps a control actually handles.
+        */
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
       >
         <View style={{ gap: spacing.md }}>
@@ -1884,7 +1911,7 @@ function describeEditor(kind: 'title' | 'description', saving: boolean, error: s
  * column entirely and puts it at the top of its own surface, so the keyboard
  * rises into empty space beneath it rather than over it.
  *
- * Three things about the way it is built are load-bearing:
+ * Four things about the way it is built are load-bearing:
  *
  * - **Its own `SafeAreaView`.** A React Native `Modal` is a separate window
  *   on Android; it is not inside the `SafeAreaView` that `_layout.tsx` wraps
@@ -1894,17 +1921,49 @@ function describeEditor(kind: 'title' | 'description', saving: boolean, error: s
  *   `SafeAreaProvider` already at the root, and it is the same component
  *   `_layout.tsx` uses.
  *
- * - **Top-anchored, not centred.** `KeyboardAvoidingView` is the belt; this
- *   is the braces. A card pinned to the top of the surface is clear of a
- *   keyboard that rises from the bottom whether or not the avoidance
- *   behaves, and Android keyboard avoidance inside a `Modal` under
- *   edge-to-edge is precisely the thing that cannot be verified from Jest.
- *   Centring it would put the input back in the contested band for no gain.
+ * - **Centred in the space the keyboard leaves, not pinned to the top.** The
+ *   first shipped version anchored the card to the top of the surface, on the
+ *   reasoning that a keyboard rising from the bottom could then never reach
+ *   it. That was reported back: "it's a pain to shift from bottom of screen
+ *   to top". She is holding the phone one-handed over a survey point, and the
+ *   journey from the keys at the bottom to a box at the very top and back is
+ *   the complaint. So the card is centred inside `KeyboardAvoidingView`'s
+ *   content box, which is the region *above* the keyboard: with
+ *   `behavior="padding"` that view carries a `paddingBottom` equal to the
+ *   keyboard's height (`KeyboardAvoidingView.js`, the `'padding'` case), so
+ *   the flexed child below it measures only the visible band and centring
+ *   inside it puts the block in the middle of what she can see. If Android
+ *   has already resized the modal's own window instead — `ReactModalHostView`
+ *   sets `SOFT_INPUT_ADJUST_RESIZE` on the dialog — that padding computes to
+ *   zero (`frame.y + frame.height - keyboardY`, floored at 0) and the
+ *   centring still lands in the same band. Either way the input and its two
+ *   controls travel together as one block; they are one flex child, never
+ *   split across the fold.
  *
  * - **A bounded box.** `field.control` caps the height of the notes box, so
  *   a long note scrolls inside it rather than growing the card downwards
  *   into the keyboard — the inline layout's failure reproduced inside the
  *   fix.
+ *
+ * - **`onShow` focuses the input; `autoFocus` does not and cannot.** Also
+ *   reported: "when the screen opens, the keyboard should already be open and
+ *   the text box focused". `autoFocus` is not a JS effect in RN 0.86.3 — it
+ *   is a native prop, acted on in `ReactEditText.onAttachedToWindow`, which
+ *   runs while the dialog is being built and before its window can take the
+ *   input method. The focus lands, the keyboard does not. Worse, it then
+ *   *blocks* the retry: the native focus event sets
+ *   `TextInputState.currentlyFocusedInputRef`, and `focusTextInput` returns
+ *   early for a field that is already the current one. So `autoFocus` and an
+ *   `onShow` focus together are strictly worse than `onShow` alone —
+ *   `autoFocus` is deliberately absent below, and putting it back would
+ *   silently disarm the line that replaced it. `onShow` is dispatched from
+ *   the dialog's own `OnShowListener` (`ReactModalHostView`, `ShowEvent`),
+ *   i.e. once the window is up, and `TextInput.focus()` from there reaches
+ *   `requestFocusProgrammatically`, which calls `showSoftKeyboard()`
+ *   explicitly rather than hoping a focus implies one.
+ *
+ * The first tap on SAVE is not fixed here at all — it is fixed on the
+ * `ScrollView` this modal is a React child of. See the comment there.
  *
  * The scrim is what answers "the record's content should not be competing
  * for attention behind it": the same `overlay` token, at the same opacity,
@@ -1929,12 +1988,19 @@ function FieldEditor({
 }) {
   const { theme } = useTheme()
   const label = kind === 'title' ? 'A name for this point' : 'Notes about this point'
+  // Imperative rather than declarative on purpose — see the note on this
+  // component. The keyboard only comes up if the focus is asked for after the
+  // dialog's window exists, and `onShow` is the only event that says so.
+  const inputRef = useRef<TextInput>(null)
 
   return (
     <Modal
       visible
       transparent
       animationType="fade"
+      onShow={() => {
+        inputRef.current?.focus()
+      }}
       // The Android back button. Guarded rather than disabled-looking,
       // because it is hardware and not a rendered control: doctrine rule 3 is
       // about a control that looks pressable and does nothing, and there is
@@ -1950,7 +2016,14 @@ function FieldEditor({
         style={{ flex: 1, backgroundColor: `${theme.colors.overlay}CC` }}
       >
         <SafeAreaView style={{ flex: 1 }}>
-          <View style={{ padding: spacing.lg }}>
+          {/*
+            `flex: 1` so this fills whatever height `KeyboardAvoidingView`
+            leaves once the keyboard is accounted for, and `justifyContent:
+            'center'` so the card sits in the middle of it rather than at
+            either edge. Both are required: without the flex there is no box
+            to centre in, and the card collapses back to the top.
+          */}
+          <View style={{ flex: 1, justifyContent: 'center', padding: spacing.lg }}>
             <View
               testID="capture-editor"
               style={{
@@ -1980,14 +2053,23 @@ function FieldEditor({
                 {kind === 'title' ? 'Name this point' : 'Notes for this point'}
               </Type>
 
+              {/*
+                NO `autoFocus` HERE, AND THAT IS THE FIX, NOT AN OMISSION.
+                See the note on this component: in RN 0.86.3 `autoFocus` is a
+                native prop applied in `onAttachedToWindow`, too early for the
+                dialog's window to take the input method — and the focus it
+                does land makes the `onShow` focus above a no-op, because
+                `TextInputState.focusTextInput` returns early for the field
+                that is already current.
+              */}
               <TextInput
+                ref={inputRef}
                 testID={kind === 'title' ? 'capture-title-input' : 'capture-description-input'}
                 accessibilityLabel={label}
                 value={draft}
                 onChangeText={onChangeDraft}
                 placeholder={label}
                 placeholderTextColor={theme.colors.textDim}
-                autoFocus
                 multiline={kind === 'description'}
                 style={{
                   minHeight: kind === 'description' ? field.control : touch.min,
