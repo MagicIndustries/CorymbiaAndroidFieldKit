@@ -614,12 +614,24 @@ function VoiceBody() {
   // answer at the moment the screen goes away rather than whatever value the
   // poller last committed.
   //
-  // `.catch` because this stop is genuinely allowed to fail and there is
-  // nobody left to tell: `useAudioRecorder` registers its own release effect
-  // before this one and React runs unmount cleanups in registration order,
-  // so by the time this runs the native recorder may already be released and
-  // reject. Unhandled, that surfaces as a crash-adjacent warning on a screen
-  // that has already gone.
+  // WRAPPED IN try/catch, NOT MERELY `.catch` — and that distinction is a
+  // hard crash, observed on an S25 running a release build: saving a voice
+  // note killed the app to the desktop every time, with
+  //
+  //   Error: The 1st argument cannot be cast to type
+  //   class expo.modules.audio.AudioRecorder (received class java.lang.Integer)
+  //   → Caused by: Cannot use shared object that was already released
+  //
+  // `useAudioRecorder` registers its own release effect BEFORE this one, and
+  // React runs unmount cleanups in registration order — so by the time this
+  // runs the native recorder is already released. The earlier version guarded
+  // `stop()`'s promise with `.catch`, which cannot help: `recorder.isRecording`
+  // is a PROPERTY READ on the released object and throws SYNCHRONOUSLY, before
+  // there is any promise to attach a handler to. A throw from an effect
+  // cleanup is not caught by anything in React and reaches the app as fatal.
+  //
+  // A review predicted this exact ordering and marked it unverifiable without
+  // a device. The device verified it.
   //
   // No `pendingStopsRef` claim for this one: `useAudioRecorder` unsubscribes
   // its `recordingStatusUpdate` listener in the same unmount, so the report
@@ -627,10 +639,16 @@ function VoiceBody() {
   // confuse — this screen's refs die with it.
   useEffect(() => {
     return () => {
-      if (recorder.isRecording) {
-        void recorder.stop().catch(() => {
-          // Already unmounting; there is no screen left to say it on.
-        })
+      try {
+        if (recorder.isRecording) {
+          void recorder.stop().catch(() => {
+            // Already unmounting; there is no screen left to say it on.
+          })
+        }
+      } catch {
+        // The recorder was released before this cleanup ran, so there is
+        // nothing left to stop and nobody left to tell. Reading any property
+        // on it throws; that is the whole reason this is a try/catch.
       }
     }
   }, [recorder])

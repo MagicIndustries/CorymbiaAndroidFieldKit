@@ -125,6 +125,9 @@ const idleState: MockRecorderState = {
 // and `recorder.getStatus()` report, and what the screen is required to
 // decide on.
 let mockLiveState: MockRecorderState = { ...idleState }
+
+/** Set true to make every property read on the recorder throw, as a released native object does. */
+let mockRecorderReleased = false
 // What `useAudioRecorderState` last committed — up to 500 ms stale.
 let mockPolledState: MockRecorderState = { ...idleState }
 
@@ -140,6 +143,15 @@ const mockRecorderInstance = {
   stop: (...args: unknown[]) => mockStop(...args),
   getStatus: () => ({ ...mockLiveState }),
   get isRecording() {
+    // A released `SharedObject` throws on ANY property access, not just on a
+    // method call. This switch is how a test reaches that state; see the
+    // `released` test below for why it is not hypothetical.
+    if (mockRecorderReleased) {
+      throw new Error(
+        'The 1st argument cannot be cast to type class expo.modules.audio.AudioRecorder ' +
+          '(received class java.lang.Integer)',
+      )
+    }
     return mockLiveState.isRecording
   },
   get uri() {
@@ -418,6 +430,7 @@ function spokenDescription(): unknown {
 
 beforeEach(() => {
   mockLiveState = { ...idleState }
+  mockRecorderReleased = false
   mockPolledState = { ...idleState }
   mockRecordId = 'rec_a'
   mockStatus = { state: 'ready', error: null, applied: ['001_initial'] }
@@ -1539,6 +1552,35 @@ describe('VoiceScreen', () => {
     const view = await renderScreen()
     await view.unmount()
     expect(stop).toHaveBeenCalled()
+  })
+
+  it('survives unmounting after expo-audio has already released the recorder', async () => {
+    /*
+     * OBSERVED ON HARDWARE, not hypothetical. On an S25 running a release
+     * build, saving a voice note killed the app to the desktop every time:
+     *
+     *   Error: The 1st argument cannot be cast to type
+     *   class expo.modules.audio.AudioRecorder (received class java.lang.Integer)
+     *   → Caused by: Cannot use shared object that was already released
+     *
+     * `useAudioRecorder` registers its own release effect BEFORE this
+     * screen's, and React runs unmount cleanups in registration order — so
+     * the native recorder is already released when this cleanup runs.
+     *
+     * The earlier code guarded `stop()`'s promise with `.catch`, which cannot
+     * help: `recorder.isRecording` is a property READ and throws
+     * SYNCHRONOUSLY, before there is a promise to attach a handler to. A
+     * throw from an effect cleanup is caught by nothing in React and reaches
+     * the app as fatal.
+     *
+     * Every other unmount test here passes with or without the guard, because
+     * this mock only throws when told to. That is what let the crash ship.
+     */
+    setRecorderState({ isRecording: true, durationMillis: 4000 })
+    const view = await renderScreen()
+    mockRecorderReleased = true
+    await expect(view.unmount()).resolves.toBeUndefined()
+    expect(stop).not.toHaveBeenCalled()
   })
 
   it('does not stop a recorder that was never recording', async () => {
