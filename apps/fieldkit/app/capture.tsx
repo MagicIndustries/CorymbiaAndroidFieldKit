@@ -1999,7 +1999,24 @@ function FieldEditor({
       transparent
       animationType="fade"
       onShow={() => {
+        // Twice, deliberately, and the second one is not belt-and-braces.
+        //
+        // Reported from an S25: the keyboard came up for the title and NOT
+        // for the notes. The difference is `multiline`, which Android backs
+        // with a different native input configuration. `onShow` fires when
+        // the dialog's window has been created, which is early enough for the
+        // single-line case and — for the multiline one — can be before the
+        // window actually holds IME focus, so the show-soft-input request is
+        // dropped and she is left with a cursor and no keyboard.
+        //
+        // The retry a frame later asks again once the window has settled.
+        // Focusing an already-focused input is a no-op, so the single-line
+        // path is unaffected. This is a timing fix, not a race to win: if the
+        // first call worked, the second costs nothing.
         inputRef.current?.focus()
+        requestAnimationFrame(() => {
+          inputRef.current?.focus()
+        })
       }}
       // The Android back button. Guarded rather than disabled-looking,
       // because it is hardware and not a rendered control: doctrine rule 3 is
