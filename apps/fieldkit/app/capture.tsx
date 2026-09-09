@@ -327,7 +327,10 @@ function CaptureBody() {
     void ambientCache.refresh()
   }, [])
 
-  const capture = useCapture({ db, device, source })
+  // No activity to hand `useCapture` yet — Plan 5's launcher and its running
+  // activity arrive in a later task, so every capture from this screen still
+  // files to the Inbox (see `CaptureDeps.activityId`).
+  const capture = useCapture({ db, device, source, activityId: null })
   const acquiring = capture.phase === 'acquiring'
 
   /**

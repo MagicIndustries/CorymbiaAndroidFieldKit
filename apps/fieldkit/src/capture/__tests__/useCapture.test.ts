@@ -298,10 +298,14 @@ async function settle() {
  * Mounts the hook and lets the permission request and the subscription resolve.
  * `@testing-library/react-native` v14 is async throughout, so `renderHook` and
  * `unmount` are both awaited.
+ *
+ * `activityId` defaults to null — the Inbox — which is what every test not
+ * specifically about filing (below) wants, and matches this file's behaviour
+ * before filing existed.
  */
-async function mountCapture(capSeconds = CAP_S) {
+async function mountCapture(capSeconds = CAP_S, activityId: string | null = null) {
   const view = await renderHook(() =>
-    useCapture({ db: testDb, device: testDevice, source, capSeconds }),
+    useCapture({ db: testDb, device: testDevice, source, capSeconds, activityId }),
   )
   await settle()
   return view
@@ -357,6 +361,59 @@ describe('useCapture', () => {
       testDb,
       expect.objectContaining({ fix: expect.objectContaining({ quality: 'deliberate' }) }),
     )
+  })
+
+  /**
+   * FILING (spec §8.3). `createRecord` takes two links onto an activity — the
+   * one it is filed to, and the one it stamps as context — and this hook is
+   * where both are ever set, from a single `activityId` this hook is handed.
+   * Three tests: one activity running, none running (the Inbox, and spec
+   * §10.2 says that is a destination, not an error), and a second activity id
+   * distinct from the first — so a hardcoded `'act_survey'` cannot pass this
+   * file by accident the way `kind: 'photo'` once did elsewhere in this repo.
+   */
+  describe('filing', () => {
+    it('files a capture into the activity that is running', async () => {
+      const { result } = await mountCapture(CAP_S, 'act_survey')
+      await emit(6)
+
+      await act(async () => {
+        result.current.capture()
+      })
+      await settle()
+
+      expect(mockRepo.createRecord.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({ activityId: 'act_survey', contextActivityId: 'act_survey' }),
+      )
+    })
+
+    it('leaves a capture unfiled when no activity is running', async () => {
+      // Spec §10.2: the Inbox is a supported destination, not an error state.
+      const { result } = await mountCapture(CAP_S, null)
+      await emit(6)
+
+      await act(async () => {
+        result.current.capture()
+      })
+      await settle()
+
+      expect(mockRepo.createRecord.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({ activityId: null, contextActivityId: null }),
+      )
+    })
+
+    it('files into a second activity when the context has changed', async () => {
+      // One example activity id would let a hardcoded value pass.
+      const { result } = await mountCapture(CAP_S, 'act_sampling')
+      await emit(6)
+
+      await act(async () => {
+        result.current.capture()
+      })
+      await settle()
+
+      expect(mockRepo.createRecord.mock.calls[0]?.[1].activityId).toBe('act_sampling')
+    })
   })
 
   it('writes one record, not two, when a second tap lands inside the write window', async () => {

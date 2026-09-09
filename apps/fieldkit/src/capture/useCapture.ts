@@ -143,6 +143,29 @@ export type CaptureDeps = {
    * safety net for a run where the signal never settles.
    */
   capSeconds?: number
+  /**
+   * The activity running now, or null when none is — read by the caller
+   * (`readCurrentContext`, `@corymbia/data`) and handed straight through.
+   *
+   * **Stamped onto the record as two fields that take this same value, and
+   * they are not redundant despite that** (spec §8.3). `createRecord`'s
+   * `activityId` is *filed* — a deliberate destination, which can change
+   * later when she refiles a record out of the Inbox — while its
+   * `contextActivityId` is *where she was*, captured automatically and never
+   * revised once written. They start out equal because a capture taken while
+   * an activity is running is unambiguous evidence of being there, so filing
+   * it into that same activity is the obvious first destination. But only the
+   * filed half is ever allowed to move: the context half is what lets a later
+   * Inbox screen suggest where an unfiled record probably belongs, and it can
+   * only do that honestly if nothing downstream of the tap has touched it.
+   * Deleting one of these two fields because they look like the same value
+   * here is exactly the mistake this comment exists to stop.
+   *
+   * Null is not an error state — it is the Inbox, a capture taken with no
+   * activity running, and spec §10.2 is explicit that filing there is a
+   * supported destination rather than something that went wrong.
+   */
+  activityId: string | null
 }
 
 export type Capture = {
@@ -418,7 +441,7 @@ function discardedRunMessage(
 }
 
 export function useCapture(deps: CaptureDeps): Capture {
-  const { db, device, source } = deps
+  const { db, device, source, activityId } = deps
   const secondsTotal = deps.capSeconds ?? DEFAULT_CAP_S
 
   const [phase, setPhase] = useState<CapturePhase>('ready')
@@ -642,11 +665,12 @@ export function useCapture(deps: CaptureDeps): Capture {
       unstorable = attempt.ok ? null : attempt.message
 
       created = await createRecord(db, {
-        // The Inbox. This hook is handed a database, a device and a source and
-        // nothing else, so it has no activity to file to and does not invent
-        // one — filing is a supported destination, not an error state, and the
-        // activity plumbing arrives with the screen that has one.
-        activityId: null,
+        // Filed into the activity running now, and stamped as context with
+        // that same value — see `CaptureDeps.activityId` for why these are
+        // two fields despite agreeing here. Null files to the Inbox, a
+        // supported destination rather than an error state (spec §10.2).
+        activityId,
+        contextActivityId: activityId,
         kind: 'pin',
         fix,
         deviceId: device.id,
