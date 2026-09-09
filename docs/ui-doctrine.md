@@ -90,6 +90,35 @@ Corymbia app rather than reinvented per screen.
     is one she chooses to open after the position is already saved. A surface that opened
     before a capture, or that a capture had to pass through, would still be forbidden.
 
+20. **An outcome she cannot reconstruct must be recoverable, not merely displayed.** Every
+    message this application shows about a *write* reports what happened to a piece of her
+    work — "The photo could not be saved: disk full", "The recording stopped on its own and
+    was not saved", "That recording was too short to carry anything", "The name was not
+    saved: … The point itself is safe". She reads them one-handed, outdoors, mid-survey, and
+    dismissing something is close to reflexive. A dismissible alert is therefore the wrong
+    home for any of them: once tapped away the information is gone, and nothing in the
+    application remembers it. The voice note is the sharpest case — the recording really is
+    gone, and that sentence is the only thing that will ever say so, so a reflexive dismissal
+    sends her away believing she has a note she does not have.
+
+    Two consequences, and the second is the one with teeth. First, such a message renders on
+    the screen it belongs to, never in a modal that takes it away — which is what the camera,
+    voice, capture and launcher screens already do. Second, and not yet built: **anything
+    substantive belongs in a record or a list she can go and look at.** A message she has
+    walked away from should still be answerable later by opening something, rather than
+    depending on her having read it at the moment it appeared.
+
+    Note what that second half costs today. The event log (spec §8.5) is append-only and
+    records `created`, `edited`, `media_added`, `filed`, `played`, `deleted` and `restored` —
+    **it does not record failures at all**, and nothing in the application surfaces it to her
+    in any case. So a failed save currently leaves no trace anywhere once its sentence is off
+    screen. Closing that is tracked separately; until it is, transient messages must be
+    treated as the only telling she gets, which is exactly why they must not be dismissible.
+
+    An *alert* is still right for a question she is actively answering — the removal
+    confirmation is modal-shaped for that reason, and is inline only because rule 15 wants her
+    to see which photo she is discarding while she decides.
+
 ## How these rules are enforced
 
 A rule enforced only by memory is a rule that erodes. Where a rule can be enforced by a
