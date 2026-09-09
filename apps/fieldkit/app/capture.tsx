@@ -1,14 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  BackHandler,
   KeyboardAvoidingView,
-  Modal,
   ScrollView,
   StyleSheet,
   TextInput,
   View,
   type ViewStyle,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { useAudioPlayer } from 'expo-audio'
 import {
@@ -936,6 +935,15 @@ function RecordedState({
    */
   const media = useRecordMedia(db, record?.id ?? null, deviceId)
 
+  /**
+   * The title and the notes, and the editor that writes them — owned here
+   * rather than inside `RecordedAffordances` because the editor has to be
+   * rendered outside `capture-recorded-scroll`, and the tiles inside it. See
+   * `useFieldEditing`.
+   */
+  const editor = useFieldEditing(db, record, deviceId)
+  const editing = editor.open !== null
+
   return (
     <Screen
       testID="capture-screen"
@@ -948,8 +956,19 @@ function RecordedState({
         mentions the attachments, the strip they sit in, or an open
         destructive question describes a screen that no longer exists.
         Asserted in all three of those states by `capture.test.tsx`.
+
+        AND WITHDRAWN WHILE THE EDITOR IS OPEN, which is doctrine rule 16
+        rather than an optimisation. The editor used to be a `Modal` — a
+        separate Android window, which a screen reader does not read behind —
+        so it replaced this sentence for free. An overlay is in this same
+        window, so nothing withdraws this sentence unless it is withdrawn
+        here, and two descriptions of two different surfaces both announcing
+        themselves is exactly the inaccuracy rule 16 forbids. The editor
+        carries its own (`describeEditor`), and the column behind it is taken
+        out of a reader's reach by `importantForAccessibility` on the scroll
+        view below.
       */
-      spokenDescription={describeRecordedScreen(media)}
+      spokenDescription={editing ? undefined : describeRecordedScreen(media)}
     >
       {/*
         This state scrolls for the same reason the acquiring one does: rotation
@@ -961,32 +980,49 @@ function RecordedState({
       <ScrollView
         testID="capture-recorded-scroll"
         /*
-          THE FIRST TAP ON SAVE. Field-reported: "I try to tap save but it
-          just closes the keyboard as the focus changes, then i hit save
-          again". That tap is eaten here, not in the editor, and the reason is
-          not obvious enough to leave uncommented.
+          THE FIRST TAP ON SAVE, AS IT WAS DIAGNOSED — and no longer the line
+          that fixes it. Field-reported: "I try to tap save but it just closes
+          the keyboard as the focus changes, then i hit save again".
 
-          `FieldEditor` renders a `Modal`, so on a device its card is in a
-          separate Android window — but it is still a child of this
-          `ScrollView` in the React tree, and React Native's responder system
-          builds its propagation path from that tree, not from the native one.
-          So a touch on the modal's SAVE button runs this `ScrollView`'s
-          `onStartShouldSetResponderCapture` first. `ScrollView`'s
-          implementation of it (`ScrollView.js`,
-          `_handleStartShouldSetResponderCapture`, RN 0.86.3) returns `true` —
-          taking the responder and blurring the input instead of letting the
-          press through — when `keyboardShouldPersistTaps` is unset or
-          `'never'`, a dismissible soft keyboard is up, and the target is not
-          a text input. That is exactly the reported sequence, and its own
-          comment in RN says so: "the first tap should be sent to the scroll
-          view and dismiss the keyboard, then the second tap goes to the
-          actual interior view".
+          `ScrollView`'s `_handleStartShouldSetResponderCapture` (`ScrollView.js`,
+          RN 0.86.3) returns `true` — taking the responder and blurring the
+          input instead of letting the press through — when
+          `keyboardShouldPersistTaps` is unset or `'never'`, a dismissible soft
+          keyboard is up, and the target is not a text input. Its own comment
+          in RN says so: "the first tap should be sent to the scroll view and
+          dismiss the keyboard, then the second tap goes to the actual interior
+          view". The editor's SAVE was a DESCENDANT of this scroll view at the
+          time, because React Native's responder system builds its propagation
+          path from the React tree rather than the native one — so even though
+          the editor's card was in a separate Android window, this prop
+          governed the tap on it.
 
-          `'handled'` instead of `'always'`: a tap on nothing in particular —
-          the scrim, a gap in this column — should still put the keyboard
-          away. `'handled'` only spares the taps a control actually handles.
+          THE EDITOR IS NO LONGER A DESCENDANT. It renders below, as a sibling
+          of this scroll view, which is what actually holds the fix: the
+          capture path for a touch on SAVE no longer passes through here at
+          all. This prop is therefore no longer load-bearing for that tap, and
+          it is kept rather than removed for the case it always also covered —
+          a control inside THIS column pressed while some future keyboard is
+          up. `'handled'` and not `'always'`: a tap on nothing in particular
+          should still put a keyboard away; `'handled'` only spares the taps a
+          control actually handles.
         */
         keyboardShouldPersistTaps="handled"
+        /*
+          Doctrine rule 16, the half a `Modal` used to give for free. A dialog
+          is a separate Android window and a screen reader does not read the
+          window behind it; an overlay is in this same window, so this column
+          stays traversable — a reader could wander out of the editor, through
+          the tiles and the strip, and be told about controls the scrim is
+          covering. `accessibilityViewIsModal` is the iOS mechanism for this
+          and is genuinely iOS-only in RN 0.86.3 (it appears in
+          `BaseViewConfig.ios.js`, is absent from `BaseViewConfig.android.js`,
+          and has no implementation anywhere under `ReactAndroid/`), so on the
+          device this app is for it would be a silent no-op. This is the
+          Android mechanism, implemented in `BaseViewManager.java` and
+          `ReactAccessibilityDelegate.kt`.
+        */
+        importantForAccessibility={editing ? 'no-hide-descendants' : 'auto'}
         contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
       >
         <View style={{ gap: spacing.md }}>
@@ -1088,7 +1124,7 @@ function RecordedState({
           )}
 
           {record === null ? null : (
-            <RecordedAffordances record={record} db={db} deviceId={deviceId} media={media} />
+            <RecordedAffordances record={record} media={media} editor={editor} />
           )}
 
           {/*
@@ -1139,6 +1175,45 @@ function RecordedState({
           />
         </View>
       </ScrollView>
+
+      {/*
+        THE EDITING SURFACE, HERE AND NOT IN THE COLUMN ABOVE.
+
+        Two things follow from this position and neither is cosmetic. It is a
+        SIBLING of `capture-recorded-scroll`, so a touch on its SAVE never
+        runs that scroll view's `onStartShouldSetResponderCapture` — the first
+        tap is the tap. And it is a child of `Screen`, which is inside the
+        `SafeAreaView` that `_layout.tsx` wraps every route in, so the insets
+        a `Modal` had to ask for again are already applied.
+
+        It fills `Screen` completely despite `Screen`'s own `spacing.lg`
+        padding: an absolutely positioned child with all four insets set is
+        measured against its containing block's PADDING box, not its content
+        box (Yoga `AbsoluteLayout.cpp` — `positionAbsoluteChild` adds the
+        parent's border and not its padding, and `layoutAbsoluteChild` sizes
+        it as `measuredDimension - borders - insets`). So the scrim reaches the
+        edge of the screen rather than stopping a gutter short of it.
+      */}
+      {editor.open === null ? null : (
+        <FieldEditor
+          kind={editor.open.kind}
+          draft={editor.open.draft}
+          saving={editor.saving}
+          // Only a failure belonging to the editor that is open. The two
+          // cannot disagree today (`openEditor` clears the error and the write
+          // re-sets it for the kind being written), but the editor renders the
+          // message and must not render one addressed to the other field if
+          // that ever stops being true.
+          error={
+            editor.error !== null && editor.error.kind === editor.open.kind
+              ? editor.error.message
+              : null
+          }
+          onChangeDraft={editor.changeDraft}
+          onSave={editor.save}
+          onCancel={editor.closeEditor}
+        />
+      )}
     </Screen>
   )
 }
@@ -1488,50 +1563,72 @@ function useRecordMedia(db: Database, recordId: string | null, deviceId: string)
 }
 
 /**
- * What can still be attached to a recorded point (spec §9.6), and what is
- * already there.
+ * The title and the notes: what is stored, what is being typed, and what the
+ * last write did.
  *
- * `InputAffordanceRow` (`@corymbia/ui`, Task 6) renders the four tiles this
- * used to hand-roll one at a time: title, notes, voice, photo — none of them
- * disabled, because none of them is unbuilt any more. Location is not among
- * them: it is not an input on this screen, it is the fix the capture just
- * made (spec §9.6), and that is shown by the dial and the accuracy readout
- * above, not by a fifth tile that would do nothing when pressed.
+ * **A hook rather than state inside `RecordedAffordances`, and — like
+ * `useRecordMedia` above — that is forced rather than tidy.** The editor is
+ * no longer a `Modal`; it is an overlay drawn inside this Activity's own
+ * window (see `FieldEditor`), and it has to sit OUTSIDE
+ * `capture-recorded-scroll` in the React tree, because a `ScrollView`
+ * ancestor takes the first touch on a control while a dismissible keyboard is
+ * up. That is the whole of the two-taps-to-save fault, and moving the editor
+ * into the Activity's window without also moving it out of the scroll view
+ * would reproduce it exactly. The tiles, the confirmation sentence and the
+ * stored values all belong in that scrolling column; the editor does not. Two
+ * components cannot each own the same fact without one of them going stale,
+ * so the fact lives here and both read it.
  *
- * Title and notes are written here, through `renameRecord` — the only
- * setter for either, appending an `'edited'` event the same way everything
- * else that happens to a record does (spec §8.5). Photo and voice are not
- * written here at all: pressing either tile pushes to `/camera` or `/voice`
- * with this record's id, and `useAttachMedia` — called from those screens,
- * not this one — is the whole of what writes the file and the row (Task 10).
- * This component's part with them is narrower: fetch what is already
- * attached, through `listMedia`, so the tiles can say how many and
- * `MediaStrip` can show them.
+ * `record` is nullable for the same reason `useRecordMedia`'s `recordId` is:
+ * `RecordedState` renders before the insert comes back, and a hook cannot be
+ * called conditionally.
  */
-function RecordedAffordances({
-  record,
-  db,
-  deviceId,
-  media,
-}: {
-  record: FieldRecord
-  db: Database
-  deviceId: string
+type FieldEditing = {
   /**
-   * Owned by `RecordedState` (see `useRecordMedia`), not by this component,
-   * because `Screen`'s `spokenDescription` up there has to say what is
-   * attached and whether a removal question is open — doctrine rule 16.
+   * The field the editor is open on and the text currently in its box, or
+   * `null` when it is closed. The draft is held here rather than inside the
+   * editor so that closing discards it — a cancel must not leave a half-typed
+   * name behind to reappear the next time the box is opened.
    */
-  media: RecordMedia
-}) {
-  const router = useRouter()
-  const { theme } = useTheme()
+  open: { kind: 'title' | 'description'; draft: string } | null
+  /** The stored name, as the last write left it. */
+  title: string | null
+  /** The stored notes, as the last write left them. */
+  description: string | null
+  saving: boolean
+  /** A failure and the field it belongs to; `null` when the last write landed. */
+  error: { kind: 'title' | 'description'; message: string } | null
+  /** The last save that actually landed, and what it wrote. */
+  saved: { kind: 'title' | 'description'; value: string | null } | null
+  openEditor: (kind: 'title' | 'description') => void
+  closeEditor: () => void
+  changeDraft: (text: string) => void
+  save: () => void
+}
 
-  const [editing, setEditing] = useState<{ kind: 'title' | 'description'; draft: string } | null>(
-    null,
-  )
-  const [title, setTitle] = useState<string | null>(record.title)
-  const [description, setDescription] = useState<string | null>(record.description)
+function useFieldEditing(db: Database, record: FieldRecord | null, deviceId: string): FieldEditing {
+  const [open, setOpen] = useState<{ kind: 'title' | 'description'; draft: string } | null>(null)
+  /**
+   * What the last write returned, or `null` while nothing has been written
+   * from this screen yet — in which case the record's own columns are read
+   * through live.
+   *
+   * Derived rather than seeded into `useState` from `record` at mount, which
+   * is what this was when it lived one level down inside `RecordedAffordances`.
+   * The seed had to go: this hook is called from `RecordedState`, which
+   * renders once BEFORE the record exists (a capture whose insert has not come
+   * back yet, drawn as POINT RECORDED with no summary), so a mount-time seed
+   * would capture `null` for both fields and never look again. Reading through
+   * until the first write is the same value in every case, and one fewer
+   * effect to keep in step.
+   */
+  const [written, setWritten] = useState<{
+    title: string | null
+    description: string | null
+  } | null>(null)
+  const title = written === null ? (record?.title ?? null) : written.title
+  const description = written === null ? (record?.description ?? null) : written.description
+
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<{ kind: 'title' | 'description'; message: string } | null>(
     null,
@@ -1540,15 +1637,16 @@ function RecordedAffordances({
    * The last save that actually landed, and what it wrote — the whole of the
    * answer to "not sure they're being saved".
    *
-   * The editor is a modal now, so a save has one unmissable channel already:
-   * the surface she is looking at goes away. That alone is ambiguous, because
-   * a cancel does exactly the same thing, and the saved value itself lands
-   * further down this column past the strip, which is the position she never
-   * saw it in. So the closing modal is not treated as the confirmation; this
-   * is. It renders directly beneath the tile she pressed, names which field
-   * was written and quotes the value back, and it is a `polite` live region
-   * so a screen reader says it at the moment the modal's own surface
-   * disappears from under the reader's focus.
+   * **The editor closing is not the confirmation, and must never be made
+   * into one.** A cancel closes it identically, and the saved value itself
+   * lands further down the recorded column past the strip, which is the
+   * position she never saw it in. So this is the confirmation: a sentence
+   * rendered directly beneath the tile she pressed, naming which field was
+   * written and quoting the value back — built from what `renameRecord`
+   * returned rather than from her draft, so a repository that stored
+   * something other than what was typed cannot be confirmed as having stored
+   * what was typed. It is a `polite` live region so a screen reader says it
+   * at the moment the editor's own surface disappears from under the reader.
    *
    * Two channels, not colour (doctrine rule 9): this sentence, and the tile's
    * own label turning `Title ✓` beside it.
@@ -1576,16 +1674,6 @@ function RecordedAffordances({
     }
   }, [])
 
-  const completed: InputAffordanceKind[] = [
-    ...(title !== null ? (['title'] as const) : []),
-    ...(description !== null ? (['description'] as const) : []),
-  ]
-
-  // Only the tile whose edit is actually in flight is busy — not both, and
-  // not the ones that only navigate, which never enter a saving state on
-  // this screen at all.
-  const busy: InputAffordanceKind[] = saving && editing !== null ? [editing.kind] : []
-
   function openEditor(kind: 'title' | 'description'): void {
     // The previous failure goes with the editor that produced it. Without
     // this, a failed title save leaves "The name was not saved…" sitting under
@@ -1596,42 +1684,28 @@ function RecordedAffordances({
     // saved: Frog pond outflow" standing under a freshly opened notes box
     // reads as a confirmation of the notes she has not typed yet.
     setSaved(null)
-    setEditing({ kind, draft: (kind === 'title' ? title : description) ?? '' })
+    setOpen({ kind, draft: (kind === 'title' ? title : description) ?? '' })
   }
 
   /**
-   * Leaves the editor without writing anything — the modal's own control, and
-   * the Android back button through `onRequestClose`.
+   * Leaves the editor without writing anything — the overlay's own CANCEL,
+   * and the Android back button through `FieldEditor`'s `BackHandler`.
    *
-   * The failure message goes with it, because the failure message lives
-   * inside the modal (see the editor below) and there is nowhere else on this
+   * The failure message goes with it, because the failure message lives on
+   * the editing surface (see `FieldEditor`) and there is nowhere else on this
    * screen for it to be. Nothing is lost by that: what a failed save leaves
    * behind is a record with no name on it, and the tile still reading `Title`
    * with no value beneath it says exactly that, permanently, without a
    * sentence.
    */
   function closeEditor(): void {
-    setEditing(null)
+    setOpen(null)
     setError(null)
   }
 
-  function handlePress(kind: InputAffordanceKind): void {
-    if (kind === 'title' || kind === 'description') {
-      openEditor(kind)
-      return
-    }
-    // `camera.tsx` and `voice.tsx` both read `recordId` off the route params
-    // this way (`useLocalSearchParams<{ recordId?: string }>()`), and both
-    // are what actually attach the file — nothing here writes media.
-    router.push({
-      pathname: kind === 'photo' ? '/camera' : '/voice',
-      params: { recordId: record.id },
-    })
-  }
-
-  async function save(): Promise<void> {
-    if (editing === null) return
-    const { kind, draft } = editing
+  async function write(): Promise<void> {
+    if (open === null || record === null) return
+    const { kind, draft } = open
     const trimmed = draft.trim()
     // An empty box is a cleared value, which `renameRecord` models explicitly
     // as `null` — not as an empty string, which would be text made of no
@@ -1651,7 +1725,7 @@ function RecordedAffordances({
             { recordId: record.id, title: next, deviceId }
           : // A notes save must still carry a title, because `renameRecord`
             // takes `title` unconditionally and would otherwise read this as
-            // "clear the title". `title` here is this component's own state,
+            // "clear the title". `title` here is this screen's own state,
             // which is correct for as long as this screen is the only thing
             // that can rename this record — it is, today. The cost is that
             // every notes save appends an `'edited'` event restating a title
@@ -1664,14 +1738,13 @@ function RecordedAffordances({
             { recordId: record.id, title, description: next, deviceId },
       )
       if (!mounted.current) return
-      setTitle(renamed.title)
-      setDescription(renamed.description)
+      setWritten({ title: renamed.title, description: renamed.description })
       // From the record that came back out of the transaction, not from
       // `next`: the confirmation quotes what was actually written, so a
       // repository that stored something other than what was typed cannot be
       // confirmed as having stored what was typed.
       setSaved({ kind, value: kind === 'title' ? renamed.title : renamed.description })
-      setEditing(null)
+      setOpen(null)
     } catch (caught) {
       if (!mounted.current) return
       const detail = caught instanceof Error ? caught.message : String(caught)
@@ -1690,6 +1763,101 @@ function RecordedAffordances({
     } finally {
       if (mounted.current) setSaving(false)
     }
+  }
+
+  return {
+    open,
+    title,
+    description,
+    saving,
+    error,
+    saved,
+    openEditor,
+    closeEditor,
+    changeDraft: (text: string) => {
+      // Keyed off the field that is open rather than taking a `kind`: there is
+      // only ever one box on the surface, and letting a caller name a
+      // different one would let a stale editor write into the live draft.
+      if (open === null) return
+      setOpen({ kind: open.kind, draft: text })
+    },
+    save: () => {
+      void write()
+    },
+  }
+}
+
+/**
+ * What can still be attached to a recorded point (spec §9.6), and what is
+ * already there.
+ *
+ * `InputAffordanceRow` (`@corymbia/ui`, Task 6) renders the four tiles this
+ * used to hand-roll one at a time: title, notes, voice, photo — none of them
+ * disabled, because none of them is unbuilt any more. Location is not among
+ * them: it is not an input on this screen, it is the fix the capture just
+ * made (spec §9.6), and that is shown by the dial and the accuracy readout
+ * above, not by a fifth tile that would do nothing when pressed.
+ *
+ * Title and notes are neither written nor held here any more. Both live in
+ * `useFieldEditing`, owned by `RecordedState`, because the editor itself has
+ * to render outside the scrolling column this component sits in — see the
+ * note at the foot of this component. What stays here is everything that does
+ * belong in the column: the four tiles, the confirmation sentence directly
+ * beneath them, the strip, and the two stored values. Photo and voice are not
+ * written here either: pressing either tile pushes to `/camera` or `/voice`
+ * with this record's id, and `useAttachMedia` — called from those screens,
+ * not this one — is the whole of what writes the file and the row (Task 10).
+ * This component's part with them is narrower: fetch what is already
+ * attached, through `listMedia`, so the tiles can say how many and
+ * `MediaStrip` can show them.
+ */
+function RecordedAffordances({
+  record,
+  media,
+  editor,
+}: {
+  record: FieldRecord
+  /**
+   * Owned by `RecordedState` (see `useRecordMedia`), not by this component,
+   * because `Screen`'s `spokenDescription` up there has to say what is
+   * attached and whether a removal question is open — doctrine rule 16.
+   */
+  media: RecordMedia
+  /**
+   * Owned by `RecordedState` too (see `useFieldEditing`), for a related
+   * reason: the editor these tiles open is rendered up there, as a sibling of
+   * `capture-recorded-scroll` rather than a descendant of it.
+   */
+  editor: FieldEditing
+}) {
+  const router = useRouter()
+  const { theme } = useTheme()
+
+  const { title, description, saved } = editor
+
+  const completed: InputAffordanceKind[] = [
+    ...(title !== null ? (['title'] as const) : []),
+    ...(description !== null ? (['description'] as const) : []),
+  ]
+
+  // Only the tile whose edit is actually in flight is busy — not both, and
+  // not the ones that only navigate, which never enter a saving state on
+  // this screen at all.
+  const busy: InputAffordanceKind[] =
+    editor.saving && editor.open !== null ? [editor.open.kind] : []
+
+  function handlePress(kind: InputAffordanceKind): void {
+    if (kind === 'title' || kind === 'description') {
+      editor.openEditor(kind)
+      return
+    }
+    // `camera.tsx` and `voice.tsx` both read `recordId` off the route params
+    // this way (`useLocalSearchParams<{ recordId?: string }>()`), and both
+    // are what actually attach the file — nothing here writes media.
+    router.push({
+      pathname: kind === 'photo' ? '/camera' : '/voice',
+      params: { recordId: record.id },
+    })
   }
 
   return (
@@ -1738,13 +1906,18 @@ function RecordedAffordances({
 
       {/*
         THE SAVE CONFIRMATION — directly under the tile she pressed, which is
-        where her eye returns the instant the modal goes away. Not further
+        where her eye returns the instant the editor goes away. Not further
         down beside the stored value: that is past the media strip, and being
         below the strip is the exact reason she never saw the value and asked
         whether anything had been saved at all.
 
+        AND THE EDITOR CLOSING IS NOT THIS. A cancel closes it identically, so
+        the surface going away says nothing about whether anything was
+        written. This sentence and the tile's own `Title ✓` are what say it,
+        and they are built from what `renameRecord` returned.
+
         `accessibilityLiveRegion` is the screen-reader half of the same
-        moment. The modal carries its own spoken description, so a reader is
+        moment. The editor carries its own spoken description, so a reader is
         focused inside a surface that is about to be removed from the tree;
         without a live region the removal is silent and the reader lands back
         on the tiles with no statement that anything happened.
@@ -1844,26 +2017,20 @@ function RecordedAffordances({
         </Type>
       )}
 
-      {editing === null ? null : (
-        <FieldEditor
-          kind={editing.kind}
-          draft={editing.draft}
-          saving={saving}
-          // Only a failure belonging to the editor that is open. The two
-          // cannot disagree today (`openEditor` clears the error and `save`
-          // re-sets it for the kind being written), but the editor renders
-          // the message and must not render one addressed to the other field
-          // if that ever stops being true.
-          error={error !== null && error.kind === editing.kind ? error.message : null}
-          onChangeDraft={(text) => {
-            setEditing({ kind: editing.kind, draft: text })
-          }}
-          onSave={() => {
-            void save()
-          }}
-          onCancel={closeEditor}
-        />
-      )}
+      {/*
+        AND NO EDITOR HERE ANY MORE — it is rendered by `RecordedState`, as a
+        SIBLING of `capture-recorded-scroll` rather than a descendant of it.
+
+        That is the fix for the first tap on SAVE. A `ScrollView` ancestor
+        takes the responder for the first touch on a control while a
+        dismissible soft keyboard is up (`ScrollView.js`,
+        `_handleStartShouldSetResponderCapture`), blurring the input instead
+        of letting the press through — which was the reported "I try to tap
+        save but it just closes the keyboard as the focus changes, then i hit
+        save again". Putting the editor back into this column would
+        reintroduce that fault, and no prop on the scroll view can be trusted
+        to keep holding it off once the editor is a descendant again.
+      */}
     </View>
   )
 }
@@ -1880,10 +2047,17 @@ function savedSentence(kind: 'title' | 'description', value: string | null): str
 /**
  * What a screen reader hears when the editor opens (doctrine rule 16).
  *
- * A modal is a new surface, so it carries its own description rather than
+ * The editor is a new surface, so it carries its own description rather than
  * borrowing the capture screen's — `describeRecordedScreen` above describes
  * the point, its attachments and the ways onward, none of which is reachable
  * while this is up.
+ *
+ * A `Modal` used to make that true on its own, by being a separate Android
+ * window that a reader does not read behind. An overlay is in the same window
+ * as the column, so the other half is done by hand: `RecordedState` withdraws
+ * the screen's own description while this one exists, and the recorded column
+ * carries `importantForAccessibility="no-hide-descendants"`. All three move
+ * together or a reader hears two surfaces at once.
  *
  * State-dependent for the same reason that one is: a save in flight and a
  * save that failed are the two moments where the surface and the sentence
@@ -1907,67 +2081,109 @@ function describeEditor(kind: 'title' | 'description', saving: boolean, error: s
  * **This is a field-reported blocker, not a preference.** Inline, the box
  * rendered after everything else in that column — the tiles, the strip, the
  * saved values — which is exactly the strip of screen the Android soft
- * keyboard occupies. She typed blind. A modal takes the input out of that
- * column entirely and puts it at the top of its own surface, so the keyboard
- * rises into empty space beneath it rather than over it.
+ * keyboard occupies. She typed blind. A surface of its own takes the input
+ * out of that column entirely, so the keyboard rises into empty space beneath
+ * it rather than over it.
  *
- * Four things about the way it is built are load-bearing:
+ * **AN OVERLAY, AND NOT A `Modal`, AND THAT IS THE KEYBOARD FIX.** The modal
+ * itself was judged right — "modal works well" — and nothing about the shape
+ * of this surface has changed. What changed is which Android window it lives
+ * in, because two faults came out of that one fact and one of them survived
+ * two attempts at it.
  *
- * - **Its own `SafeAreaView`.** A React Native `Modal` is a separate window
- *   on Android; it is not inside the `SafeAreaView` that `_layout.tsx` wraps
- *   every route in, so insets that screen gets for free have to be asked for
- *   again here. `react-native-safe-area-context`'s `SafeAreaView` is a native
- *   view rather than a hook, so it needs no provider of its own beyond the
- *   `SafeAreaProvider` already at the root, and it is the same component
- *   `_layout.tsx` uses.
+ * The mechanism, read out of RN 0.86.3 rather than guessed at. It is NOT that
+ * a dialog fails to inherit `MainActivity`'s `android:windowSoftInputMode`:
+ * `ReactModalHostView.kt` sets `SOFT_INPUT_ADJUST_RESIZE` on the dialog's
+ * window itself, so the resize behaviour is the same either way. It is the
+ * focus flag. The dialog's window is created with `FLAG_NOT_FOCUSABLE` set,
+ * and that flag is cleared only AFTER `newDialog.show()` returns:
+ *
+ *     window.setFlags(FLAG_NOT_FOCUSABLE, FLAG_NOT_FOCUSABLE)   // on create
+ *     ...
+ *     newDialog.show()
+ *     updateSystemAppearance()
+ *     window.clearFlags(FLAG_NOT_FOCUSABLE)                     // after show
+ *
+ * A window carrying `FLAG_NOT_FOCUSABLE` cannot hold IME focus, and clearing
+ * the flag does not grant it synchronously — it schedules a relayout, and the
+ * window manager grants input focus across a process boundary some frames
+ * later. `InputMethodManager.showSoftInput` on a window that does not yet
+ * hold IME focus is dropped, silently and successfully. `onShow` is dispatched
+ * from the dialog's own `OnShowListener`, which `Dialog.show()` posts, and a
+ * `requestAnimationFrame` after it is one frame later; both can land inside
+ * that window of time. That is why the cursor appeared with no keyboard, why
+ * the two previous attempts each half-worked, and why the title behaved
+ * differently from the notes on the same build — it was a race, not a
+ * difference between single-line and multiline.
+ *
+ * In THIS Activity's window there is no grant to wait for: the window already
+ * holds input focus before the editor renders into it. So the plain, ordinary
+ * mechanism works, and that is what is used below.
+ *
+ * Six things about the way it is built are load-bearing:
+ *
+ * - **It is rendered outside `capture-recorded-scroll`**, by `RecordedState`
+ *   rather than by `RecordedAffordances`. That is the whole of the fix for
+ *   the first tap on SAVE — see the comments at both ends. Moving the editor
+ *   into this window without moving it out of that scroll view would have
+ *   kept the two-tap fault and made it harder to see.
+ *
+ * - **No `SafeAreaView` of its own, deliberately.** It needed one as a
+ *   `Modal`, whose window sits outside the `SafeAreaView` `_layout.tsx` wraps
+ *   every route in. An overlay is a child of `Screen`, inside that same safe
+ *   area, so a second one would inset the scrim twice. One cosmetic
+ *   consequence, recorded rather than worked around: a transparent `Modal`
+ *   dimmed the display edge to edge, and this dims the safe area only, so the
+ *   status- and navigation-bar strips stay undimmed. Nothing of the record is
+ *   behind those strips — `_layout.tsx`'s `SafeAreaView` paints them
+ *   `surface` — so nothing shows through and nothing there is pressable;
+ *   covering them as well would mean hoisting this above that `SafeAreaView`,
+ *   which is a change to every route and belongs to the design pass (#11),
+ *   not to a keyboard fix.
+ *
+ * - **`autoFocus`, which is now the simplest thing that works.** Reported:
+ *   "when the screen opens, the keyboard should already be open and the text
+ *   box focused". In RN 0.86.3 `autoFocus` is a native prop and not a JS
+ *   effect: `ReactEditText.onAttachedToWindow` calls
+ *   `requestFocusProgrammatically()`, which is `requestFocus()` followed by an
+ *   explicit `showSoftKeyboard()` — `inputMethodManager.showSoftInput(this, 0)`
+ *   — rather than a focus that hopes to imply a keyboard. Attached into the
+ *   Activity's already-focused window, that is exactly the right call at
+ *   exactly the right moment. There is no imperative `focus()` here and no
+ *   retry, because there is nothing left to retry against.
  *
  * - **Centred in the space the keyboard leaves, not pinned to the top.** The
- *   first shipped version anchored the card to the top of the surface, on the
- *   reasoning that a keyboard rising from the bottom could then never reach
- *   it. That was reported back: "it's a pain to shift from bottom of screen
- *   to top". She is holding the phone one-handed over a survey point, and the
- *   journey from the keys at the bottom to a box at the very top and back is
- *   the complaint. So the card is centred inside `KeyboardAvoidingView`'s
- *   content box, which is the region *above* the keyboard: with
- *   `behavior="padding"` that view carries a `paddingBottom` equal to the
- *   keyboard's height (`KeyboardAvoidingView.js`, the `'padding'` case), so
- *   the flexed child below it measures only the visible band and centring
- *   inside it puts the block in the middle of what she can see. If Android
- *   has already resized the modal's own window instead — `ReactModalHostView`
- *   sets `SOFT_INPUT_ADJUST_RESIZE` on the dialog — that padding computes to
- *   zero (`frame.y + frame.height - keyboardY`, floored at 0) and the
- *   centring still lands in the same band. Either way the input and its two
- *   controls travel together as one block; they are one flex child, never
- *   split across the fold.
+ *   first shipped version anchored the card to the top, on the reasoning that
+ *   a keyboard rising from the bottom could then never reach it. That was
+ *   reported back: "it's a pain to shift from bottom of screen to top". She is
+ *   holding the phone one-handed over a survey point, and the journey from the
+ *   keys at the bottom to a box at the very top and back is the complaint. So
+ *   the card is centred inside `KeyboardAvoidingView`'s content box, which is
+ *   the region *above* the keyboard: with `behavior="padding"` that view
+ *   carries a `paddingBottom` equal to the keyboard's height
+ *   (`KeyboardAvoidingView.js`, the `'padding'` case), so the flexed child
+ *   below it measures only the visible band. Where Android has resized the
+ *   window instead — `adjustResize`, which `AndroidManifest.xml` sets on
+ *   `MainActivity` and which now genuinely applies to this surface — that
+ *   padding computes to zero (`frame.y + frame.height - keyboardY`, floored at
+ *   0) and the centring lands in the same band anyway. Either way the input
+ *   and its two controls travel together as one block; they are one flex
+ *   child, never split across the fold.
  *
- * - **A bounded box.** `field.control` caps the height of the notes box, so
- *   a long note scrolls inside it rather than growing the card downwards
- *   into the keyboard — the inline layout's failure reproduced inside the
- *   fix.
+ * - **A bounded box.** `field.control` caps the height of the notes box, so a
+ *   long note scrolls inside it rather than growing the card downwards into
+ *   the keyboard — the inline layout's failure reproduced inside the fix.
  *
- * - **`onShow` focuses the input; `autoFocus` does not and cannot.** Also
- *   reported: "when the screen opens, the keyboard should already be open and
- *   the text box focused". `autoFocus` is not a JS effect in RN 0.86.3 — it
- *   is a native prop, acted on in `ReactEditText.onAttachedToWindow`, which
- *   runs while the dialog is being built and before its window can take the
- *   input method. The focus lands, the keyboard does not. Worse, it then
- *   *blocks* the retry: the native focus event sets
- *   `TextInputState.currentlyFocusedInputRef`, and `focusTextInput` returns
- *   early for a field that is already the current one. So `autoFocus` and an
- *   `onShow` focus together are strictly worse than `onShow` alone —
- *   `autoFocus` is deliberately absent below, and putting it back would
- *   silently disarm the line that replaced it. `onShow` is dispatched from
- *   the dialog's own `OnShowListener` (`ReactModalHostView`, `ShowEvent`),
- *   i.e. once the window is up, and `TextInput.focus()` from there reaches
- *   `requestFocusProgrammatically`, which calls `showSoftKeyboard()`
- *   explicitly rather than hoping a focus implies one.
+ * - **It claims the touch, so nothing behind it is pressable.** A `Modal` gave
+ *   that for free by being a window. `onStartShouldSetResponder` on the scrim
+ *   is the equivalent here: it is the BUBBLE phase, so the input and the two
+ *   buttons inside still take their own touches first (only a `*Capture`
+ *   handler would steal from them), and anything that reaches the scrim stops
+ *   there rather than falling through to the column underneath.
  *
- * The first tap on SAVE is not fixed here at all — it is fixed on the
- * `ScrollView` this modal is a React child of. See the comment there.
- *
- * The scrim is what answers "the record's content should not be competing
- * for attention behind it": the same `overlay` token, at the same opacity,
- * that `HelpAffordance` already dims this application's screens with.
+ * The scrim is what answers "the record's content should not be competing for
+ * attention behind it": the same `overlay` token, at the same opacity, that
+ * `HelpAffordance` already dims this application's screens with.
  */
 function FieldEditor({
   kind,
@@ -1988,167 +2204,193 @@ function FieldEditor({
 }) {
   const { theme } = useTheme()
   const label = kind === 'title' ? 'A name for this point' : 'Notes about this point'
-  // Imperative rather than declarative on purpose — see the note on this
-  // component. The keyboard only comes up if the focus is asked for after the
-  // dialog's window exists, and `onShow` is the only event that says so.
-  const inputRef = useRef<TextInput>(null)
+
+  /**
+   * The Android back button, which a `Modal` used to give for free through
+   * `onRequestClose`. An overlay is not a window, so nothing intercepts BACK
+   * unless this does — and without it BACK would pop the route, taking her off
+   * the recorded point entirely while an editor was open over it.
+   *
+   * It returns `true` in both branches, which is the same shape `Modal` had:
+   * BACK is consumed for as long as this surface is up, whether or not the
+   * press is allowed to close it.
+   *
+   * The guard is the same one CANCEL carries, and for the same reason —
+   * closing the editor takes the failure message with it, so a dismissal
+   * accepted while `renameRecord` is still out could land a failure on a
+   * surface that no longer exists. It is a guard and not a disabled control:
+   * doctrine rule 3 is about something that LOOKS pressable and does nothing,
+   * and a hardware key renders nothing to look at.
+   *
+   * `saving` and `onCancel` are in the dependency list rather than read
+   * through a ref: a listener registered while `saving` was `false` would
+   * otherwise go on believing that after the write started.
+   */
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!saving) onCancel()
+      return true
+    })
+    return () => {
+      subscription.remove()
+    }
+  }, [saving, onCancel])
 
   return (
-    <Modal
-      visible
-      transparent
-      animationType="fade"
-      onShow={() => {
-        // Twice, deliberately, and the second one is not belt-and-braces.
-        //
-        // Reported from an S25: the keyboard came up for the title and NOT
-        // for the notes. The difference is `multiline`, which Android backs
-        // with a different native input configuration. `onShow` fires when
-        // the dialog's window has been created, which is early enough for the
-        // single-line case and — for the multiline one — can be before the
-        // window actually holds IME focus, so the show-soft-input request is
-        // dropped and she is left with a cursor and no keyboard.
-        //
-        // The retry a frame later asks again once the window has settled.
-        // Focusing an already-focused input is a no-op, so the single-line
-        // path is unaffected. This is a timing fix, not a race to win: if the
-        // first call worked, the second costs nothing.
-        inputRef.current?.focus()
-        requestAnimationFrame(() => {
-          inputRef.current?.focus()
-        })
-      }}
-      // The Android back button. Guarded rather than disabled-looking,
-      // because it is hardware and not a rendered control: doctrine rule 3 is
-      // about a control that looks pressable and does nothing, and there is
-      // nothing on screen to look pressable here. The guard exists so a
-      // dismissal mid-write cannot leave a failure with no surface to appear
-      // on — see `closeEditor`.
-      onRequestClose={() => {
-        if (!saving) onCancel()
-      }}
+    /*
+      THE SCRIM, AND THE SURFACE BOUNDARY.
+
+      `StyleSheet.absoluteFill` rather than `flex: 1`: this is a sibling of the
+      recorded column, not a replacement for it, so it has to be lifted out of
+      that column's flow and laid over the top of it.
+
+      `onStartShouldSetResponder` is what makes it a surface rather than a
+      tint. Returning `true` claims any touch that reaches the scrim, so a tap
+      on the dimmed column below does nothing at all — React Native does not
+      re-hit-test siblings underneath once a node has been hit, and a node that
+      claims nothing would simply drop the touch, which is the same outcome by
+      accident rather than on purpose. Stating it is what makes it assertable.
+      It is the bubble phase, so the box and the two buttons inside claim their
+      own touches first.
+
+      `accessibilityViewIsModal` is the iOS half of hiding what is behind, and
+      is honestly iOS-only here — it is in `BaseViewConfig.ios.js`, absent from
+      `BaseViewConfig.android.js`, and unimplemented anywhere under
+      `ReactAndroid/` in RN 0.86.3. The Android half is
+      `importantForAccessibility="no-hide-descendants"` on the scroll view, plus
+      `RecordedState` withdrawing the screen's own spoken description; both are
+      commented where they are.
+    */
+    <View
+      testID="capture-editor-overlay"
+      accessibilityViewIsModal
+      onStartShouldSetResponder={() => true}
+      style={[StyleSheet.absoluteFill, { backgroundColor: `${theme.colors.overlay}CC` }]}
     >
-      <KeyboardAvoidingView
-        behavior="padding"
-        style={{ flex: 1, backgroundColor: `${theme.colors.overlay}CC` }}
-      >
-        <SafeAreaView style={{ flex: 1 }}>
-          {/*
-            `flex: 1` so this fills whatever height `KeyboardAvoidingView`
-            leaves once the keyboard is accounted for, and `justifyContent:
-            'center'` so the card sits in the middle of it rather than at
-            either edge. Both are required: without the flex there is no box
-            to centre in, and the card collapses back to the top.
-          */}
-          <View style={{ flex: 1, justifyContent: 'center', padding: spacing.lg }}>
-            <View
-              testID="capture-editor"
-              style={{
-                gap: spacing.md,
-                padding: spacing.lg,
-                borderRadius: radii.xl,
-                borderWidth: 1,
-                borderColor: theme.colors.border,
-                backgroundColor: theme.colors.surfaceRaised,
-              }}
-            >
-              {/*
+      <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>
+        {/*
+          `flex: 1` so this fills whatever height `KeyboardAvoidingView`
+          leaves once the keyboard is accounted for, and `justifyContent:
+          'center'` so the card sits in the middle of it rather than at
+          either edge. Both are required: without the flex there is no box
+          to centre in, and the card collapses back to the top.
+        */}
+        <View style={{ flex: 1, justifyContent: 'center', padding: spacing.lg }}>
+          <View
+            testID="capture-editor"
+            style={{
+              gap: spacing.md,
+              padding: spacing.lg,
+              borderRadius: radii.xl,
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              backgroundColor: theme.colors.surfaceRaised,
+            }}
+          >
+            {/*
                 Doctrine rule 16, the same shape `Screen` uses for a route:
                 present for a screen reader, invisible and out of flow for
                 everyone else. `Screen` itself is not reused here — it is a
                 flex-grown, padded page container, and this is a card.
               */}
-              <View
-                testID="capture-editor-spoken-description"
-                accessible
-                accessibilityRole="header"
-                accessibilityLabel={describeEditor(kind, saving, error)}
-                style={styles.spokenDescription}
-              />
+            <View
+              testID="capture-editor-spoken-description"
+              accessible
+              accessibilityRole="header"
+              accessibilityLabel={describeEditor(kind, saving, error)}
+              style={styles.spokenDescription}
+            />
 
-              <Type variant="heading">
-                {kind === 'title' ? 'Name this point' : 'Notes for this point'}
-              </Type>
+            <Type variant="heading">
+              {kind === 'title' ? 'Name this point' : 'Notes for this point'}
+            </Type>
 
-              {/*
-                NO `autoFocus` HERE, AND THAT IS THE FIX, NOT AN OMISSION.
-                See the note on this component: in RN 0.86.3 `autoFocus` is a
-                native prop applied in `onAttachedToWindow`, too early for the
-                dialog's window to take the input method — and the focus it
-                does land makes the `onShow` focus above a no-op, because
-                `TextInputState.focusTextInput` returns early for the field
-                that is already current.
+            {/*
+                `autoFocus`, AND IT IS THE WHOLE OF THE FOCUS MECHANISM — no
+                imperative `focus()`, no retry a frame later. Both of those
+                were attempts to beat a race that only existed because the
+                editor was in a dialog window that did not yet hold IME focus
+                (see the note on this component). In the Activity's own window
+                there is no race: `ReactEditText.onAttachedToWindow` calls
+                `requestFocusProgrammatically()`, which is `requestFocus()`
+                followed by an explicit `showSoftKeyboard()`, and the window it
+                attaches into already holds input focus.
+
+                Adding an imperative `focus()` back alongside this would be
+                worse than useless: the native focus event sets
+                `TextInputState.currentlyFocusedInputRef`, and `focusTextInput`
+                returns early for a field that is already the current one — so
+                the second call would be the no-op, not this.
               */}
-              <TextInput
-                ref={inputRef}
-                testID={kind === 'title' ? 'capture-title-input' : 'capture-description-input'}
-                accessibilityLabel={label}
-                value={draft}
-                onChangeText={onChangeDraft}
-                placeholder={label}
-                placeholderTextColor={theme.colors.textDim}
-                multiline={kind === 'description'}
-                style={{
-                  minHeight: kind === 'description' ? field.control : touch.min,
-                  // See the note on the component: bounded so a long note
-                  // scrolls rather than growing the card into the keyboard.
-                  maxHeight: field.control,
-                  borderRadius: radii.md,
-                  borderWidth: 2,
-                  borderColor: theme.colors.border,
-                  backgroundColor: theme.colors.surface,
-                  color: theme.colors.textPrimary,
-                  paddingHorizontal: spacing.md,
-                }}
-              />
+            <TextInput
+              autoFocus
+              testID={kind === 'title' ? 'capture-title-input' : 'capture-description-input'}
+              accessibilityLabel={label}
+              value={draft}
+              onChangeText={onChangeDraft}
+              placeholder={label}
+              placeholderTextColor={theme.colors.textDim}
+              multiline={kind === 'description'}
+              style={{
+                minHeight: kind === 'description' ? field.control : touch.min,
+                // See the note on the component: bounded so a long note
+                // scrolls rather than growing the card into the keyboard.
+                maxHeight: field.control,
+                borderRadius: radii.md,
+                borderWidth: 2,
+                borderColor: theme.colors.border,
+                backgroundColor: theme.colors.surface,
+                color: theme.colors.textPrimary,
+                paddingHorizontal: spacing.md,
+              }}
+            />
 
-              {/*
-                THE FAILURE, INSIDE THE MODAL. It used to render at the foot
-                of the recorded column; left there it would now be behind the
+            {/*
+                THE FAILURE, ON THE EDITING SURFACE. It used to render at the
+                foot of the recorded column; left there it would be behind the
                 scrim, unreadable, while the surface she is actually looking
                 at said nothing at all. A failed save keeps the editor open
                 with her text still in it, so this is both where she is
                 looking and where the retry is.
               */}
-              {error === null ? null : (
-                <Type variant="small" testID={`capture-${kind}-error`}>
-                  {error}
-                </Type>
-              )}
+            {error === null ? null : (
+              <Type variant="small" testID={`capture-${kind}-error`}>
+                {error}
+              </Type>
+            )}
 
-              <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-                <Button
-                  testID={kind === 'title' ? 'capture-title-save' : 'capture-description-save'}
-                  label={saving ? 'SAVING…' : kind === 'title' ? 'SAVE NAME' : 'SAVE NOTES'}
-                  spokenLabel={
-                    kind === 'title'
-                      ? 'Save this name onto the point'
-                      : 'Save these notes onto the point'
-                  }
-                  disabled={saving}
-                  onPress={onSave}
-                />
-                {/*
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <Button
+                testID={kind === 'title' ? 'capture-title-save' : 'capture-description-save'}
+                label={saving ? 'SAVING…' : kind === 'title' ? 'SAVE NAME' : 'SAVE NOTES'}
+                spokenLabel={
+                  kind === 'title'
+                    ? 'Save this name onto the point'
+                    : 'Save these notes onto the point'
+                }
+                disabled={saving}
+                onPress={onSave}
+              />
+              {/*
                   Genuinely disabled mid-write, not inert (doctrine rule 3).
                   It is disabled at all — rather than left live — because
                   closing the editor takes the failure message with it, and a
                   cancel accepted while the write is still out could land that
                   failure on a surface that no longer exists.
                 */}
-                <Button
-                  testID="capture-editor-cancel"
-                  label="CANCEL"
-                  spokenLabel="Close without saving"
-                  kind="secondary"
-                  disabled={saving}
-                  onPress={onCancel}
-                />
-              </View>
+              <Button
+                testID="capture-editor-cancel"
+                label="CANCEL"
+                spokenLabel="Close without saving"
+                kind="secondary"
+                disabled={saving}
+                onPress={onCancel}
+              />
             </View>
           </View>
-        </SafeAreaView>
+        </View>
       </KeyboardAvoidingView>
-    </Modal>
+    </View>
   )
 }
 

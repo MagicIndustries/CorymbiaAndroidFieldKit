@@ -1,5 +1,12 @@
 import React from 'react'
-import { StyleSheet, TextInput, processColor, type ViewStyle } from 'react-native'
+import {
+  BackHandler,
+  StyleSheet,
+  TextInput,
+  processColor,
+  type HardwareBackPressEvent,
+  type ViewStyle,
+} from 'react-native'
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native'
 import { INPUT_AFFORDANCE_ORDER, ThemeProvider, isLocked, radiusForMetres } from '@corymbia/ui'
 import { darkTheme, type as typeScale } from '@corymbia/tokens'
@@ -608,71 +615,88 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 /**
- * The `Modal` an element is rendered inside, or a failure. `within(...)` on
- * the result then reads that subtree and nothing else.
+ * The overlay surface an element is rendered on, or a failure. `within(...)`
+ * on the result then reads that subtree and nothing else.
  *
- * WHY THIS IS A TREE WALK AND NOT A QUERY. "Is this inside a `Modal`" is not
- * a question any supported query can ask: RNTL v14 removed the
+ * WHY THIS IS A TREE WALK AND NOT A QUERY. "Is this on a surface of its own"
+ * is not a question any supported query can ask: RNTL v14 removed the
  * `UNSAFE_*ByType` queries outright (14.0.1 exposes no `UNSAFE_getByType` on
  * `screen` or on a render result — checked against its `dist/`), and every
- * query that remains matches on props, which a plain `<View>` carrying the
- * same `testID` would satisfy identically. A `View` in that column is exactly
- * what shipped and exactly what this has to be able to fail on, so the
- * assertion has to reach the element's type rather than its props.
+ * query that remains matches on props.
  *
- * WHY THE TYPE IS THE STRING `'Modal'` AND NOT THE IMPORTED COMPONENT. The
- * composite is collapsed out of the chain RNTL's `.parent` walks — it exposes
- * host elements only — so there is no instance left to compare against the
- * `Modal` symbol by identity. What survives is a host element whose type is
- * the name `@react-native/jest-preset`'s `Modal` mock renders under, which is
- * `'Modal'`. `<View>` renders `'View'`, which is the discrimination this needs
- * and the whole of what it claims.
+ * WHY IT MATCHES ON THE TWO PROPERTIES AND NOT ON A `testID`. This replaced a
+ * walk for a host element of type `'Modal'`, which no `<View>` could be
+ * mistaken for. The editor is no longer a `Modal` — it is an overlay in this
+ * Activity's own window (see `FieldEditor`) — and the naive replacement, a
+ * walk for `testID="capture-editor-overlay"`, would be satisfied by any plain
+ * `<View>` carrying that id, including one rendered back inside the recorded
+ * column, which is precisely the build this has to be able to fail on. So it
+ * matches on what actually makes the node a surface instead: a box lifted out
+ * of the flow and laid over everything (`position: 'absolute'` with all four
+ * insets at 0), which claims any touch that reaches it
+ * (`onStartShouldSetResponder` returning `true`) so nothing behind is
+ * pressable. An inline `<View>` in the column has neither.
  */
-function modalAround(
+function overlayAround(
   element: ReturnType<typeof screen.getByTestId>,
 ): ReturnType<typeof screen.getByTestId> {
   let node = element.parent
   const seen: string[] = []
   while (node !== null) {
-    if (node.type === 'Modal') return node
-    if (typeof node.type === 'string') seen.push(node.type)
+    if (typeof node.type === 'string') {
+      const style = StyleSheet.flatten<ViewStyle>(node.props.style)
+      const claimsTouches: unknown = node.props.onStartShouldSetResponder
+      if (
+        style.position === 'absolute' &&
+        style.top === 0 &&
+        style.left === 0 &&
+        style.right === 0 &&
+        style.bottom === 0 &&
+        typeof claimsTouches === 'function' &&
+        claimsTouches() === true
+      ) {
+        return node
+      }
+      seen.push(node.type)
+    }
     node = node.parent
   }
   throw new Error(
-    `Expected the element to be inside a Modal. Its ancestors were: ${seen.join(' < ')}.`,
+    `Expected the element to be on an overlay surface — an absolutely filled box that claims ` +
+      `touches. Its ancestors were: ${seen.join(' < ')}.`,
   )
 }
 
 /**
- * The `ScrollView` an element is rendered inside, or a failure.
+ * The `testID` of every `ScrollView` above an element, innermost first.
  *
- * The same tree walk as `modalAround`, and for a related reason: the claim
- * being made is about an ANCESTOR RELATIONSHIP in the React tree, which no
- * prop-matching query can express. It matters here because that relationship
- * is the whole of why a prop on the recorded column's scroll view governs a
- * tap on a button inside a `Modal` — on a device the modal is a separate
- * Android window, but React Native's responder system builds its propagation
- * path from the React tree, so the scroll view's
- * `onStartShouldSetResponderCapture` still runs first for that tap.
+ * A tree walk for the same reason `overlayAround` is one: the claim is about
+ * an ANCESTOR RELATIONSHIP in the React tree, which no prop-matching query can
+ * express. It matters because React Native's responder system builds its
+ * propagation path from the React tree, and a `ScrollView` on that path takes
+ * the responder for the first touch on a control while a dismissible keyboard
+ * is up (`ScrollView.js`, `_handleStartShouldSetResponderCapture`) — the
+ * reported "it just closes the keyboard … then i hit save again". So what has
+ * to be provable about the editor's SAVE is a NEGATIVE: that
+ * `capture-recorded-scroll` is not on its path at all.
  *
- * `'RCTScrollView'` and not `'ScrollView'`: `@react-native/jest-preset`'s
- * mock renders `<RCTScrollView {...props}>`, spreading the props straight
- * onto the host element, so that is both the type that survives and the node
- * the props can be read from.
+ * A negative asserted through a tree walk is worthless if the walk is broken —
+ * it would pass against a walk that found nothing ever — so every test using
+ * this pairs it with a positive control on a control that IS in that column.
+ *
+ * `'RCTScrollView'` and not `'ScrollView'`: `@react-native/jest-preset`'s mock
+ * renders `<RCTScrollView {...props}>`, spreading the props straight onto the
+ * host element, so that is both the type that survives and the node the props
+ * can be read from.
  */
-function scrollViewAround(
-  element: ReturnType<typeof screen.getByTestId>,
-): ReturnType<typeof screen.getByTestId> {
+function enclosingScrollViewTestIDs(element: ReturnType<typeof screen.getByTestId>): unknown[] {
   let node = element.parent
-  const seen: string[] = []
+  const found: unknown[] = []
   while (node !== null) {
-    if (node.type === 'RCTScrollView') return node
-    if (typeof node.type === 'string') seen.push(node.type)
+    if (node.type === 'RCTScrollView') found.push(node.props.testID)
     node = node.parent
   }
-  throw new Error(
-    `Expected the element to be inside a ScrollView. Its ancestors were: ${seen.join(' < ')}.`,
-  )
+  return found
 }
 
 /**
@@ -1811,15 +1835,30 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     expect(screen.getByTestId('capture-title-error')).toHaveTextContent(
       'The name was not saved: database is locked. The point itself is safe.',
     )
+    /*
+      `includeHiddenElements` FOR EVERY QUERY INTO THE COLUMN BELOW, and it is
+      not a convenience. The editor is still open here, and while it is open
+      the recorded column carries `importantForAccessibility="no-hide-descendants"`
+      (see `RecordedState`) so a screen reader cannot wander behind the scrim.
+      RNTL models exactly that: its queries default to `includeHiddenElements:
+      false` and skip anything under such an ancestor. Left at the default,
+      `queryByTestId('capture-title-value')).toBeNull()` below would pass
+      against a build that had just written the title and rendered it — it
+      would be asserting the hiding, not the absence. These assertions are
+      about the VISIBLE state of the dimmed column, so they have to ask for
+      the hidden tree explicitly.
+    */
     // The record is untouched and the tile has not claimed a title it does
     // not have.
-    expect(screen.queryByTestId('capture-title-value')).toBeNull()
+    expect(screen.queryByTestId('capture-title-value', { includeHiddenElements: true })).toBeNull()
     // Exact, which is this file's default: `Title` and not `Title ✓`. The
     // `.not.toHaveTextContent('✓')` that used to sit here was redundant with
     // that — and worse than redundant, since with `exact` defaulting to true
     // it asserted only that the label was not the single character `✓`, which
     // it could never be.
-    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title')
+    expect(
+      screen.getByTestId('affordance-title-label', { includeHiddenElements: true }),
+    ).toHaveTextContent('Title')
     // And the control is live again, so the failure is recoverable rather
     // than a dead end.
     expect(screen.getByTestId('capture-title-save')).not.toBeDisabled()
@@ -1922,11 +1961,25 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     await fireEvent.press(screen.getByTestId('capture-title-save'))
     await settle()
 
-    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title · Saving')
-    expect(screen.getByTestId('affordance-title')).toBeDisabled()
+    /*
+      `includeHiddenElements`, for the reason spelled out on the failure test
+      above: the editor is still open, so the column behind it is hidden from
+      a screen reader by `importantForAccessibility` and RNTL's queries skip it
+      by default. Nothing is lost to a reader by that — the editor's own
+      description says `Saving.` and its SAVE reads `SAVING…` — and these four
+      assertions are about the visible tiles, so they ask for the hidden tree.
+    */
+    expect(
+      screen.getByTestId('affordance-title-label', { includeHiddenElements: true }),
+    ).toHaveTextContent('Title · Saving')
+    expect(screen.getByTestId('affordance-title', { includeHiddenElements: true })).toBeDisabled()
     // Only the tile being written, not every tile: notes are not in flight.
-    expect(screen.getByTestId('affordance-description-label')).toHaveTextContent('Notes')
-    expect(screen.getByTestId('affordance-description')).not.toBeDisabled()
+    expect(
+      screen.getByTestId('affordance-description-label', { includeHiddenElements: true }),
+    ).toHaveTextContent('Notes')
+    expect(
+      screen.getByTestId('affordance-description', { includeHiddenElements: true }),
+    ).not.toBeDisabled()
 
     // Let it finish, so the screen is not left mid-write with a pending
     // promise for the next test to inherit.
@@ -1978,23 +2031,26 @@ describe('the affordances (spec §9.6, Task 11)', () => {
  * The field-reported blocker: "Their text boxes are not visible when the
  * keyboard appears", and "not sure they're being saved".
  *
- * WHAT THESE TESTS CAN AND CANNOT SEE. Jest can prove the input is inside a
- * `Modal` and not appended to the recorded state's own column, and it can
- * prove a save says so afterwards. It cannot see a keyboard: whether the box
- * ends up genuinely clear of one on a device is a property of Android's
- * window insets, `KeyboardAvoidingView` inside a `Modal` under edge-to-edge,
- * and the modal's own safe area — none of which exists here. Those go to the
- * owner as device checks, not as assertions.
+ * WHAT THESE TESTS CAN AND CANNOT SEE. Jest can prove the input is on a
+ * surface of its own, outside the recorded state's own column, and that a
+ * save says so afterwards. It cannot see a keyboard: whether the box ends up
+ * genuinely clear of one on a device is a property of Android's window
+ * insets, `KeyboardAvoidingView` under edge-to-edge and `adjustResize` — none
+ * of which exists here. Those go to the owner as device checks, not as
+ * assertions.
  *
- * Under `jest-expo` the `Modal` reached below is `@react-native/jest-preset`'s
- * mock, not the native module (the same substitution `HelpAffordance`'s own
- * suite documents): its `render()` returns `null` when `visible` is `false`,
- * and otherwise renders its children inline. So `within(Modal)` here proves
- * the editor is a child of the `Modal` element — which is the thing that was
- * wrong — and proves nothing about how Android presents it.
+ * THE EDITOR IS NO LONGER A `Modal`, AND THESE TESTS CHANGED WITH IT. A
+ * `Modal` is a separate Android window, and that window is where both reported
+ * faults came from (`FieldEditor` carries the mechanism, read out of RN
+ * 0.86.3's `ReactModalHostView.kt`). The editor is now an overlay in this
+ * Activity's own window. The assertions below moved from "is it inside a
+ * `Modal` element" to "is it on an absolutely filled surface that claims
+ * touches, and NOT inside `capture-recorded-scroll`" — see `overlayAround` and
+ * `enclosingScrollViewTestIDs` for why those two properties, and not a
+ * `testID`, are what a plain inline `<View>` in the column cannot fake.
  */
-describe('the editor, which is a modal and not the foot of the column', () => {
-  it('keeps the box out of the record’s own column until it is opened, and inside a modal when it is', async () => {
+describe('the editor, which is an overlay and not the foot of the column', () => {
+  it('keeps the box out of the record’s own column until it is opened, and on a surface of its own when it is', async () => {
     await renderRecorded()
 
     // Nothing until she asks for it. Inline, the box was rendered after the
@@ -2004,24 +2060,24 @@ describe('the editor, which is a modal and not the foot of the column', () => {
 
     await fireEvent.press(screen.getByTestId('affordance-title'))
 
-    // `within` the `Modal` ELEMENT, not a testID on a wrapper: a plain
-    // `<View testID="capture-editor-modal">` would satisfy any assertion
-    // phrased against a testID, and a plain `View` in this column is
-    // precisely the build that shipped. Swapping the `Modal` for a `View`
-    // fails here with "No instances found with type Modal".
-    const modal = modalAround(screen.getByTestId('capture-title-input'))
-    expect(within(modal).getByTestId('capture-title-input')).toBeTruthy()
-    expect(within(modal).getByTestId('capture-title-save')).toBeTruthy()
-    expect(within(modal).getByTestId('capture-editor-cancel')).toBeTruthy()
+    // `within` the OVERLAY, found by the two properties that make it a
+    // surface rather than by a testID any `<View>` could carry: an absolutely
+    // filled box that claims the touches reaching it. A build that rendered
+    // this card back into the recorded column with the same testIDs fails
+    // here rather than passing quietly.
+    const overlay = overlayAround(screen.getByTestId('capture-title-input'))
+    expect(within(overlay).getByTestId('capture-title-input')).toBeTruthy()
+    expect(within(overlay).getByTestId('capture-title-save')).toBeTruthy()
+    expect(within(overlay).getByTestId('capture-editor-cancel')).toBeTruthy()
   })
 
-  it('holds the notes box inside the same modal, so a fix applied to one field is not mistaken for both', async () => {
+  it('holds the notes box on the same kind of surface, so a fix applied to one field is not mistaken for both', async () => {
     await renderRecorded()
     await fireEvent.press(screen.getByTestId('affordance-description'))
 
-    const modal = modalAround(screen.getByTestId('capture-description-input'))
-    expect(within(modal).getByTestId('capture-description-input')).toBeTruthy()
-    expect(within(modal).getByTestId('capture-description-save')).toBeTruthy()
+    const overlay = overlayAround(screen.getByTestId('capture-description-input'))
+    expect(within(overlay).getByTestId('capture-description-input')).toBeTruthy()
+    expect(within(overlay).getByTestId('capture-description-save')).toBeTruthy()
   })
 
   it('closes without writing anything when she leaves it', async () => {
@@ -2146,11 +2202,11 @@ describe('the editor, which is a modal and not the foot of the column', () => {
     await fireEvent.press(screen.getByTestId('capture-title-save'))
     await settle()
 
-    // INSIDE the modal. Left at the foot of the recorded column, the sentence
-    // would now be behind the scrim, unreadable, while the surface she is
+    // ON THE EDITING SURFACE. Left at the foot of the recorded column, the
+    // sentence would be behind the scrim, unreadable, while the surface she is
     // actually looking at said nothing at all.
-    const modal = modalAround(screen.getByTestId('capture-title-input'))
-    expect(within(modal).getByTestId('capture-title-error')).toHaveTextContent(
+    const overlay = overlayAround(screen.getByTestId('capture-title-input'))
+    expect(within(overlay).getByTestId('capture-title-error')).toHaveTextContent(
       'The name was not saved: database is locked. The point itself is safe.',
     )
     // And the retry is a second tap, not a second typing.
@@ -2168,8 +2224,8 @@ describe('the editor, which is a modal and not the foot of the column', () => {
     await fireEvent.press(screen.getByTestId('capture-description-save'))
     await settle()
 
-    const modal = modalAround(screen.getByTestId('capture-description-input'))
-    expect(within(modal).getByTestId('capture-description-error')).toHaveTextContent(
+    const overlay = overlayAround(screen.getByTestId('capture-description-input'))
+    expect(within(overlay).getByTestId('capture-description-error')).toHaveTextContent(
       'The notes were not saved: database is locked. The point itself is safe.',
     )
   })
@@ -2222,19 +2278,21 @@ describe('the editor, which is a modal and not the foot of the column', () => {
  *   3. "I try to tap save but it just closes the keyboard as the focus
  *      changes, then i hit save again, which is bad ux."
  *
- * WHAT THESE TESTS CANNOT SEE, STATED PLAINLY. Jest has no keyboard and no
- * layout engine. Nothing below proves any of the three faults is fixed on a
- * device — there is no soft keyboard to sit above, no measured frame for
- * `KeyboardAvoidingView` to shrink, no input method to open, and RNTL's
+ * WHAT THESE TESTS CANNOT SEE, STATED PLAINLY. Jest has no keyboard, no
+ * layout engine and no window manager. **Nothing below proves any of the
+ * three faults is fixed on a device** — there is no soft keyboard to sit
+ * above, no measured frame for `KeyboardAvoidingView` to shrink, no input
+ * method to open, no window for one to be granted focus in, and RNTL's
  * `fireEvent.press` calls `onPress` directly rather than running the touch
- * through the responder system that eats the real tap. What they prove is
- * that the specific mechanism each fix rests on is present and cannot be
- * deleted in silence:
+ * through the responder system that ate the real tap. What they prove is that
+ * the specific mechanism each fix rests on is present and cannot be deleted in
+ * silence:
  *
  * - the card is centred in a flexed box rather than hugging the top,
- * - the input is focused from the modal's `onShow` and nothing has focused it
- *   earlier (which would make that call a no-op),
- * - the scroll view the modal is a React child of persists handled taps.
+ * - the input carries `autoFocus` and nothing focuses it imperatively (which
+ *   would be the no-op, not the other way round — see `FieldEditor`),
+ * - the editor's SAVE is NOT inside `capture-recorded-scroll`, so the scroll
+ *   view that ate the first tap is no longer on its responder path at all.
  *
  * Whether each of those actually produces the behaviour she asked for is a
  * device check, and is written up as one.
@@ -2270,63 +2328,272 @@ describe('the editor’s keyboard behaviour (the second S25 report)', () => {
     expect(style.justifyContent).toBe('center')
   })
 
-  it('focuses the box when the modal is shown, and leaves it unfocused until then', async () => {
+  it('asks for the keyboard the one way that works in this window, and does not fight itself over it', async () => {
     // The mocked `TextInput`'s `focus` lives on its prototype
     // (`@react-native/jest-preset`'s `mockComponent` assigns `MockNativeMethods`
-    // there), so this is the call the component's own ref makes. Restored by
-    // hand: this file deliberately does not `restoreAllMocks` between tests.
+    // there), so a spy here would catch any imperative focus the component
+    // made through a ref. Restored by hand: this file deliberately does not
+    // `restoreAllMocks` between tests.
     const focus = jest.spyOn(TextInput.prototype, 'focus')
     try {
       await renderRecorded()
-      await fireEvent.press(screen.getByTestId('affordance-title'))
 
-      const input = screen.getByTestId('capture-title-input')
+      // BOTH FIELDS, because the last two attempts each worked for the title
+      // and not for the notes, and a test that only opened one would have
+      // reported both of them fixed.
+      for (const [tile, input] of [
+        ['affordance-title', 'capture-title-input'],
+        ['affordance-description', 'capture-description-input'],
+      ] as const) {
+        await fireEvent.press(screen.getByTestId(tile))
 
-      // NO `autoFocus`, AND ITS ABSENCE IS THE FIX. In RN 0.86.3 `autoFocus`
-      // is a native prop applied in `ReactEditText.onAttachedToWindow` — too
-      // early for the dialog's window to take the input method, so it focuses
-      // without opening a keyboard, which is the reported symptom ("I have to
-      // click in the text box to open the keyboard"). It then *prevents* the
-      // repair: the focus event it causes sets
-      // `TextInputState.currentlyFocusedInputRef`, and `focusTextInput`
-      // returns early for the field that is already current, so the `onShow`
-      // call below would do nothing. Putting `autoFocus` back would silently
-      // disarm the mechanism, so it is asserted absent rather than left to a
-      // comment.
-      expect(input.props.autoFocus).toBeUndefined()
-      expect(focus).not.toHaveBeenCalled()
+        // `autoFocus`, AND IT IS NOW THE WHOLE MECHANISM. In RN 0.86.3
+        // `autoFocus` is a native prop, not a JS effect:
+        // `ReactEditText.onAttachedToWindow` calls
+        // `requestFocusProgrammatically()`, which is `requestFocus()` followed
+        // by an explicit `showSoftKeyboard()` —
+        // `inputMethodManager.showSoftInput(this, 0)`. It failed inside a
+        // `Modal` because the dialog's window is created with
+        // `FLAG_NOT_FOCUSABLE` and only has it cleared after `show()`
+        // (`ReactModalHostView.kt`), so the request landed on a window that
+        // could not yet hold IME focus. In this Activity's window there is no
+        // such wait.
+        expect(screen.getByTestId(input).props.autoFocus).toBe(true)
 
-      // `onShow` is dispatched from the dialog's own `OnShowListener`
-      // (`ReactModalHostView`), i.e. after the window is up, which is the
-      // point at which asking for focus can actually raise a keyboard.
-      const modal = modalAround(input)
-      await fireEvent(modal, 'show')
+        // AND NOTHING FOCUSES IT IMPERATIVELY. Not belt-and-braces if added:
+        // the native focus `autoFocus` causes sets
+        // `TextInputState.currentlyFocusedInputRef`, and `focusTextInput`
+        // returns early for the field that is already current — so a
+        // `ref.focus()` alongside this would be the no-op, and would read in
+        // the source as though it were the thing doing the work.
+        expect(focus).not.toHaveBeenCalled()
 
-      expect(focus).toHaveBeenCalledTimes(1)
+        await fireEvent.press(screen.getByTestId('capture-editor-cancel'))
+      }
     } finally {
       focus.mockRestore()
     }
   })
 
-  it('leaves the first tap on SAVE to the button, not to the scroll view the modal hangs under', async () => {
+  it('takes the editor’s SAVE off the responder path of the scroll view that ate the first tap', async () => {
     await renderRecorded()
     await fireEvent.press(screen.getByTestId('affordance-title'))
 
-    // THE ANCESTOR IS THE POINT. On a device the modal is a separate Android
-    // window, so it is tempting to think a prop on the capture screen's
-    // scroll view cannot reach it. It can: React Native's responder system
-    // builds its propagation path from the REACT tree, and in that tree the
-    // modal is a child of this scroll view — so the scroll view's
-    // `onStartShouldSetResponderCapture` runs first for a touch on SAVE, and
-    // with `keyboardShouldPersistTaps` unset or `'never'` it takes the
-    // responder and blurs the input instead of letting the press through
-    // (`ScrollView.js`, `_handleStartShouldSetResponderCapture`). That is the
-    // reported "it just closes the keyboard … then i hit save again".
-    const scroll = scrollViewAround(screen.getByTestId('capture-title-save'))
-    expect(scroll.props.testID).toBe('capture-recorded-scroll')
-    // `'handled'`, not `'always'`: a tap on nothing in particular should
-    // still put the keyboard away.
-    expect(scroll.props.keyboardShouldPersistTaps).toBe('handled')
+    // THE ANCESTOR IS THE POINT, AND THE CLAIM IS NOW A NEGATIVE. React
+    // Native's responder system builds its propagation path from the REACT
+    // tree, so while the editor was a child of this scroll view — even as a
+    // `Modal`, in a separate Android window — the scroll view's
+    // `onStartShouldSetResponderCapture` ran first for a touch on SAVE, took
+    // the responder and blurred the input instead of letting the press
+    // through (`ScrollView.js`). That is the reported "it just closes the
+    // keyboard … then i hit save again". The editor is a SIBLING of that
+    // scroll view now, so the path does not pass through it at all.
+    // `includeHiddenElements` so that THIS assertion is what fails when the
+    // editor moves back into the column, rather than the lookup: a SAVE inside
+    // that scroll view is also hidden from a reader by the
+    // `importantForAccessibility` the scroll view carries while the editor is
+    // open, and a failure that says "unable to find capture-title-save" names
+    // the symptom rather than the claim.
+    expect(
+      enclosingScrollViewTestIDs(
+        screen.getByTestId('capture-title-save', { includeHiddenElements: true }),
+      ),
+    ).not.toContain('capture-recorded-scroll')
+
+    // THE POSITIVE CONTROL, without which the line above proves nothing: a
+    // walk that found no scroll views ever would satisfy it just as well. A
+    // tile in the recorded column IS inside that scroll view, so the walk
+    // demonstrably works.
+    expect(
+      enclosingScrollViewTestIDs(
+        screen.getByTestId('affordance-title', { includeHiddenElements: true }),
+      ),
+    ).toContain('capture-recorded-scroll')
+
+    // The prop itself stays, and is no longer what holds the fault off — see
+    // the comment on the scroll view. `'handled'` and not `'always'`: a tap on
+    // nothing in particular should still put a keyboard away.
+    expect(
+      screen.getByTestId('capture-recorded-scroll', { includeHiddenElements: true }).props
+        .keyboardShouldPersistTaps,
+    ).toBe('handled')
+  })
+
+  it('covers the whole screen and swallows the touches that reach it, so nothing behind is pressable', async () => {
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+
+    const overlay = screen.getByTestId('capture-editor-overlay')
+
+    /*
+      A `Modal` gave both of these for free by being a separate Android
+      window. An overlay has to state them.
+
+      Absolutely filled, and filled against `Screen` — which carries
+      `spacing.lg` of padding. That matters and is not obvious: Yoga positions
+      an absolutely positioned child with insets against its containing
+      block's PADDING box, not its content box (`AbsoluteLayout.cpp` —
+      `positionAbsoluteChild` adds the parent's border and not its padding,
+      and the child is sized `measuredDimension - borders - insets`), so the
+      scrim reaches the screen edge rather than stopping a gutter short of it.
+    */
+    const style = StyleSheet.flatten<ViewStyle>(overlay.props.style)
+    expect(style.position).toBe('absolute')
+    expect([style.top, style.right, style.bottom, style.left]).toEqual([0, 0, 0, 0])
+
+    /*
+      And it claims any touch that reaches it. React Native does not re-hit-test
+      the siblings underneath a node it has already hit, so a scrim that
+      claimed nothing would drop the touch too — by accident. Saying so is what
+      makes it survive a refactor, and it is the BUBBLE phase (`...Responder`,
+      not `...ResponderCapture`), so the box and the two buttons inside still
+      take their own touches first.
+    */
+    const claimsTouches: unknown = overlay.props.onStartShouldSetResponder
+    if (typeof claimsTouches !== 'function') {
+      throw new Error('The overlay does not claim touches at all.')
+    }
+    expect(claimsTouches()).toBe(true)
+    expect(overlay.props.onStartShouldSetResponderCapture).toBeUndefined()
+  })
+
+  describe('the Android back button, which a Modal used to give for free', () => {
+    /**
+     * The handler the editor registers, or a failure.
+     *
+     * WHY A SPY AND NOT A FIRED EVENT. `jest-expo` defaults to the **ios**
+     * platform (`jest-preset.js`, `haste.defaultPlatform`), so `BackHandler`
+     * resolves to `BackHandler.ios.js` — whose `addEventListener` is a stub
+     * that stores nothing and whose `exitApp` is `emptyFunction`. There is no
+     * `hardwareBackPress` to emit and nothing that would receive it. Spying on
+     * `addEventListener` reaches the one thing that IS real here: the
+     * component's own registration, and the function it registered.
+     *
+     * STATED PLAINLY: this proves `FieldEditor`'s contract — that it registers
+     * for BACK while it is open, consumes the press, respects the mid-write
+     * guard, and unregisters when it closes. It does not prove Android
+     * delivers the press, which is a device check.
+     */
+    function backHandlerOf(
+      spy: jest.SpiedFunction<typeof BackHandler.addEventListener>,
+    ): (event: HardwareBackPressEvent) => boolean | null | undefined {
+      const registrations = spy.mock.calls.filter(
+        ([eventName]) => eventName === 'hardwareBackPress',
+      )
+      // THE LATEST, NOT THE FIRST, and the difference is the guard itself.
+      // `FieldEditor`'s effect lists `saving` as a dependency, so starting a
+      // write tears the old listener down and registers a new one — the old
+      // one closed over `saving === false` and would dismiss the editor out
+      // from under a write in flight. Reading the first registration back
+      // tests a listener the component has already removed.
+      const registration = registrations[registrations.length - 1]
+      if (registration === undefined) {
+        throw new Error('The editor registered no hardwareBackPress handler.')
+      }
+      return registration[1]
+    }
+
+    /** The event object RN hands a `hardwareBackPress` handler. */
+    const backPress: HardwareBackPressEvent = { type: 'hardwareBackPress', timeStamp: 0 }
+
+    it('closes the editor without writing anything, and consumes the press', async () => {
+      const add = jest.spyOn(BackHandler, 'addEventListener')
+      try {
+        await renderRecorded()
+        // Nothing registered until the editor is up: BACK on the recorded
+        // screen has to keep meaning what it means everywhere else.
+        expect(add).not.toHaveBeenCalled()
+
+        await fireEvent.press(screen.getByTestId('affordance-title'))
+        await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+
+        // `true` in both branches, which is the shape `Modal`'s
+        // `onRequestClose` had: BACK is consumed for as long as this surface
+        // is up. Returning `false` here would let the press fall through to
+        // expo-router and pop the route, taking her off the recorded point
+        // entirely with an editor open over it.
+        let consumed: unknown
+        await act(async () => {
+          consumed = backHandlerOf(add)(backPress)
+          await Promise.resolve()
+        })
+        expect(consumed).toBe(true)
+
+        // Closed, and nothing written — a dismissal is a cancel.
+        expect(screen.queryByTestId('capture-title-input')).toBeNull()
+        expect(mockRepo.renameRecord).not.toHaveBeenCalled()
+        // And no confirmation, because nothing was confirmed.
+        expect(screen.queryByTestId('capture-save-confirmation')).toBeNull()
+      } finally {
+        add.mockRestore()
+      }
+    })
+
+    it('refuses to dismiss mid-write, so a failure cannot land on a surface that has gone', async () => {
+      // The same guard CANCEL carries, and for the same reason: closing the
+      // editor takes the failure message with it, and this one is hardware —
+      // there is nothing on screen to disable, so it has to be a guard.
+      const write = deferred<FieldRecord>()
+      mockRepo.renameRecord.mockImplementation(() => write.promise)
+
+      const add = jest.spyOn(BackHandler, 'addEventListener')
+      try {
+        await renderRecorded()
+        await fireEvent.press(screen.getByTestId('affordance-title'))
+        await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+        await fireEvent.press(screen.getByTestId('capture-title-save'))
+        await settle()
+
+        // The listener was re-registered when `saving` became `true` — which
+        // is the mechanism, not an implementation detail: a listener that
+        // stayed as it was would still be closed over `saving === false` and
+        // would dismiss the editor with the write still out.
+        expect(
+          add.mock.calls.filter(([eventName]) => eventName === 'hardwareBackPress').length,
+        ).toBeGreaterThan(1)
+
+        let consumed: unknown
+        await act(async () => {
+          consumed = backHandlerOf(add)(backPress)
+          await Promise.resolve()
+        })
+        // Still consumed — BACK must not escape the surface either — but the
+        // editor is still there, with her text and the SAVING… label.
+        expect(consumed).toBe(true)
+        expect(screen.getByTestId('capture-title-input').props.value).toBe('Frog pond outflow')
+        expect(screen.getByTestId('capture-editor-cancel')).toBeDisabled()
+
+        await act(async () => {
+          write.resolve(amendRecord('record-1', { title: 'Frog pond outflow' }))
+          await Promise.resolve()
+        })
+        await settle()
+
+        expect(screen.getByTestId('capture-save-confirmation')).toHaveTextContent(
+          'Name saved: Frog pond outflow',
+        )
+      } finally {
+        add.mockRestore()
+      }
+    })
+
+    it('gives the button back when the editor closes', async () => {
+      // A listener left registered would go on swallowing BACK on the
+      // recorded screen, where it is the way out.
+      const remove = jest.fn<void, []>()
+      const add = jest.spyOn(BackHandler, 'addEventListener').mockReturnValue({ remove })
+      try {
+        await renderRecorded()
+        await fireEvent.press(screen.getByTestId('affordance-title'))
+        expect(add).toHaveBeenCalled()
+
+        await fireEvent.press(screen.getByTestId('capture-editor-cancel'))
+
+        expect(remove).toHaveBeenCalled()
+      } finally {
+        add.mockRestore()
+      }
+    })
   })
 
   it('saves and closes on that one press, with the confirmation left standing behind it', async () => {
@@ -2802,12 +3069,20 @@ describe('the spoken description (doctrine rule 16)', () => {
   })
 
   /**
-   * The editor is a modal now, and a modal is a new surface — so it carries a
-   * description of its own rather than borrowing the capture screen's, which
-   * describes the point, its attachments and the ways onward, none of which
-   * is reachable while the editor is up.
+   * The editor is a new surface — so it carries a description of its own
+   * rather than borrowing the capture screen's, which describes the point, its
+   * attachments and the ways onward, none of which is reachable while the
+   * editor is up.
+   *
+   * **A `Modal` made that true for free and an overlay does not.** A dialog is
+   * a separate Android window and a screen reader does not read the window
+   * behind it. An overlay is in the same window as the column it covers, so
+   * two things have to be done by hand, and the pair of them are what the
+   * `hides the whole surface behind it` block below pins: the column is put
+   * out of a reader's reach, and the screen's own description is withdrawn so
+   * that two surfaces are not describing themselves at once.
    */
-  describe('the editor’s own, because a modal is a new surface', () => {
+  describe('the editor’s own, because it is a new surface', () => {
     function editorDescription(): unknown {
       return screen.getByTestId('capture-editor-spoken-description').props.accessibilityLabel
     }
@@ -2815,6 +3090,71 @@ describe('the spoken description (doctrine rule 16)', () => {
     it('does not exist until the editor is opened', async () => {
       await renderRecorded()
       expect(screen.queryByTestId('capture-editor-spoken-description')).toBeNull()
+    })
+
+    describe('hides the whole surface behind it, which the Modal did by being a window', () => {
+      it('takes the recorded column out of a screen reader’s reach while the editor is open', async () => {
+        await renderRecorded()
+
+        // Reachable before, so the assertion after has something to change.
+        expect(screen.getByTestId('affordance-title')).toBeTruthy()
+        expect(screen.getByTestId('capture-recorded-scroll').props.importantForAccessibility).toBe(
+          'auto',
+        )
+
+        await fireEvent.press(screen.getByTestId('affordance-title'))
+
+        // `no-hide-descendants` is the ANDROID mechanism, and the only one
+        // that works on the device this app is for.
+        // `accessibilityViewIsModal` — which the overlay also carries — is
+        // genuinely iOS-only in RN 0.86.3: it is declared in
+        // `BaseViewConfig.ios.js`, absent from `BaseViewConfig.android.js`,
+        // and has no implementation anywhere under `ReactAndroid/`. Asserting
+        // only that prop would have been asserting a no-op.
+        expect(
+          screen.getByTestId('capture-recorded-scroll', { includeHiddenElements: true }).props
+            .importantForAccessibility,
+        ).toBe('no-hide-descendants')
+        expect(screen.getByTestId('capture-editor-overlay').props.accessibilityViewIsModal).toBe(
+          true,
+        )
+
+        // And RNTL models that hiding the same way Android does — its queries
+        // skip anything under such an ancestor — so this is the mechanism
+        // working, not a prop being echoed back.
+        expect(screen.queryByTestId('affordance-title')).toBeNull()
+        expect(screen.queryByTestId('capture-media-strip')).toBeNull()
+
+        // Given back when the editor closes, or BACK and the tiles are gone
+        // for the rest of the session.
+        await fireEvent.press(screen.getByTestId('capture-editor-cancel'))
+        expect(screen.getByTestId('affordance-title')).toBeTruthy()
+      })
+
+      it('withdraws the screen’s own description, so two surfaces do not describe themselves at once', async () => {
+        await renderRecorded()
+
+        // The recorded screen describes the point, its attachments and the
+        // ways onward — none of which is reachable behind the scrim.
+        expect(screen.getByTestId('capture-screen-spoken-description')).toBeTruthy()
+
+        await fireEvent.press(screen.getByTestId('affordance-title'))
+
+        // Gone entirely, not merely hidden: it is a direct child of `Screen`,
+        // a sibling of the scroll view, so `importantForAccessibility` on the
+        // column above does not cover it. `Screen` drops the node when the
+        // prop is `undefined`.
+        expect(
+          screen.queryByTestId('capture-screen-spoken-description', {
+            includeHiddenElements: true,
+          }),
+        ).toBeNull()
+        // And the editor's own is what a reader has instead.
+        expect(editorDescription()).toEqual(expect.stringContaining('Naming this point.'))
+
+        await fireEvent.press(screen.getByTestId('capture-editor-cancel'))
+        expect(screen.getByTestId('capture-screen-spoken-description')).toBeTruthy()
+      })
     })
 
     it('says which field is being written, and what is on the surface', async () => {
