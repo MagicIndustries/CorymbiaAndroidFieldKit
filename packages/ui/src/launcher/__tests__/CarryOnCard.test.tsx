@@ -49,6 +49,15 @@ describe('CarryOnCard', () => {
     expect(card).toHaveTextContent(/12/)
   })
 
+  it('names the kind of activity as well as its name', async () => {
+    // Rendered but unasserted until now, so it could be deleted or
+    // mistranslated — `survey: 'Sampling'` — with the whole suite green.
+    // Kept rather than dropped because the type carries the kind and
+    // discarding it silently would be the worse of the two mistakes.
+    await wrap(<CarryOnCard carryOn={carryOn} {...handlers} testID="carry-on" />)
+    expect(screen.getByTestId('carry-on')).toHaveTextContent(/Survey/, { exact: false })
+  })
+
   it('says how long ago it started, not when', async () => {
     // Mid-survey she needs elapsed time. A timestamp is arithmetic homework.
     await wrap(<CarryOnCard carryOn={carryOn} {...handlers} testID="carry-on" />)
@@ -74,12 +83,23 @@ describe('CarryOnCard', () => {
     expect(handlers.onCapture).toHaveBeenCalled()
   })
 
-  it('offers switching project and starting an activity beneath it', async () => {
+  // Two tests rather than one, because one cannot tell correct wiring from a
+  // swap. The original pressed BOTH buttons and then asserted BOTH handlers
+  // had fired — which is true whichever button called which. Exchanging the
+  // two `onPress` props passed it. Each button is now pressed alone, and the
+  // other handler asserted silent.
+  it('switches project from the button beneath the card', async () => {
     await wrap(<CarryOnCard carryOn={carryOn} {...handlers} testID="carry-on" />)
     await fireEvent.press(screen.getByTestId('carry-on-switch-project'))
-    await fireEvent.press(screen.getByTestId('carry-on-new-activity'))
     expect(handlers.onSwitchProject).toHaveBeenCalled()
+    expect(handlers.onNewActivity).not.toHaveBeenCalled()
+  })
+
+  it('starts an activity from its own button, not the project one', async () => {
+    await wrap(<CarryOnCard carryOn={carryOn} {...handlers} testID="carry-on" />)
+    await fireEvent.press(screen.getByTestId('carry-on-new-activity'))
     expect(handlers.onNewActivity).toHaveBeenCalled()
+    expect(handlers.onSwitchProject).not.toHaveBeenCalled()
   })
 
   it('says there is nothing to carry on with on a first run, and offers a way forward', async () => {
