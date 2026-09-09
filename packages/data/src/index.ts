@@ -9,12 +9,13 @@ export type { Device, DeviceFacts, DeviceType } from './repositories/devices'
 export {
   createProject,
   getProject,
-  getClient,
   listProjects,
   DEFAULT_CLIENT_ID,
   DEFAULT_LOCATION_ID,
 } from './repositories/projects'
-export type { Project, Client } from './repositories/projects'
+export type { Project } from './repositories/projects'
+export { getClient } from './repositories/clients'
+export type { Client } from './repositories/clients'
 export {
   createActivity,
   getActivity,

@@ -1,7 +1,8 @@
 import { openTestDatabase } from '../../db/better-sqlite3'
 import { migrate } from '../../db/migrate'
 import type { Database } from '../../db/port'
-import { createProject, getClient, getProject, listProjects } from '../projects'
+import { getClient } from '../clients'
+import { createProject, getProject, listProjects } from '../projects'
 
 const FOREIGN_KEY = /FOREIGN KEY constraint failed/
 
