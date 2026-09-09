@@ -308,4 +308,56 @@ describe('useCurrentContext', () => {
     expect(result.current.carryOn).toBeNull()
     expect(result.current.activityId).toBeNull()
   })
+
+  it('keeps the last good answer on screen when a later read fails, rather than blanking it', async () => {
+    // Distinct from the test above: that one fails on the very FIRST read,
+    // where `carryOn` is already null from `NOTHING_YET` — so it cannot tell
+    // "blanked" from "was never filled in". This one succeeds first, so a
+    // failure that replaced the state with `NOTHING_YET` rather than merely
+    // flipping `loading` would be the one thing that could turn this from
+    // green to red.
+    const { result } = await renderHook(() => useCurrentContext())
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    expect(result.current.carryOn?.activityName).toBe('Reach 3 transect')
+    expect(result.current.activityId).toBe('act_survey')
+
+    readCurrentContext.mockRejectedValueOnce(new Error('database went away'))
+    await act(async () => {
+      await result.current.refresh()
+    })
+
+    expect(result.current.loading).toBe(false)
+    expect(result.current.carryOn?.activityName).toBe('Reach 3 transect')
+    expect(result.current.activityId).toBe('act_survey')
+  })
+
+  it('never sets loading back to true on a refresh, so CAPTURE is not taken off screen while she is on her way back to it', async () => {
+    // `loading` marks the first read only (the hook's own comment says so).
+    // A refresh that flipped it back to `true` would show the "One moment"
+    // screen — and take `CAPTURE` off it — every single time she returns from
+    // a capture, which is the opposite of what the launcher is for. Stalled
+    // with `deferred`, the same device this file uses to hold a read open, so
+    // the state can be inspected while the refresh's own read is genuinely
+    // still in flight rather than guessed at from outside `act`.
+    const stall = deferred<Awaited<ReturnType<typeof readCurrentContext>>>()
+
+    const { result } = await renderHook(() => useCurrentContext())
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+
+    readCurrentContext.mockReturnValueOnce(stall.promise)
+    await act(async () => {
+      void result.current.refresh()
+    })
+
+    expect(result.current.loading).toBe(false)
+
+    await act(async () => {
+      stall.resolve({ activity, project })
+    })
+    expect(result.current.loading).toBe(false)
+  })
 })
