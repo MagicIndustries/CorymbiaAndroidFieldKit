@@ -14,8 +14,16 @@ export {
   DEFAULT_LOCATION_ID,
 } from './repositories/projects'
 export type { Project } from './repositories/projects'
-export { createActivity, listActivities, mostRecentActivity } from './repositories/activities'
+export {
+  createActivity,
+  getActivity,
+  listActivities,
+  mostRecentActivity,
+} from './repositories/activities'
 export type { Activity, ActivityKind } from './repositories/activities'
+
+export { setCurrentActivity, readCurrentContext } from './repositories/context'
+export type { CurrentContext } from './repositories/context'
 
 export {
   createRecord,

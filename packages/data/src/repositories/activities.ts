@@ -70,6 +70,18 @@ export async function listActivities(db: Database, projectId: string): Promise<A
 }
 
 /**
+ * One activity by id, or null when there is no live one under it.
+ *
+ * Mirrors `getProject`: a soft-deleted activity reads as absent, the same as
+ * an unknown id, so a caller checking whether an id still names something
+ * live does not have to know the difference.
+ */
+export async function getActivity(db: Database, id: string): Promise<Activity | null> {
+  const row = await db.first<ActivityRow>(`${SELECT} AND id = ?`, [id])
+  return row ? toActivity(row) : null
+}
+
+/**
  * The activity the launcher resumes (spec §10.1). The application assumes rather
  * than asks: whatever she was doing last is already selected, with capture live
  * on the screen.
