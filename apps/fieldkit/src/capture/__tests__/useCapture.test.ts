@@ -1,6 +1,13 @@
 import { act, renderHook } from '@testing-library/react-native'
 import { averageReadings, createFakeLocationSource, holdVerdict, type Reading } from '@corymbia/geo'
-import type { Database, Device, FieldRecord, Fix } from '@corymbia/data'
+import type {
+  createRecord,
+  Database,
+  Device,
+  FieldRecord,
+  Fix,
+  refineRecordFix,
+} from '@corymbia/data'
 
 /**
  * Tests for the capture state machine.
@@ -35,16 +42,31 @@ import type { Database, Device, FieldRecord, Fix } from '@corymbia/data'
 // ---------------------------------------------------------------------------
 
 const mockRepo = {
-  createRecord: jest.fn(),
-  refineRecordFix: jest.fn(),
+  // Typed against the real signatures rather than left bare, following
+  // `apps/fieldkit/src/media/__tests__/useAttachMedia.test.ts`, which states
+  // the rule and names the precedent: an untyped mock checks nothing, and is
+  // how a hardcoded `kind: 'photo'` survived fifteen tests in the previous
+  // plan. Every payload assertion below rests on these.
+  //
+  // The two-parameter form is what @types/jest 29 actually takes — its prose
+  // shorthand `jest.fn<typeof f>()` does not compile here.
+  createRecord: jest.fn<ReturnType<typeof createRecord>, Parameters<typeof createRecord>>(),
+  refineRecordFix: jest.fn<
+    ReturnType<typeof refineRecordFix>,
+    Parameters<typeof refineRecordFix>
+  >(),
 }
 
 jest.mock('@corymbia/data', () => {
   const actual = jest.requireActual('@corymbia/data')
   return {
     ...actual,
-    createRecord: (...args: unknown[]) => mockRepo.createRecord(...args),
-    refineRecordFix: (...args: unknown[]) => mockRepo.refineRecordFix(...args),
+    // Parameter tuples rather than `unknown[]`, now that the mocks above are
+    // typed: a spread of `unknown[]` cannot satisfy a typed rest parameter,
+    // and widening these back would give up exactly what typing them bought.
+    createRecord: (...args: Parameters<typeof createRecord>) => mockRepo.createRecord(...args),
+    refineRecordFix: (...args: Parameters<typeof refineRecordFix>) =>
+      mockRepo.refineRecordFix(...args),
   }
 })
 
@@ -412,7 +434,16 @@ describe('useCapture', () => {
       })
       await settle()
 
-      expect(mockRepo.createRecord.mock.calls[0]?.[1].activityId).toBe('act_sampling')
+      const written = mockRepo.createRecord.mock.calls[0]?.[1]
+      if (written === undefined) throw new Error('expected createRecord to have been called')
+      expect(written.activityId).toBe('act_sampling')
+      // BOTH fields, for the same reason this test uses a second id at all.
+      // Asserting only `activityId` here left `contextActivityId` free to be
+      // pinned to the first test's activity — a reviewer proved it by
+      // hardcoding the non-null branch to 'act_survey' and watching all three
+      // filing tests pass. The anti-hardcoding argument applies to whichever
+      // field is unasserted, not to the one that happens to be named.
+      expect(written.contextActivityId).toBe('act_sampling')
     })
   })
 
