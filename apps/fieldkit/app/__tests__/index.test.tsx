@@ -292,6 +292,36 @@ describe('the launcher', () => {
     expect(screen.queryByTestId('launcher-carry-on')).toBeNull()
   })
 
+  it('says Capture is reachable on a first run, not merely that there is one control', async () => {
+    // The screen actually carries a live Capture tile and a live Records tile
+    // on a first run — `AVAILABLE_TOOLS` is unconditional — which is exactly
+    // spec §10.2's Impatient journey: Open → CAPTURE → lands in the Inbox,
+    // one tap. A description that says "one control, which chooses a
+    // project" is a description of the card alone, not of the screen, and a
+    // screen-reader user reading it never learns Capture is one tap away.
+    await renderLauncher({ carryOn: null })
+    expect(spokenDescription()).toMatch(/capture/i)
+    expect(screen.getByTestId('tool-capture')).toBeTruthy()
+  })
+
+  it('says one unfiled capture is waiting, not "are", in the spoken description', async () => {
+    // The visible strip already gets the verb right two lines away; every
+    // other spoken-description test uses 4, which cannot catch a verb that
+    // agrees only with the plural.
+    await renderLauncher({ unfiledCount: 1 })
+    expect(spokenDescription()).toMatch(/(?<!\d)1 unfiled capture is waiting(?!s)/)
+    expect(spokenDescription()).not.toMatch(/1 unfiled capture are waiting/)
+  })
+
+  it('names how many are unfiled in the Inbox strip’s spoken label, not merely its visible text', async () => {
+    // The visible count is pinned by two tests above; the spoken one — the
+    // accessibility label a screen-reader user actually hears — by none.
+    await renderLauncher({ unfiledCount: 4 })
+    expect(screen.getByTestId('launcher-inbox').props.accessibilityLabel).toMatch(
+      /4 unfiled captures/,
+    )
+  })
+
   it('reaches the component gallery without competing with the work', async () => {
     await renderLauncher()
     await fireEvent.press(screen.getByTestId('launcher-gallery'))

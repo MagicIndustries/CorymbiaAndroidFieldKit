@@ -35,8 +35,13 @@ import { useCurrentContext } from '../src/context/useCurrentContext'
  *  - **Resumed.** The card, the tool tiles beneath it, and the Inbox strip
  *    when — and only when — something is unfiled.
  *  - **A genuine first run.** No context has ever existed. `CarryOnCard`
- *    draws its own first-run face here: no `CAPTURE`, because there is
- *    nowhere for it to go, and the one way forward instead.
+ *    draws its own first-run face here: no `CAPTURE` inside the card, because
+ *    there is nothing to carry on with, and the one way forward — choosing a
+ *    project — instead. **That is not the same as no `CAPTURE` on the
+ *    screen.** `AVAILABLE_TOOLS` is unconditional, so the Capture and Records
+ *    tiles render below the card regardless of `carryOn`, exactly as spec
+ *    §10.2's *Impatient* journey requires: Open → `CAPTURE` → lands in the
+ *    Inbox, one tap, with no project chosen first.
  */
 export default function Launcher() {
   const status = useDatabaseStatus()
@@ -75,6 +80,12 @@ export default function Launcher() {
  * here on the day its route exists, and not before — the tiles' own ordering
  * table (`ToolTiles.tsx`) already knows where each one goes.
  *
+ * **`records` is the one exception, and it is a scheduling fact rather than a
+ * rule broken.** `/records` does not exist at this commit — Task 8 of this
+ * plan builds it — but Task 8 lands on this same branch before it ships, so
+ * the tile is correct by the time anyone can tap it. `router.push` at the
+ * call site below carries the same note.
+ *
  * Module-level, so it is identity-stable across the renders a focus refresh
  * causes.
  */
@@ -90,20 +101,29 @@ function formatUnfiled(count: number): string {
  *
  * **Accurate to the state it is actually in**, which is why there are three
  * sentences and not one with holes punched in it. The first-run case is the
- * one that matters: a description that named a project when there is none
- * would be worse than no description at all, because the person who cannot
- * see the screen has nothing else to correct it with. The Inbox is mentioned
- * only when there is one, for the same reason the strip is only rendered
- * then.
+ * one that matters most, and matters for the opposite reason it used to: this
+ * sentence used to say "one control, which chooses a project" — true of the
+ * card alone, false of the screen. `AVAILABLE_TOOLS` puts a live Capture tile
+ * and a live Records tile on screen unconditionally (spec §10.2's *Impatient*
+ * journey: Open → `CAPTURE` → lands in the Inbox, one tap), and a
+ * screen-reader user told there is "one control" never learns Capture is
+ * reachable at all. So this branch names every control actually on screen —
+ * the help affordance, Choose a project, and the two tiles — rather than
+ * naming only the card's own. The Inbox is mentioned only when there is one,
+ * for the same reason the strip is only rendered then.
  */
 function describeLauncher(carryOn: CarryOn | null, unfiledCount: number): string {
   const inbox =
-    unfiledCount === 0 ? '' : ` ${formatUnfiled(unfiledCount)} are waiting in the Inbox.`
+    unfiledCount === 0
+      ? ''
+      : ` ${formatUnfiled(unfiledCount)} ${unfiledCount === 1 ? 'is' : 'are'} waiting in the Inbox.`
 
   if (carryOn === null) {
     return (
-      'Corymbia Field Kit. No project yet, so there is nothing to carry on with — one control, ' +
-      `which chooses a project.${inbox} The component gallery is at the bottom.`
+      'Corymbia Field Kit. No project yet, so there is nothing to carry on with. Choose a ' +
+      'project to see what to carry on with — or capture straight away: Capture and Records ' +
+      `are both live below, and a capture taken now goes to the Inbox.${inbox} The component ` +
+      'gallery is at the bottom.'
     )
   }
 
@@ -190,9 +210,13 @@ function LauncherBody() {
               router.push('/capture')
             }}
             onSwitchProject={() => {
+              // `/projects` does not exist at this commit. Task 6 of this
+              // plan builds it — the control is correct now, not latent.
               router.push('/projects')
             }}
             onNewActivity={() => {
+              // `/new-activity` does not exist at this commit. Task 7 of
+              // this plan builds it.
               router.push('/new-activity')
             }}
           />
@@ -215,6 +239,8 @@ function LauncherBody() {
             accessibilityRole="button"
             accessibilityLabel={`Open the Inbox, ${formatUnfiled(unfiledCount)}`}
             onPress={() => {
+              // `/inbox` does not exist at this commit. Task 9 of this plan
+              // builds it.
               router.push('/inbox')
             }}
             style={({ pressed }) => ({ minHeight: touch.comfortable, opacity: pressed ? 0.7 : 1 })}
@@ -240,6 +266,8 @@ function LauncherBody() {
           activityKind={carryOn === null ? null : carryOn.activityKind}
           available={AVAILABLE_TOOLS}
           onOpen={(tool) => {
+            // `/records` does not exist at this commit. Task 8 of this plan
+            // builds it — the tile is correct now, not a badge over a gap.
             router.push(tool === 'capture' ? '/capture' : '/records')
           }}
         />
