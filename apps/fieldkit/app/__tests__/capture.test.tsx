@@ -608,6 +608,42 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 /**
+ * The `Modal` an element is rendered inside, or a failure. `within(...)` on
+ * the result then reads that subtree and nothing else.
+ *
+ * WHY THIS IS A TREE WALK AND NOT A QUERY. "Is this inside a `Modal`" is not
+ * a question any supported query can ask: RNTL v14 removed the
+ * `UNSAFE_*ByType` queries outright (14.0.1 exposes no `UNSAFE_getByType` on
+ * `screen` or on a render result — checked against its `dist/`), and every
+ * query that remains matches on props, which a plain `<View>` carrying the
+ * same `testID` would satisfy identically. A `View` in that column is exactly
+ * what shipped and exactly what this has to be able to fail on, so the
+ * assertion has to reach the element's type rather than its props.
+ *
+ * WHY THE TYPE IS THE STRING `'Modal'` AND NOT THE IMPORTED COMPONENT. The
+ * composite is collapsed out of the chain RNTL's `.parent` walks — it exposes
+ * host elements only — so there is no instance left to compare against the
+ * `Modal` symbol by identity. What survives is a host element whose type is
+ * the name `@react-native/jest-preset`'s `Modal` mock renders under, which is
+ * `'Modal'`. `<View>` renders `'View'`, which is the discrimination this needs
+ * and the whole of what it claims.
+ */
+function modalAround(
+  element: ReturnType<typeof screen.getByTestId>,
+): ReturnType<typeof screen.getByTestId> {
+  let node = element.parent
+  const seen: string[] = []
+  while (node !== null) {
+    if (node.type === 'Modal') return node
+    if (typeof node.type === 'string') seen.push(node.type)
+    node = node.parent
+  }
+  throw new Error(
+    `Expected the element to be inside a Modal. Its ancestors were: ${seen.join(' < ')}.`,
+  )
+}
+
+/**
  * An attachment fixture, matching `useAttachMedia.test.ts`'s own `fakeAttachment`
  * shape — the two files are testing opposite ends of the same pipeline
  * (`attachMedia`'s insert there, `listMedia`'s read here), so the row either
@@ -1799,6 +1835,24 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     )
   })
 
+  /**
+   * CHANGED when the editor became a modal, and the change is the point.
+   *
+   * This test used to press `affordance-description` with the title editor
+   * still open, because inline that was a reachable sequence: both editors
+   * and both tiles were in the same scrolling column. With the editor on a
+   * modal surface the tiles are behind a scrim while it is open, so that
+   * sequence describes taps a device cannot deliver — under `jest-expo`'s
+   * inline `Modal` mock it still "passes", which is exactly the kind of
+   * assertion that proves nothing.
+   *
+   * The reachable route is the one below: leave the editor, then open the
+   * other one. The requirement it guards is unchanged — "The name was not
+   * saved…" must not still be on screen underneath a notes box she has not
+   * typed into yet — and it now has two lines to survive rather than one
+   * (`closeEditor` clears the error with the surface; `openEditor` clears it
+   * again defensively).
+   */
   it('takes the failure away with the editor that produced it', async () => {
     mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('database is locked')))
 
@@ -1810,9 +1864,9 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     await settle()
     expect(screen.getByTestId('capture-title-error')).toBeTruthy()
 
-    // Opening the notes editor must not leave "The name was not saved…"
-    // standing underneath it, where it reads as a refusal of notes she has
-    // not typed yet.
+    await fireEvent.press(screen.getByTestId('capture-editor-cancel'))
+    expect(screen.queryByTestId('capture-title-error')).toBeNull()
+
     await fireEvent.press(screen.getByTestId('affordance-description'))
 
     expect(screen.queryByTestId('capture-title-error')).toBeNull()
@@ -1885,6 +1939,242 @@ describe('the affordances (spec §9.6, Task 11)', () => {
     expect(screen.getByTestId('capture-title-value')).toHaveTextContent('Frog pond outflow')
     expect(screen.getByTestId('affordance-description-label')).toHaveTextContent('Notes ✓')
     expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title ✓')
+  })
+})
+
+/**
+ * The field-reported blocker: "Their text boxes are not visible when the
+ * keyboard appears", and "not sure they're being saved".
+ *
+ * WHAT THESE TESTS CAN AND CANNOT SEE. Jest can prove the input is inside a
+ * `Modal` and not appended to the recorded state's own column, and it can
+ * prove a save says so afterwards. It cannot see a keyboard: whether the box
+ * ends up genuinely clear of one on a device is a property of Android's
+ * window insets, `KeyboardAvoidingView` inside a `Modal` under edge-to-edge,
+ * and the modal's own safe area — none of which exists here. Those go to the
+ * owner as device checks, not as assertions.
+ *
+ * Under `jest-expo` the `Modal` reached below is `@react-native/jest-preset`'s
+ * mock, not the native module (the same substitution `HelpAffordance`'s own
+ * suite documents): its `render()` returns `null` when `visible` is `false`,
+ * and otherwise renders its children inline. So `within(Modal)` here proves
+ * the editor is a child of the `Modal` element — which is the thing that was
+ * wrong — and proves nothing about how Android presents it.
+ */
+describe('the editor, which is a modal and not the foot of the column', () => {
+  it('keeps the box out of the record’s own column until it is opened, and inside a modal when it is', async () => {
+    await renderRecorded()
+
+    // Nothing until she asks for it. Inline, the box was rendered after the
+    // tiles, the strip and the saved values — the exact band of screen the
+    // Android soft keyboard occupies.
+    expect(screen.queryByTestId('capture-title-input')).toBeNull()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+
+    // `within` the `Modal` ELEMENT, not a testID on a wrapper: a plain
+    // `<View testID="capture-editor-modal">` would satisfy any assertion
+    // phrased against a testID, and a plain `View` in this column is
+    // precisely the build that shipped. Swapping the `Modal` for a `View`
+    // fails here with "No instances found with type Modal".
+    const modal = modalAround(screen.getByTestId('capture-title-input'))
+    expect(within(modal).getByTestId('capture-title-input')).toBeTruthy()
+    expect(within(modal).getByTestId('capture-title-save')).toBeTruthy()
+    expect(within(modal).getByTestId('capture-editor-cancel')).toBeTruthy()
+  })
+
+  it('holds the notes box inside the same modal, so a fix applied to one field is not mistaken for both', async () => {
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+
+    const modal = modalAround(screen.getByTestId('capture-description-input'))
+    expect(within(modal).getByTestId('capture-description-input')).toBeTruthy()
+    expect(within(modal).getByTestId('capture-description-save')).toBeTruthy()
+  })
+
+  it('closes without writing anything when she leaves it', async () => {
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-editor-cancel'))
+    await settle()
+
+    expect(screen.queryByTestId('capture-title-input')).toBeNull()
+    expect(mockRepo.renameRecord).not.toHaveBeenCalled()
+    // And no confirmation, because nothing was confirmed. A cancel and a save
+    // both close the surface, which is exactly why the closing surface cannot
+    // be the confirmation on its own.
+    expect(screen.queryByTestId('capture-save-confirmation')).toBeNull()
+    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title')
+  })
+
+  it('says in words that the name was saved, and quotes back what was stored', async () => {
+    await renderRecorded()
+
+    // Nothing claims a save before there is one.
+    expect(screen.queryByTestId('capture-save-confirmation')).toBeNull()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    expect(screen.queryByTestId('capture-title-input')).toBeNull()
+    expect(screen.getByTestId('capture-save-confirmation')).toHaveTextContent(
+      'Name saved: Frog pond outflow',
+    )
+    // Doctrine rule 9's second channel, and neither of them colour: the
+    // sentence above, and the tile's own label beside it.
+    expect(screen.getByTestId('affordance-title-label')).toHaveTextContent('Title ✓')
+    // The screen-reader half of the same moment. The modal has its own spoken
+    // description, so a reader is focused inside a surface that is about to
+    // be removed from the tree; without a live region the removal is silent.
+    expect(screen.getByTestId('capture-save-confirmation').props.accessibilityLiveRegion).toBe(
+      'polite',
+    )
+  })
+
+  it('says the same for notes, naming the notes and not the name', async () => {
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+    await fireEvent.changeText(screen.getByTestId('capture-description-input'), 'Wet gully, ferns')
+    await fireEvent.press(screen.getByTestId('capture-description-save'))
+    await settle()
+
+    expect(screen.getByTestId('capture-save-confirmation')).toHaveTextContent(
+      'Notes saved: Wet gully, ferns',
+    )
+  })
+
+  it('calls an emptied box cleared, rather than confirming a save of nothing', async () => {
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+    await fireEvent.changeText(screen.getByTestId('capture-description-input'), 'Wet gully, ferns')
+    await fireEvent.press(screen.getByTestId('capture-description-save'))
+    await settle()
+
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+    await fireEvent.changeText(screen.getByTestId('capture-description-input'), '   ')
+    await fireEvent.press(screen.getByTestId('capture-description-save'))
+    await settle()
+
+    // `renameRecord` models an emptied box as `null` — a cleared value, not
+    // text made of no characters — and the confirmation has to read as one,
+    // or she is told "Notes saved:" followed by a blank.
+    expect(screen.getByTestId('capture-save-confirmation')).toHaveTextContent('Notes cleared')
+    expect(screen.queryByTestId('capture-description-value')).toBeNull()
+  })
+
+  it('quotes the record that came back, not the text that was typed', async () => {
+    // A repository that stored something other than what was typed must not
+    // be confirmed as having stored what was typed. The fixture normalises
+    // the value on the way through, which a confirmation built from the draft
+    // would render as the un-normalised original.
+    mockRepo.renameRecord.mockImplementation((_db, input) =>
+      Promise.resolve(amendRecord(input.recordId, { title: 'FROG POND OUTFLOW' })),
+    )
+
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    expect(screen.getByTestId('capture-save-confirmation')).toHaveTextContent(
+      'Name saved: FROG POND OUTFLOW',
+    )
+  })
+
+  it('takes the confirmation away with the editor that produced it', async () => {
+    await renderRecorded()
+
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+    expect(screen.getByTestId('capture-save-confirmation')).toBeTruthy()
+
+    // "Name saved: Frog pond outflow" standing under a freshly opened notes
+    // box reads as a confirmation of notes she has not typed yet — the same
+    // failure the error message was already fixed for.
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+
+    expect(screen.queryByTestId('capture-save-confirmation')).toBeNull()
+  })
+
+  it('shows a failed save inside the editor, where she is looking, with her text still in the box', async () => {
+    mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('database is locked')))
+
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    // INSIDE the modal. Left at the foot of the recorded column, the sentence
+    // would now be behind the scrim, unreadable, while the surface she is
+    // actually looking at said nothing at all.
+    const modal = modalAround(screen.getByTestId('capture-title-input'))
+    expect(within(modal).getByTestId('capture-title-error')).toHaveTextContent(
+      'The name was not saved: database is locked. The point itself is safe.',
+    )
+    // And the retry is a second tap, not a second typing.
+    expect(screen.getByTestId('capture-title-input').props.value).toBe('Frog pond outflow')
+    // Nothing claims a save that did not happen.
+    expect(screen.queryByTestId('capture-save-confirmation')).toBeNull()
+  })
+
+  it('shows a failed notes save inside the editor too', async () => {
+    mockRepo.renameRecord.mockImplementation(() => Promise.reject(new Error('database is locked')))
+
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-description'))
+    await fireEvent.changeText(screen.getByTestId('capture-description-input'), 'Wet gully, ferns')
+    await fireEvent.press(screen.getByTestId('capture-description-save'))
+    await settle()
+
+    const modal = modalAround(screen.getByTestId('capture-description-input'))
+    expect(within(modal).getByTestId('capture-description-error')).toHaveTextContent(
+      'The notes were not saved: database is locked. The point itself is safe.',
+    )
+  })
+
+  it('genuinely disables both of the editor’s controls while the write is out (doctrine rule 3)', async () => {
+    // Not an `onPress` that returns early: a control that looks pressable and
+    // swallows the tap teaches her the tap did not register when it did.
+    const write = deferred<FieldRecord>()
+    mockRepo.renameRecord.mockImplementation(() => write.promise)
+
+    await renderRecorded()
+    await fireEvent.press(screen.getByTestId('affordance-title'))
+    await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+    await fireEvent.press(screen.getByTestId('capture-title-save'))
+    await settle()
+
+    expect(screen.getByTestId('capture-title-save')).toBeDisabled()
+    expect(screen.getByTestId('capture-title-save').props.accessibilityState).toEqual(
+      expect.objectContaining({ disabled: true }),
+    )
+    // The cancel too, and for a reason of its own: closing the editor takes
+    // the failure message with it, so a cancel accepted while the write is
+    // still out could land a failure on a surface that no longer exists.
+    expect(screen.getByTestId('capture-editor-cancel')).toBeDisabled()
+    expect(screen.getByTestId('capture-editor-cancel').props.accessibilityState).toEqual(
+      expect.objectContaining({ disabled: true }),
+    )
+
+    await act(async () => {
+      write.resolve(amendRecord('record-1', { title: 'Frog pond outflow' }))
+      await Promise.resolve()
+    })
+    await settle()
+
+    expect(screen.getByTestId('capture-save-confirmation')).toHaveTextContent(
+      'Name saved: Frog pond outflow',
+    )
   })
 })
 
@@ -2334,6 +2624,77 @@ describe('the spoken description (doctrine rule 16)', () => {
     await settle()
 
     expect(spokenDescription()).toEqual(expect.not.stringContaining('asked whether to remove'))
+  })
+
+  /**
+   * The editor is a modal now, and a modal is a new surface — so it carries a
+   * description of its own rather than borrowing the capture screen's, which
+   * describes the point, its attachments and the ways onward, none of which
+   * is reachable while the editor is up.
+   */
+  describe('the editor’s own, because a modal is a new surface', () => {
+    function editorDescription(): unknown {
+      return screen.getByTestId('capture-editor-spoken-description').props.accessibilityLabel
+    }
+
+    it('does not exist until the editor is opened', async () => {
+      await renderRecorded()
+      expect(screen.queryByTestId('capture-editor-spoken-description')).toBeNull()
+    })
+
+    it('says which field is being written, and what is on the surface', async () => {
+      await renderRecorded()
+      await fireEvent.press(screen.getByTestId('affordance-title'))
+
+      expect(editorDescription()).toEqual(expect.stringContaining('Naming this point.'))
+      expect(editorDescription()).toEqual(
+        expect.stringContaining('a control that saves it onto the point, and one that closes'),
+      )
+    })
+
+    it('names the notes rather than the name when it is the notes being written', async () => {
+      await renderRecorded()
+      await fireEvent.press(screen.getByTestId('affordance-description'))
+
+      expect(editorDescription()).toEqual(expect.stringContaining('Notes for this point.'))
+    })
+
+    it('says a write is still out, so a reader is not told a dead control is live', async () => {
+      const write = deferred<FieldRecord>()
+      mockRepo.renameRecord.mockImplementation(() => write.promise)
+
+      await renderRecorded()
+      await fireEvent.press(screen.getByTestId('affordance-title'))
+      expect(editorDescription()).toEqual(expect.not.stringContaining('Saving.'))
+
+      await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+      await fireEvent.press(screen.getByTestId('capture-title-save'))
+      await settle()
+
+      expect(editorDescription()).toEqual(expect.stringContaining('Saving.'))
+
+      await act(async () => {
+        write.resolve(amendRecord('record-1', { title: 'Frog pond outflow' }))
+        await Promise.resolve()
+      })
+      await settle()
+    })
+
+    it('carries the failure, which is the one thing on this surface a reader cannot reach by traversing controls', async () => {
+      mockRepo.renameRecord.mockImplementation(() =>
+        Promise.reject(new Error('database is locked')),
+      )
+
+      await renderRecorded()
+      await fireEvent.press(screen.getByTestId('affordance-title'))
+      await fireEvent.changeText(screen.getByTestId('capture-title-input'), 'Frog pond outflow')
+      await fireEvent.press(screen.getByTestId('capture-title-save'))
+      await settle()
+
+      expect(editorDescription()).toEqual(
+        expect.stringContaining('The name was not saved: database is locked.'),
+      )
+    })
   })
 })
 

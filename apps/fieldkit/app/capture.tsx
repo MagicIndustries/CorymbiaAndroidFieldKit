@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { ScrollView, TextInput, View, type ViewStyle } from 'react-native'
+import {
+  KeyboardAvoidingView,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  TextInput,
+  View,
+  type ViewStyle,
+} from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { useAudioPlayer } from 'expo-audio'
 import {
@@ -11,7 +20,7 @@ import {
   type HoldVerdict,
   type LocationSource,
 } from '@corymbia/geo'
-import { radii, spacing, touch } from '@corymbia/tokens'
+import { field, radii, spacing, touch } from '@corymbia/tokens'
 import {
   Button,
   CaptureDial,
@@ -1501,6 +1510,32 @@ function RecordedAffordances({
     null,
   )
   /**
+   * The last save that actually landed, and what it wrote — the whole of the
+   * answer to "not sure they're being saved".
+   *
+   * The editor is a modal now, so a save has one unmissable channel already:
+   * the surface she is looking at goes away. That alone is ambiguous, because
+   * a cancel does exactly the same thing, and the saved value itself lands
+   * further down this column past the strip, which is the position she never
+   * saw it in. So the closing modal is not treated as the confirmation; this
+   * is. It renders directly beneath the tile she pressed, names which field
+   * was written and quotes the value back, and it is a `polite` live region
+   * so a screen reader says it at the moment the modal's own surface
+   * disappears from under the reader's focus.
+   *
+   * Two channels, not colour (doctrine rule 9): this sentence, and the tile's
+   * own label turning `Title ✓` beside it.
+   *
+   * It persists rather than fading on a timer. A timed acknowledgement is one
+   * she can miss by looking up at the paddock for three seconds, which is the
+   * failure that produced this ticket in the first place; it is cleared by
+   * the next thing she does to a field, in `openEditor`.
+   */
+  const [saved, setSaved] = useState<{
+    kind: 'title' | 'description'
+    value: string | null
+  } | null>(null)
+  /**
    * Guards the `setState`s that follow an await. She can leave the screen, or
    * take another reading, while `renameRecord` is still in a transaction, and
    * nothing may write into a component that has gone. (`useRecordMedia` keeps
@@ -1530,7 +1565,27 @@ function RecordedAffordances({
     // a freshly opened notes box, where it reads as a refusal of the notes she
     // has not typed yet.
     setError(null)
+    // And the previous success goes with it, for the same reason: "Name
+    // saved: Frog pond outflow" standing under a freshly opened notes box
+    // reads as a confirmation of the notes she has not typed yet.
+    setSaved(null)
     setEditing({ kind, draft: (kind === 'title' ? title : description) ?? '' })
+  }
+
+  /**
+   * Leaves the editor without writing anything — the modal's own control, and
+   * the Android back button through `onRequestClose`.
+   *
+   * The failure message goes with it, because the failure message lives
+   * inside the modal (see the editor below) and there is nowhere else on this
+   * screen for it to be. Nothing is lost by that: what a failed save leaves
+   * behind is a record with no name on it, and the tile still reading `Title`
+   * with no value beneath it says exactly that, permanently, without a
+   * sentence.
+   */
+  function closeEditor(): void {
+    setEditing(null)
+    setError(null)
   }
 
   function handlePress(kind: InputAffordanceKind): void {
@@ -1584,6 +1639,11 @@ function RecordedAffordances({
       if (!mounted.current) return
       setTitle(renamed.title)
       setDescription(renamed.description)
+      // From the record that came back out of the transaction, not from
+      // `next`: the confirmation quotes what was actually written, so a
+      // repository that stored something other than what was typed cannot be
+      // confirmed as having stored what was typed.
+      setSaved({ kind, value: kind === 'title' ? renamed.title : renamed.description })
       setEditing(null)
     } catch (caught) {
       if (!mounted.current) return
@@ -1648,6 +1708,25 @@ function RecordedAffordances({
         counts={{ photo: media.photoCount, voice: media.voiceCount }}
         busy={busy}
       />
+
+      {/*
+        THE SAVE CONFIRMATION — directly under the tile she pressed, which is
+        where her eye returns the instant the modal goes away. Not further
+        down beside the stored value: that is past the media strip, and being
+        below the strip is the exact reason she never saw the value and asked
+        whether anything had been saved at all.
+
+        `accessibilityLiveRegion` is the screen-reader half of the same
+        moment. The modal carries its own spoken description, so a reader is
+        focused inside a surface that is about to be removed from the tree;
+        without a live region the removal is silent and the reader lands back
+        on the tiles with no statement that anything happened.
+      */}
+      {saved === null ? null : (
+        <Type variant="body" testID="capture-save-confirmation" accessibilityLiveRegion="polite">
+          {savedSentence(saved.kind, saved.value)}
+        </Type>
+      )}
 
       <MediaStrip
         testID="capture-media-strip"
@@ -1739,53 +1818,248 @@ function RecordedAffordances({
       )}
 
       {editing === null ? null : (
-        <View style={{ gap: spacing.sm }}>
-          <TextInput
-            testID={editing.kind === 'title' ? 'capture-title-input' : 'capture-description-input'}
-            accessibilityLabel={
-              editing.kind === 'title' ? 'A name for this point' : 'Notes about this point'
-            }
-            value={editing.draft}
-            onChangeText={(text) => {
-              setEditing({ kind: editing.kind, draft: text })
-            }}
-            placeholder={
-              editing.kind === 'title' ? 'A name for this point' : 'Notes about this point'
-            }
-            placeholderTextColor={theme.colors.textDim}
-            autoFocus
-            multiline={editing.kind === 'description'}
-            style={{
-              minHeight: touch.min,
-              borderRadius: radii.md,
-              borderWidth: 2,
-              borderColor: theme.colors.border,
-              backgroundColor: theme.colors.surfaceRaised,
-              color: theme.colors.textPrimary,
-              paddingHorizontal: spacing.md,
-            }}
-          />
-          <Button
-            testID={editing.kind === 'title' ? 'capture-title-save' : 'capture-description-save'}
-            label={saving ? 'SAVING…' : editing.kind === 'title' ? 'SAVE NAME' : 'SAVE NOTES'}
-            spokenLabel={
-              editing.kind === 'title'
-                ? 'Save this name onto the point'
-                : 'Save these notes onto the point'
-            }
-            disabled={saving}
-            onPress={() => {
-              void save()
-            }}
-          />
-        </View>
-      )}
-
-      {error === null ? null : (
-        <Type variant="small" testID={`capture-${error.kind}-error`}>
-          {error.message}
-        </Type>
+        <FieldEditor
+          kind={editing.kind}
+          draft={editing.draft}
+          saving={saving}
+          // Only a failure belonging to the editor that is open. The two
+          // cannot disagree today (`openEditor` clears the error and `save`
+          // re-sets it for the kind being written), but the editor renders
+          // the message and must not render one addressed to the other field
+          // if that ever stops being true.
+          error={error !== null && error.kind === editing.kind ? error.message : null}
+          onChangeDraft={(text) => {
+            setEditing({ kind: editing.kind, draft: text })
+          }}
+          onSave={() => {
+            void save()
+          }}
+          onCancel={closeEditor}
+        />
       )}
     </View>
   )
 }
+
+/** The confirmation sentence for a save that landed. */
+function savedSentence(kind: 'title' | 'description', value: string | null): string {
+  const subject = kind === 'title' ? 'Name' : 'Notes'
+  // An empty box is a deliberate clearing, not a save of nothing — the same
+  // distinction `renameRecord` models as `null` rather than `''` — and it has
+  // to read as one, or she is told "Notes saved:" followed by a blank.
+  return value === null ? `${subject} cleared` : `${subject} saved: ${value}`
+}
+
+/**
+ * What a screen reader hears when the editor opens (doctrine rule 16).
+ *
+ * A modal is a new surface, so it carries its own description rather than
+ * borrowing the capture screen's — `describeRecordedScreen` above describes
+ * the point, its attachments and the ways onward, none of which is reachable
+ * while this is up.
+ *
+ * State-dependent for the same reason that one is: a save in flight and a
+ * save that failed are the two moments where the surface and the sentence
+ * would otherwise disagree, and the failure text is the one thing on this
+ * surface a reader cannot get to by traversing controls.
+ */
+function describeEditor(kind: 'title' | 'description', saving: boolean, error: string | null) {
+  const heading =
+    kind === 'title'
+      ? 'Naming this point. A box for the name, a control that saves it onto the point, and one that closes without saving.'
+      : 'Notes for this point. A box for the notes, a control that saves them onto the point, and one that closes without saving.'
+  const state = saving ? ' Saving.' : ''
+  const failure = error === null ? '' : ` ${error}`
+  return `${heading}${state}${failure}`
+}
+
+/**
+ * The title/notes editor, as a surface of its own rather than a box appended
+ * to the bottom of the recorded state's column.
+ *
+ * **This is a field-reported blocker, not a preference.** Inline, the box
+ * rendered after everything else in that column — the tiles, the strip, the
+ * saved values — which is exactly the strip of screen the Android soft
+ * keyboard occupies. She typed blind. A modal takes the input out of that
+ * column entirely and puts it at the top of its own surface, so the keyboard
+ * rises into empty space beneath it rather than over it.
+ *
+ * Three things about the way it is built are load-bearing:
+ *
+ * - **Its own `SafeAreaView`.** A React Native `Modal` is a separate window
+ *   on Android; it is not inside the `SafeAreaView` that `_layout.tsx` wraps
+ *   every route in, so insets that screen gets for free have to be asked for
+ *   again here. `react-native-safe-area-context`'s `SafeAreaView` is a native
+ *   view rather than a hook, so it needs no provider of its own beyond the
+ *   `SafeAreaProvider` already at the root, and it is the same component
+ *   `_layout.tsx` uses.
+ *
+ * - **Top-anchored, not centred.** `KeyboardAvoidingView` is the belt; this
+ *   is the braces. A card pinned to the top of the surface is clear of a
+ *   keyboard that rises from the bottom whether or not the avoidance
+ *   behaves, and Android keyboard avoidance inside a `Modal` under
+ *   edge-to-edge is precisely the thing that cannot be verified from Jest.
+ *   Centring it would put the input back in the contested band for no gain.
+ *
+ * - **A bounded box.** `field.control` caps the height of the notes box, so
+ *   a long note scrolls inside it rather than growing the card downwards
+ *   into the keyboard — the inline layout's failure reproduced inside the
+ *   fix.
+ *
+ * The scrim is what answers "the record's content should not be competing
+ * for attention behind it": the same `overlay` token, at the same opacity,
+ * that `HelpAffordance` already dims this application's screens with.
+ */
+function FieldEditor({
+  kind,
+  draft,
+  saving,
+  error,
+  onChangeDraft,
+  onSave,
+  onCancel,
+}: {
+  kind: 'title' | 'description'
+  draft: string
+  saving: boolean
+  error: string | null
+  onChangeDraft: (text: string) => void
+  onSave: () => void
+  onCancel: () => void
+}) {
+  const { theme } = useTheme()
+  const label = kind === 'title' ? 'A name for this point' : 'Notes about this point'
+
+  return (
+    <Modal
+      visible
+      transparent
+      animationType="fade"
+      // The Android back button. Guarded rather than disabled-looking,
+      // because it is hardware and not a rendered control: doctrine rule 3 is
+      // about a control that looks pressable and does nothing, and there is
+      // nothing on screen to look pressable here. The guard exists so a
+      // dismissal mid-write cannot leave a failure with no surface to appear
+      // on — see `closeEditor`.
+      onRequestClose={() => {
+        if (!saving) onCancel()
+      }}
+    >
+      <KeyboardAvoidingView
+        behavior="padding"
+        style={{ flex: 1, backgroundColor: `${theme.colors.overlay}CC` }}
+      >
+        <SafeAreaView style={{ flex: 1 }}>
+          <View style={{ padding: spacing.lg }}>
+            <View
+              testID="capture-editor"
+              style={{
+                gap: spacing.md,
+                padding: spacing.lg,
+                borderRadius: radii.xl,
+                borderWidth: 1,
+                borderColor: theme.colors.border,
+                backgroundColor: theme.colors.surfaceRaised,
+              }}
+            >
+              {/*
+                Doctrine rule 16, the same shape `Screen` uses for a route:
+                present for a screen reader, invisible and out of flow for
+                everyone else. `Screen` itself is not reused here — it is a
+                flex-grown, padded page container, and this is a card.
+              */}
+              <View
+                testID="capture-editor-spoken-description"
+                accessible
+                accessibilityRole="header"
+                accessibilityLabel={describeEditor(kind, saving, error)}
+                style={styles.spokenDescription}
+              />
+
+              <Type variant="heading">
+                {kind === 'title' ? 'Name this point' : 'Notes for this point'}
+              </Type>
+
+              <TextInput
+                testID={kind === 'title' ? 'capture-title-input' : 'capture-description-input'}
+                accessibilityLabel={label}
+                value={draft}
+                onChangeText={onChangeDraft}
+                placeholder={label}
+                placeholderTextColor={theme.colors.textDim}
+                autoFocus
+                multiline={kind === 'description'}
+                style={{
+                  minHeight: kind === 'description' ? field.control : touch.min,
+                  // See the note on the component: bounded so a long note
+                  // scrolls rather than growing the card into the keyboard.
+                  maxHeight: field.control,
+                  borderRadius: radii.md,
+                  borderWidth: 2,
+                  borderColor: theme.colors.border,
+                  backgroundColor: theme.colors.surface,
+                  color: theme.colors.textPrimary,
+                  paddingHorizontal: spacing.md,
+                }}
+              />
+
+              {/*
+                THE FAILURE, INSIDE THE MODAL. It used to render at the foot
+                of the recorded column; left there it would now be behind the
+                scrim, unreadable, while the surface she is actually looking
+                at said nothing at all. A failed save keeps the editor open
+                with her text still in it, so this is both where she is
+                looking and where the retry is.
+              */}
+              {error === null ? null : (
+                <Type variant="small" testID={`capture-${kind}-error`}>
+                  {error}
+                </Type>
+              )}
+
+              <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                <Button
+                  testID={kind === 'title' ? 'capture-title-save' : 'capture-description-save'}
+                  label={saving ? 'SAVING…' : kind === 'title' ? 'SAVE NAME' : 'SAVE NOTES'}
+                  spokenLabel={
+                    kind === 'title'
+                      ? 'Save this name onto the point'
+                      : 'Save these notes onto the point'
+                  }
+                  disabled={saving}
+                  onPress={onSave}
+                />
+                {/*
+                  Genuinely disabled mid-write, not inert (doctrine rule 3).
+                  It is disabled at all — rather than left live — because
+                  closing the editor takes the failure message with it, and a
+                  cancel accepted while the write is still out could land that
+                  failure on a surface that no longer exists.
+                */}
+                <Button
+                  testID="capture-editor-cancel"
+                  label="CANCEL"
+                  spokenLabel="Close without saving"
+                  kind="secondary"
+                  disabled={saving}
+                  onPress={onCancel}
+                />
+              </View>
+            </View>
+          </View>
+        </SafeAreaView>
+      </KeyboardAvoidingView>
+    </Modal>
+  )
+}
+
+const styles = StyleSheet.create({
+  // Mirrors `Screen`'s own hidden description node: 1x1 rather than 0x0
+  // because some accessibility services skip zero-size nodes entirely.
+  spokenDescription: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+  },
+})
