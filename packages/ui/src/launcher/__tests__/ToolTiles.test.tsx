@@ -24,13 +24,20 @@ describe('ToolTiles', () => {
     expect(order.slice(0, 2)).toEqual(['tool-capture', 'tool-records'])
   })
 
-  it('orders differently for a different activity kind', async () => {
-    // One kind would let the order be hardcoded.
+  it('puts records first for sampling, where the log leads', async () => {
+    // The exact order, not merely "not the default". `not.toEqual` on an
+    // array is satisfied by ANY difference, including an accidental one — so
+    // it would have accepted a third wrong order just as happily as the right
+    // one, which is no guard at all for a table this test exists to protect.
+    //
+    // This pins a judgement rather than a spec line: §10.1 pins only the
+    // survey row. That is the point of writing it down — if the order changes
+    // it should change here too, deliberately, rather than drift.
     await wrap(
       <ToolTiles activityKind="sampling" available={['capture', 'records', 'media']} onOpen={() => {}} testID="tools" />,
     )
     const order = screen.getAllByTestId(/^tool-/).map((t) => t.props.testID)
-    expect(order).not.toEqual(['tool-capture', 'tool-records', 'tool-media'])
+    expect(order).toEqual(['tool-records', 'tool-capture', 'tool-media'])
   })
 
   it('renders nothing for a tool that does not exist yet', async () => {

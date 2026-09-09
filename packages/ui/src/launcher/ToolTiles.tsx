@@ -48,10 +48,10 @@ const DEFAULT_ORDER: readonly ToolKind[] = Object.freeze(['capture', 'records', 
  */
 const ORDER_BY_ACTIVITY: Readonly<Record<CarryOnActivityKind, readonly ToolKind[]>> = {
   survey: DEFAULT_ORDER,
-  sampling: ['records', 'capture', 'media', 'batching'],
-  collection: ['capture', 'batching', 'records', 'media'],
-  workshop: ['records', 'media', 'capture', 'batching'],
-  meeting: ['records', 'capture', 'media', 'batching'],
+  sampling: Object.freeze(['records', 'capture', 'media', 'batching']),
+  collection: Object.freeze(['capture', 'batching', 'records', 'media']),
+  workshop: Object.freeze(['records', 'media', 'capture', 'batching']),
+  meeting: Object.freeze(['records', 'capture', 'media', 'batching']),
 }
 
 function orderFor(activityKind: CarryOnActivityKind | null): readonly ToolKind[] {
