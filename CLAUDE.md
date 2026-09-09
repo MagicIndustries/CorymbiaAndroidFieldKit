@@ -42,6 +42,18 @@ already cost time:
   --platform android`. Run it after editing `app.json`, then build. Prebuild also
   reports config that needs a package installed to work at all — it is worth reading
   its output rather than skipping past it.
+- **And a plain `prebuild` over an existing `android/` can silently leave the
+  manifest stale.** This shipped: `app.json` gained `CAMERA` and `RECORD_AUDIO`, a
+  prebuild was run and reported success, and the generated
+  `android/app/src/main/AndroidManifest.xml` was still three days old. `CAMERA`
+  reached the APK anyway — from `expo-camera`'s own library manifest during merge —
+  while `RECORD_AUDIO` did not, so the camera worked and the voice screen was dead
+  with no useful message. **Use `npx expo prebuild --platform android --clean`** when
+  `app.json`'s native config changes; `android/` is generated and git-ignored, so
+  there is nothing to lose. Two ways to check what actually shipped, both quick:
+  compare the manifest's modification time against `app.json`'s, and read the truth
+  off the device with
+  `adb shell dumpsys package eco.corymbia.fieldkit | grep -A15 "requested permissions"`.
 - **Wireless ADB's port rotates**, so a `host:port` that worked an hour ago gets
   "connection refused". Rediscover with `adb mdns services` — and note it can
   advertise more than one entry for the same device, where the first is not

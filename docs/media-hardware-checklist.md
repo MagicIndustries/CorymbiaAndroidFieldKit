@@ -41,7 +41,12 @@ question a mock cannot answer, and the history says that is exactly where this s
    straight after a deliberate too-short tap (Record, Stop inside a second, Record again at
    once). Expect nothing to claim the note you just started "stopped on its own", and no voice
    note on the record that you did not finish. Either would be the stale-event bug on hardware.
-4. **Ring the phone mid-recording.** Have someone call, answer, hang up, then stop the note.
+4. **Ring the phone mid-recording.** *(Another app asking for the microphone is not a
+   substitute — tried on 9 September, and Android did not hand the recorder's microphone
+   over. That is consistent with the native source: the audio focus listener iterates
+   playback objects and never touches recorders. A real incoming call is the honest test.
+   For a harsher one, `adb shell killall -9 media.extractor` forces the media server down
+   and drives the error path directly.)* Have someone call, answer, hang up, then stop the note.
    Write down what actually happened: any message, whether it attached, and — on playback —
    whether the audio goes silent from the moment the call started. The likely answer is that
    nothing on screen changes and it records silence. That is a platform limitation nothing in
