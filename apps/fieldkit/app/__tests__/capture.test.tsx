@@ -2337,7 +2337,7 @@ describe('the editor, which is an overlay and not the foot of the column', () =>
     )
   })
 
-  it('genuinely disables both of the editor’s controls while the write is out (doctrine rule 3)', async () => {
+  it('genuinely disables both of the editor’s controls while the write is out (doctrine rule 18)', async () => {
     // Not an `onPress` that returns early: a control that looks pressable and
     // swallows the tap teaches her the tap did not register when it did.
     const write = deferred<FieldRecord>()

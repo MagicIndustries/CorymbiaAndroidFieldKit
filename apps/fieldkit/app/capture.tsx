@@ -1244,18 +1244,25 @@ function RecordedState({
 /**
  * Where the capture was filed, in one sentence (spec §9.6, §10.2).
  *
- * Read off the RECORD rather than off the current context, because it is the
- * row that was written that this sentence is about. The two agree today — the
- * activity handed to `useCapture` is the one the context reported — but a
- * sentence derived from the context would go on describing the context if
- * they ever stopped agreeing, which is the one thing it must not do: this
- * line is how she knows a capture did not land in the Inbox.
+ * **Only whether it was filed is read off the RECORD** — `record.activityId`,
+ * which never changes once the row is written — because it is the row that
+ * was written that this branch is about, and a null-versus-not read off the
+ * current context instead could disagree with what was actually saved.
  *
- * `activityName` is null only when nothing is running, in which case the
- * record has no activity either and the first branch answers. The middle
- * branch is for the pair disagreeing — a filed record with no name to hand —
- * and says the honest thing rather than naming the Inbox, which would be
- * false.
+ * **The NAME, when there is one, is not read off the record.** `FieldRecord`
+ * carries an activity id, never an activity name, so a filed record is always
+ * captioned with `activityName` — the live context's name — not with
+ * whatever the record's own activity was called at capture time. The two
+ * agree today only because `activityName` is derived from the same
+ * `carryOn` that decided `record.activityId` in the first place (see the
+ * call site below), which is also why the middle branch — a filed record
+ * with no name to hand — cannot be reached yet: `activityName` is null
+ * exactly when `record.activityId` is, in every path that reaches this
+ * function today. A caller that ever passed an `activityName` read at a
+ * different moment than the record's own `activityId` — the case this
+ * branch exists for — would have this line caption a record with whichever
+ * activity the context currently names, which is not necessarily the one it
+ * was actually filed into.
  */
 function describeDestination(record: FieldRecord, activityName: string | null): string {
   if (record.activityId === null) {
@@ -2273,7 +2280,7 @@ function FieldEditor({
    * closing the editor takes the failure message with it, so a dismissal
    * accepted while `renameRecord` is still out could land a failure on a
    * surface that no longer exists. It is a guard and not a disabled control:
-   * doctrine rule 3 is about something that LOOKS pressable and does nothing,
+   * doctrine rule 18 is about something that LOOKS pressable and does nothing,
    * and a hardware key renders nothing to look at.
    *
    * `saving` and `onCancel` are in the dependency list rather than read
@@ -2426,7 +2433,7 @@ function FieldEditor({
                 onPress={onSave}
               />
               {/*
-                  Genuinely disabled mid-write, not inert (doctrine rule 3).
+                  Genuinely disabled mid-write, not inert (doctrine rule 18).
                   It is disabled at all — rather than left live — because
                   closing the editor takes the failure message with it, and a
                   cancel accepted while the write is still out could land that
