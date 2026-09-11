@@ -279,8 +279,8 @@ function LauncherBody() {
           activityKind={carryOn === null ? null : carryOn.activityKind}
           available={AVAILABLE_TOOLS}
           onOpen={(tool) => {
-            // `/records` does not exist at this commit. Task 8 of this plan
-            // builds it — the tile is correct now, not a badge over a gap.
+            // Both destinations exist: `/capture` is the capture screen and
+            // `/records` the list of what this activity already holds.
             router.push(tool === 'capture' ? '/capture' : '/records')
           }}
         />
