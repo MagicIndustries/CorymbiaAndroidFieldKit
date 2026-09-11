@@ -1208,8 +1208,11 @@ file into says so and offers a way to projects, rather than an empty chooser.
 Records have no detail screen yet. `records.tsx` lists what is in the current activity, each
 row a card that is deliberately not pressable because there is nowhere for a press to go
 (doctrine rule 18). Each row shows the activity **sequence**, never the capture number, and
-the list is ordered newest-first by capture time — so after an insertion the sequences on
-screen are a complete set with no gaps and no repeats, not an ascending column.
+the list is ordered by that sequence, highest first — so a record filed into a position
+appears at that position, and after an insertion the numbers read 5, 4, 3, 2, 1 down the
+screen: a complete set with no gaps and no repeats, not an ascending column. The top row is
+therefore the highest number in the activity, which after a filing is not necessarily the
+newest capture.
 
 ### 10.3 Project creation
 

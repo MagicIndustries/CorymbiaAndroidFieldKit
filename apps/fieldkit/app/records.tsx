@@ -10,7 +10,9 @@ import { stampFixFor } from '../src/records/stampFix'
 /**
  * The records list (spec §7.2, §10.1) — where the launcher's Records tile
  * goes, and the screen the owner went looking for after capturing and could
- * not find. Everything she recorded in the activity she is in, newest first.
+ * not find. Everything she recorded in the activity she is in, in activity
+ * order — the highest number at the top, which after a filing is not
+ * necessarily the newest capture.
  *
  * **The sequence, never the capture number.** Spec §7.2 keeps two numbers per
  * record and they answer different questions: the capture number is the
@@ -109,7 +111,7 @@ function describeRecords(listing: Listing | null, error: string | null): string 
     records.length === 0
       ? `Records. Nothing recorded in ${activityName} yet.`
       : `Records in ${activityName}. ${String(records.length)} ` +
-        `record${records.length === 1 ? '' : 's'}, newest first.`
+        `record${records.length === 1 ? '' : 's'}, in activity order, highest number first.`
   return error === null ? head : `${head} ${error}`
 }
 

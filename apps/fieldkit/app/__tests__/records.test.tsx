@@ -402,7 +402,10 @@ describe('the records list', () => {
     expect(screen.queryByTestId('records-loading')).toBeNull()
 
     await act(async () => {
-      slow.resolve([recordRow({ id: 'rec_a', sequence: 1 }), recordRow({ id: 'rec_b', sequence: 2 })])
+      slow.resolve([
+        recordRow({ id: 'rec_a', sequence: 1 }),
+        recordRow({ id: 'rec_b', sequence: 2 }),
+      ])
     })
     expect(screen.getByTestId('record-row-rec_b')).toBeTruthy()
   })
@@ -438,6 +441,21 @@ describe('the records list', () => {
       await renderRecords()
       expect(spokenDescription()).toMatch(/2 records/)
       expect(spokenDescription()).toMatch(/Reach 4 transect/)
+    })
+
+    it('says the list is in activity order, not that it is newest first', async () => {
+      // `listRecords` orders by `sequence DESC`, and after a filing from the
+      // Inbox into a position the top row is the highest NUMBER rather than
+      // the newest capture. This sentence said "newest first" until that
+      // ordering changed; a screen-reader user has nothing else to tell her
+      // which end of the list is which (doctrine rule 16).
+      listRecords.mockResolvedValue([
+        recordRow({ id: 'rec_b', sequence: 2 }),
+        recordRow({ id: 'rec_a', sequence: 1 }),
+      ])
+      await renderRecords()
+      expect(spokenDescription()).toMatch(/in activity order, highest number first/)
+      expect(spokenDescription()).not.toMatch(/newest first/)
     })
 
     it('says one record in the singular', async () => {
