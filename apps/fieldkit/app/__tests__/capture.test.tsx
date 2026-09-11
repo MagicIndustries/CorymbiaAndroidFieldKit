@@ -332,6 +332,7 @@ type MockCurrentContext = ReturnType<
 const NO_ACTIVITY: MockCurrentContext = {
   carryOn: null,
   activityId: null,
+  projectId: null,
   unfiledCount: 0,
   loading: false,
   refresh: () => Promise.resolve(),
@@ -881,6 +882,10 @@ function runningActivity(activityId: string, activityName: string): MockCurrentC
       clientName: 'Parks Victoria',
     },
     activityId,
+    // The capture screen files by activity, never by project — this is here
+    // because `CurrentContext` requires it, not because anything below reads
+    // it.
+    projectId: 'prj_yarra',
     unfiledCount: 0,
     loading: false,
     refresh: () => Promise.resolve(),

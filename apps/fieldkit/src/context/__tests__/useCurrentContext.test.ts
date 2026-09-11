@@ -182,6 +182,17 @@ describe('useCurrentContext', () => {
     expect(result.current.activityId).toBe('act_survey')
   })
 
+  it('reports the project that activity belongs to, for a new activity started in it', async () => {
+    // The launcher's "New activity" has to say which project the new one
+    // goes into, and `CarryOn` deliberately carries no ids (doctrine rule 6).
+    // Without this the screen it pushes to has no project to create against.
+    const { result } = await renderHook(() => useCurrentContext())
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    expect(result.current.projectId).toBe('prj_yarra')
+  })
+
   it('names the client of the resumed project, looked up by that project’s client', async () => {
     const { result } = await renderHook(() => useCurrentContext())
     await waitFor(() => {
@@ -239,6 +250,7 @@ describe('useCurrentContext', () => {
     })
     expect(result.current.carryOn).toBeNull()
     expect(result.current.activityId).toBeNull()
+    expect(result.current.projectId).toBeNull()
   })
 
   it('still counts the Inbox when there is no activity to count captures in', async () => {

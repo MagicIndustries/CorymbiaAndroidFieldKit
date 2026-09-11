@@ -28,6 +28,15 @@ export type CurrentContext = {
    * screen needs both, and only one of them is renderable.
    */
   activityId: string | null
+  /**
+   * The project that activity belongs to, or `null` on a genuine first run.
+   *
+   * Separate from `carryOn` for the same reason `activityId` is: `CarryOn`
+   * carries the project's NAME and no id at all (doctrine rule 6). The
+   * launcher needs the id — "New activity" starts one in the project she is
+   * already in, and `/new-activity` cannot create against a name.
+   */
+  projectId: string | null
   /** How many captures are sitting in the Inbox. The strip appears at ≥ 1. */
   unfiledCount: number
   /** True only until the first read comes back — see `refresh` below. */
@@ -52,6 +61,7 @@ type Resolved = Omit<CurrentContext, 'refresh'>
 const NOTHING_YET: Resolved = {
   carryOn: null,
   activityId: null,
+  projectId: null,
   unfiledCount: 0,
   loading: true,
 }
@@ -128,6 +138,7 @@ export function useCurrentContext(): CurrentContext {
                 clientName: client === null ? UNKNOWN_CLIENT : client.name,
               },
         activityId: context === null ? null : context.activity.id,
+        projectId: context === null ? null : context.project.id,
         unfiledCount: unfiled.length,
         loading: false,
       })

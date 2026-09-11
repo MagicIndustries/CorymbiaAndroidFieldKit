@@ -138,7 +138,7 @@ function describeLauncher(carryOn: CarryOn | null, unfiledCount: number): string
 
 function LauncherBody() {
   const router = useRouter()
-  const { carryOn, unfiledCount, loading } = useCurrentContext()
+  const { carryOn, projectId, unfiledCount, loading } = useCurrentContext()
 
   /**
    * The first read, which takes a few milliseconds and is not a state to
@@ -215,9 +215,22 @@ function LauncherBody() {
               router.push('/projects')
             }}
             onNewActivity={() => {
-              // `/new-activity` does not exist at this commit. Task 7 of
-              // this plan builds it.
-              router.push('/new-activity')
+              // The project id travels with the push: "New activity" means a
+              // new activity in the project she is already in, and
+              // `/new-activity` cannot create one against a project name.
+              //
+              // Guarded rather than asserted. `CarryOnCard` renders this
+              // control only when there is a card, and a card means a
+              // resumed activity, which means a project — so `projectId` is
+              // non-null whenever this can fire. The guard costs a line and
+              // the alternative costs a crash on the screen she opens most;
+              // `/new-activity` answers a plain push by asking her to choose
+              // a project, which is the honest answer to not knowing.
+              router.push(
+                projectId === null
+                  ? '/new-activity'
+                  : { pathname: '/new-activity', params: { projectId } },
+              )
             }}
           />
         </View>

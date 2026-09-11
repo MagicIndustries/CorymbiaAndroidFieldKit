@@ -93,6 +93,7 @@ async function renderLauncher(
   options: {
     carryOn?: CarryOn | null
     activityId?: string | null
+    projectId?: string | null
     unfiledCount?: number
     loading?: boolean
   } = {},
@@ -106,6 +107,8 @@ async function renderLauncher(
           ? null
           : 'act_survey'
         : options.activityId,
+    projectId:
+      options.projectId === undefined ? (carryOn === null ? null : 'prj_yarra') : options.projectId,
     unfiledCount: options.unfiledCount ?? 0,
     loading: options.loading ?? false,
     refresh: () => Promise.resolve(),
@@ -203,7 +206,27 @@ describe('the launcher', () => {
   })
 
   it('starts a new activity in the project she is already in', async () => {
+    // The project id travels with the push. Without it `/new-activity` has
+    // nothing to create against and shows its "no project chosen" state
+    // instead — which is the right answer to a genuinely absent project and
+    // the wrong one to a project that is right there on the card.
     await renderLauncher()
+    await fireEvent.press(screen.getByTestId('carry-on-new-activity'))
+    expect(mockRouter.push).toHaveBeenCalledWith({
+      pathname: '/new-activity',
+      params: { projectId: 'prj_yarra' },
+    })
+    expect(mockRouter.push).toHaveBeenCalledTimes(1)
+  })
+
+  it('still goes somewhere sensible if there is no project id to send', async () => {
+    // `CarryOnCard` renders "New activity" only when there is a card, and a
+    // card means a resumed activity, which means a project — so this
+    // combination is one the real hook cannot produce. It is guarded rather
+    // than asserted because the cost of being wrong is a crash on the screen
+    // she opens most, and this is what the guard does: a plain push, which
+    // `/new-activity` answers by asking her to choose a project.
+    await renderLauncher({ projectId: null })
     await fireEvent.press(screen.getByTestId('carry-on-new-activity'))
     expect(mockRouter.push).toHaveBeenCalledWith('/new-activity')
     expect(mockRouter.push).toHaveBeenCalledTimes(1)
