@@ -177,7 +177,11 @@ const mockCurrentContext: MockCurrentContext = {
   projectId: null,
   unfiledCount: 0,
   loading: false,
+  error: null,
   refresh: () => Promise.resolve(),
+  // Already settled, on nothing: the real hook answers this once its first
+  // read has come back, and no test here taps CAPTURE in any case.
+  settledActivityId: () => Promise.resolve(null),
 }
 
 jest.mock('../../src/context/useCurrentContext', () => ({

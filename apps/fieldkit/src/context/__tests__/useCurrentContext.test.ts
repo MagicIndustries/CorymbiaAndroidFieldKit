@@ -321,6 +321,45 @@ describe('useCurrentContext', () => {
     expect(result.current.activityId).toBeNull()
   })
 
+  it('reports why a first read failed, rather than answering like a fresh install', async () => {
+    // `carryOn === null` is the same value a genuine first run produces, so
+    // without this field the launcher cannot tell "you have no project" from
+    // "I could not find out" — and it said the first, out loud, on the screen
+    // she opens most (doctrine rules 16 and 20).
+    readCurrentContext.mockRejectedValue(new Error('database went away'))
+    const { result } = await renderHook(() => useCurrentContext())
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    expect(result.current.error?.message).toBe('database went away')
+  })
+
+  it('reports no error when the read succeeded', async () => {
+    // The other half: a hook that always reported one would pass the test
+    // above and put a failure sentence on every launch.
+    const { result } = await renderHook(() => useCurrentContext())
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    expect(result.current.error).toBeNull()
+  })
+
+  it('clears the error when a later read succeeds', async () => {
+    readCurrentContext.mockRejectedValueOnce(new Error('database went away'))
+    const { result } = await renderHook(() => useCurrentContext())
+    await waitFor(() => {
+      expect(result.current.error).not.toBeNull()
+    })
+
+    // She presses Try again and this time it works. An error left behind
+    // would keep a sentence on screen about a read that has since succeeded.
+    await act(async () => {
+      await result.current.refresh()
+    })
+    expect(result.current.error).toBeNull()
+    expect(result.current.carryOn?.activityName).toBe('Reach 3 transect')
+  })
+
   it('keeps the last good answer on screen when a later read fails, rather than blanking it', async () => {
     // Distinct from the test above: that one fails on the very FIRST read,
     // where `carryOn` is already null from `NOTHING_YET` — so it cannot tell
@@ -343,6 +382,9 @@ describe('useCurrentContext', () => {
     expect(result.current.loading).toBe(false)
     expect(result.current.carryOn?.activityName).toBe('Reach 3 transect')
     expect(result.current.activityId).toBe('act_survey')
+    // And it says the later read failed while keeping what the earlier one
+    // found: the card stays, with the reason beside it.
+    expect(result.current.error?.message).toBe('database went away')
   })
 
   it('never sets loading back to true on a refresh, so CAPTURE is not taken off screen while she is on her way back to it', async () => {
@@ -371,5 +413,77 @@ describe('useCurrentContext', () => {
       stall.resolve({ activity, project })
     })
     expect(result.current.loading).toBe(false)
+  })
+
+  describe('the activity a capture written now belongs to', () => {
+    it('waits for the first read rather than answering null because it is early', async () => {
+      // The window this whole seam exists for. `activityId` is null on the
+      // first render — nobody has looked yet — and a capture taken then wrote
+      // `activityId: null, contextActivityId: null`, which §8.3 never allows
+      // to be revised. So the question asked at WRITE time must wait.
+      const stall = deferred<Awaited<ReturnType<typeof readCurrentContext>>>()
+      readCurrentContext.mockReturnValueOnce(stall.promise)
+
+      const { result } = await renderHook(() => useCurrentContext())
+      expect(result.current.activityId).toBeNull()
+
+      let answered: string | null | 'still waiting' = 'still waiting'
+      const asked = result.current.settledActivityId().then((id) => {
+        answered = id
+        return id
+      })
+
+      // Nothing yet: the read has not come back, and neither has this.
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(answered).toBe('still waiting')
+
+      await act(async () => {
+        stall.resolve({ activity, project })
+        await asked
+      })
+      expect(answered).toBe('act_survey')
+    })
+
+    it('answers the Inbox once a read has found nothing running', async () => {
+      // A genuine first run still files to the Inbox, and it must not hang
+      // waiting for an activity that does not exist.
+      readCurrentContext.mockResolvedValue(null)
+      const { result } = await renderHook(() => useCurrentContext())
+      await waitFor(() => {
+        expect(result.current.loading).toBe(false)
+      })
+      await expect(result.current.settledActivityId()).resolves.toBeNull()
+    })
+
+    it('answers rather than hanging when the read failed', async () => {
+      // A failed read leaves the destination unknown, and the Inbox is where
+      // an unknown destination goes. Hanging would mean the row was never
+      // written at all — losing the capture, which is worse than filing it
+      // somewhere she can move it from.
+      readCurrentContext.mockRejectedValue(new Error('database went away'))
+      const { result } = await renderHook(() => useCurrentContext())
+      await waitFor(() => {
+        expect(result.current.loading).toBe(false)
+      })
+      await expect(result.current.settledActivityId()).resolves.toBeNull()
+    })
+
+    it('answers a screen that has gone away, so a capture mid-write is still written', async () => {
+      // `useCapture` awaits this immediately before its insert. A screen
+      // unmounted with the first read still in flight would otherwise leave
+      // that await pending for ever and the record would never be written —
+      // and "the record is real from the moment of the tap" is the promise
+      // the capture screen is built on.
+      const stall = deferred<Awaited<ReturnType<typeof readCurrentContext>>>()
+      readCurrentContext.mockReturnValueOnce(stall.promise)
+
+      const { result, unmount } = await renderHook(() => useCurrentContext())
+      const asked = result.current.settledActivityId()
+      await unmount()
+
+      await expect(asked).resolves.toBeNull()
+    })
   })
 })

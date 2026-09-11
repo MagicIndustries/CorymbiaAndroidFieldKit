@@ -89,6 +89,8 @@ const CARRY_ON: CarryOn = {
   clientName: 'Parks Victoria',
 }
 
+const mockRefresh = jest.fn<Promise<void>, []>(() => Promise.resolve())
+
 async function renderLauncher(
   options: {
     carryOn?: CarryOn | null
@@ -96,6 +98,7 @@ async function renderLauncher(
     projectId?: string | null
     unfiledCount?: number
     loading?: boolean
+    error?: Error | null
   } = {},
 ): Promise<void> {
   const carryOn = options.carryOn === undefined ? CARRY_ON : options.carryOn
@@ -111,7 +114,12 @@ async function renderLauncher(
       options.projectId === undefined ? (carryOn === null ? null : 'prj_yarra') : options.projectId,
     unfiledCount: options.unfiledCount ?? 0,
     loading: options.loading ?? false,
-    refresh: () => Promise.resolve(),
+    error: options.error ?? null,
+    refresh: mockRefresh,
+    // The launcher never calls it — `capture.tsx` is the caller — but
+    // `CurrentContext` requires it, which is what keeps this fixture honest
+    // about the shape the real hook returns.
+    settledActivityId: () => Promise.resolve(null),
   }
 
   // @testing-library/react-native v14 is async throughout: `render` and
@@ -138,6 +146,7 @@ function spokenDescription(): unknown {
 
 beforeEach(() => {
   mockStatus = { state: 'ready', error: null, applied: ['001-projects'] }
+  mockRefresh.mockClear()
   mockRouter.push.mockClear()
   mockRouter.replace.mockClear()
   mockRouter.back.mockClear()
@@ -350,6 +359,64 @@ describe('the launcher', () => {
     await fireEvent.press(screen.getByTestId('launcher-gallery'))
     expect(mockRouter.push).toHaveBeenCalledWith('/gallery')
     expect(mockRouter.push).toHaveBeenCalledTimes(1)
+  })
+
+  it('says a failed read failed, rather than drawing it as a fresh install', async () => {
+    // The one thing this state must never do. `carryOn` is null here for the
+    // same reason it is null on a first run — nothing was read — and the
+    // difference between "you have no project" and "I could not find out" is
+    // the difference between a sentence about her data and a sentence about
+    // the read (doctrine rules 16 and 20). The hardware checklist lists "No
+    // project yet on reopen" as a failure to report, and a tester could not
+    // tell this cause from a lost selection.
+    await renderLauncher({ carryOn: null, error: new Error('database is locked') })
+
+    expect(screen.getByTestId('launcher-error')).toHaveTextContent(
+      'The launcher could not read where you were: database is locked. Try again.',
+    )
+    expect(screen.queryByTestId('launcher-carry-on')).toBeNull()
+    expect(screen.getByTestId('launcher')).not.toHaveTextContent(/No project yet/, {
+      exact: false,
+    })
+    expect(spokenDescription()).toMatch(/could not read where you were/)
+    expect(spokenDescription()).not.toMatch(/no project yet/i)
+  })
+
+  it('keeps capture reachable while it says the read failed', async () => {
+    // Doctrine rule 4 outlives a failed read: the tiles are unconditional, so
+    // a capture is still one tap and goes to the Inbox. A failure state that
+    // took CAPTURE off the screen would be a worse answer than the wrong
+    // sentence this replaced.
+    await renderLauncher({ carryOn: null, error: new Error('database is locked') })
+    expect(screen.getByTestId('tool-capture')).toBeTruthy()
+  })
+
+  it('re-reads when she presses Try again', async () => {
+    await renderLauncher({ carryOn: null, error: new Error('database is locked') })
+    await fireEvent.press(screen.getByTestId('launcher-retry'))
+    // The retry is the whole of rule 20's second half here: a message she can
+    // act on rather than one she can only read.
+    expect(mockRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the card it already had when a later read fails', async () => {
+    // The hook does not blank what it last read (its own test pins that), and
+    // this is the screen half of the same guarantee: the failure is added to
+    // the screen, the card is not taken off it.
+    await renderLauncher({ error: new Error('database is locked') })
+    expect(screen.getByTestId('launcher-carry-on')).toHaveTextContent(/Reach 3 transect/)
+    expect(screen.getByTestId('launcher-error')).toBeTruthy()
+    expect(spokenDescription()).toMatch(/Reach 3 transect/)
+    expect(spokenDescription()).toMatch(/could not read where you were/)
+  })
+
+  it('says nothing about a failure when there was none', async () => {
+    // The other half of the pair: a screen that rendered the sentence
+    // unconditionally would pass every test above.
+    await renderLauncher({ carryOn: null })
+    expect(screen.queryByTestId('launcher-error')).toBeNull()
+    expect(screen.queryByTestId('launcher-retry')).toBeNull()
+    expect(screen.getByTestId('launcher-carry-on')).toBeTruthy()
   })
 
   it('says the database is still opening rather than drawing an empty launcher', async () => {

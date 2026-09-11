@@ -3,6 +3,7 @@ import { Pressable, ScrollView, View } from 'react-native'
 import { useRouter } from 'expo-router'
 import { spacing, touch } from '@corymbia/tokens'
 import {
+  Button,
   Card,
   CarryOnCard,
   HelpAffordance,
@@ -34,6 +35,11 @@ import { useCurrentContext } from '../src/context/useCurrentContext'
  *    and a screen reader would say it out loud.
  *  - **Resumed.** The card, the tool tiles beneath it, and the Inbox strip
  *    when — and only when — something is unfiled.
+ *  - **A read that failed.** The sentence saying so, and a Try again, in
+ *    place of the card — never the first-run face, which would be a claim
+ *    about her data rather than about the read (doctrine rules 16 and 20).
+ *    A card that was already on screen stays: only a first read that fails
+ *    has no card to keep.
  *  - **A genuine first run.** No context has ever existed. `CarryOnCard`
  *    draws its own first-run face here: no `CAPTURE` inside the card, because
  *    there is nothing to carry on with, and the one way forward — choosing a
@@ -91,6 +97,18 @@ export default function Launcher() {
  */
 const AVAILABLE_TOOLS: ToolKind[] = ['capture', 'records']
 
+/**
+ * A failed read, in one sentence: the human half first and the technical cause
+ * subordinate (doctrine rule 6), with trailing sentence punctuation stripped
+ * from the cause so a message ending in its own full stop does not read
+ * "...is locked.. Try again." The same shape `records.tsx` and `projects.tsx`
+ * use, deliberately — this is the fourth screen to need it and the wording is
+ * recognisable across them.
+ */
+function messageFor(cause: Error): string {
+  return `The launcher could not read where you were: ${cause.message.replace(/[.?!…]+$/, '')}. Try again.`
+}
+
 /** "1 unfiled capture", "4 unfiled captures" — singular only at exactly one. */
 function formatUnfiled(count: number): string {
   return `${count} unfiled capture${count === 1 ? '' : 's'}`
@@ -112,13 +130,27 @@ function formatUnfiled(count: number): string {
  * naming only the card's own. The Inbox is mentioned only when there is one,
  * for the same reason the strip is only rendered then.
  */
-function describeLauncher(carryOn: CarryOn | null, unfiledCount: number): string {
+function describeLauncher(
+  carryOn: CarryOn | null,
+  unfiledCount: number,
+  error: string | null,
+): string {
   const inbox =
     unfiledCount === 0
       ? ''
       : ` ${formatUnfiled(unfiledCount)} ${unfiledCount === 1 ? 'is' : 'are'} waiting in the Inbox.`
 
   if (carryOn === null) {
+    // A failed read with no card to keep. It does NOT fall through to the
+    // first-run sentence: "No project yet" is a statement about her data, and
+    // saying it out loud because a query threw is the exact failure the
+    // hardware checklist's item 6 asks a tester to report.
+    if (error !== null) {
+      return (
+        `Corymbia Field Kit. ${error} Capture and Records are both live below, and a capture ` +
+        `taken now goes to the Inbox.${inbox} The component gallery is at the bottom.`
+      )
+    }
     return (
       'Corymbia Field Kit. No project yet, so there is nothing to carry on with. Choose a ' +
       'project to see what to carry on with — or capture straight away: Capture and Records ' +
@@ -129,16 +161,19 @@ function describeLauncher(carryOn: CarryOn | null, unfiledCount: number): string
 
   const captures =
     carryOn.captureCount === 1 ? '1 capture so far' : `${carryOn.captureCount} captures so far`
-  return (
+  const head =
     `Corymbia Field Kit. Carrying on with ${carryOn.activityName}, in ${carryOn.projectName} ` +
     `for ${carryOn.clientName}, ${captures}. Capture is one tap from here. Beneath it, tiles ` +
     `for the tools this activity leans on.${inbox} The component gallery is at the bottom.`
-  )
+  // The card is what was last read successfully, so it is still described —
+  // with the failure named after it, the way `records.tsx` says both.
+  return error === null ? head : `${head} ${error}`
 }
 
 function LauncherBody() {
   const router = useRouter()
-  const { carryOn, projectId, unfiledCount, loading } = useCurrentContext()
+  const { carryOn, projectId, unfiledCount, loading, error, refresh } = useCurrentContext()
+  const failure = error === null ? null : messageFor(error)
 
   /**
    * The first read, which takes a few milliseconds and is not a state to
@@ -159,7 +194,7 @@ function LauncherBody() {
   }
 
   return (
-    <Screen testID="launcher" spokenDescription={describeLauncher(carryOn, unfiledCount)}>
+    <Screen testID="launcher" spokenDescription={describeLauncher(carryOn, unfiledCount, failure)}>
       {/*
         It scrolls, for the reason every screen in this application does:
         rotation is unlocked and a phone in landscape has roughly 360dp of
@@ -195,6 +230,26 @@ function LauncherBody() {
         </View>
 
         {/*
+          THE FAILURE, ON THE SCREEN AND NOT IN AN ALERT (doctrine rule 20).
+          It sits above the card because it is about the card: what is below
+          is either the last answer that came back or nothing at all, and
+          either way she is owed the reason before she reads it.
+        */}
+        {failure !== null ? (
+          <View style={{ gap: spacing.sm }}>
+            <Type testID="launcher-error">{failure}</Type>
+            <Button
+              testID="launcher-retry"
+              label="Try again"
+              kind="secondary"
+              onPress={() => {
+                void refresh()
+              }}
+            />
+          </View>
+        ) : null}
+
+        {/*
           The card sits in a slot named for the launcher, while the card
           itself is named for what it is. That is not decoration: `CarryOnCard`
           builds its children's testIDs from its own — `carry-on-capture`,
@@ -202,38 +257,51 @@ function LauncherBody() {
           questions, "is the launcher showing a card here" and "which control
           inside the card was pressed".
         */}
-        <View testID="launcher-carry-on">
-          <CarryOnCard
-            testID="carry-on"
-            carryOn={carryOn}
-            onCapture={() => {
-              router.push('/capture')
-            }}
-            onSwitchProject={() => {
-              // `/projects` does not exist at this commit. Task 6 of this
-              // plan builds it — the control is correct now, not latent.
-              router.push('/projects')
-            }}
-            onNewActivity={() => {
-              // The project id travels with the push: "New activity" means a
-              // new activity in the project she is already in, and
-              // `/new-activity` cannot create one against a project name.
-              //
-              // Guarded rather than asserted. `CarryOnCard` renders this
-              // control only when there is a card, and a card means a
-              // resumed activity, which means a project — so `projectId` is
-              // non-null whenever this can fire. The guard costs a line and
-              // the alternative costs a crash on the screen she opens most;
-              // `/new-activity` answers a plain push by asking her to choose
-              // a project, which is the honest answer to not knowing.
-              router.push(
-                projectId === null
-                  ? '/new-activity'
-                  : { pathname: '/new-activity', params: { projectId } },
-              )
-            }}
-          />
-        </View>
+        {/*
+          No card when the FIRST read failed. `CarryOnCard` draws a first-run
+          face for a null `carryOn` — "No project yet, so there is nothing to
+          carry on with" — which is a claim about her data, and a query that
+          threw is no evidence for it. A card that was already on screen is
+          kept (the hook does not blank it), so this hides only the face that
+          would be a lie.
+
+          Capture is still one tap either way: `AVAILABLE_TOOLS` puts its tile
+          below regardless, so doctrine rule 4 survives a failed read.
+        */}
+        {carryOn === null && failure !== null ? null : (
+          <View testID="launcher-carry-on">
+            <CarryOnCard
+              testID="carry-on"
+              carryOn={carryOn}
+              onCapture={() => {
+                router.push('/capture')
+              }}
+              onSwitchProject={() => {
+                // `/projects` does not exist at this commit. Task 6 of this
+                // plan builds it — the control is correct now, not latent.
+                router.push('/projects')
+              }}
+              onNewActivity={() => {
+                // The project id travels with the push: "New activity" means a
+                // new activity in the project she is already in, and
+                // `/new-activity` cannot create one against a project name.
+                //
+                // Guarded rather than asserted. `CarryOnCard` renders this
+                // control only when there is a card, and a card means a
+                // resumed activity, which means a project — so `projectId` is
+                // non-null whenever this can fire. The guard costs a line and
+                // the alternative costs a crash on the screen she opens most;
+                // `/new-activity` answers a plain push by asking her to choose
+                // a project, which is the honest answer to not knowing.
+                router.push(
+                  projectId === null
+                    ? '/new-activity'
+                    : { pathname: '/new-activity', params: { projectId } },
+                )
+              }}
+            />
+          </View>
+        )}
 
         {/*
           THE INBOX STRIP, WHICH APPEARS WHEN UNFILED ITEMS EXIST AND ONLY
@@ -260,8 +328,13 @@ function LauncherBody() {
           >
             <Card accent>
               <View style={{ gap: spacing.xs }}>
+                {/*
+                  No trailing separator: the label is the whole of this line,
+                  and a `·` with nothing after it reads as something that
+                  failed to render rather than as punctuation.
+                */}
                 <Type variant="label" dim>
-                  INBOX ·
+                  INBOX
                 </Type>
                 <Type variant="heading">{`${formatUnfiled(unfiledCount)}.`}</Type>
                 <Type variant="small" dim>

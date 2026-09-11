@@ -82,6 +82,10 @@ then everything else on top of what item 2 created.
    flash of "No project yet" is not.
    *Failure:* "No project yet" on reopen; a different activity resumed; the capture count
    reset.
+   *Note:* a read that fails now says so in its own words — "The launcher could not read where
+   you were: …" with a **Try again** beneath it — and never draws the first-run face. So "No
+   project yet" on reopen means a lost selection and nothing else; report the failure sentence
+   separately if it appears.
 
 7. **The tablet.** Repeat items 1–6 on the 10.36-inch tablet, in both orientations.
    *Expect:* nothing surprising — but nothing here has ever been seen on it, so record what

@@ -335,7 +335,12 @@ const NO_ACTIVITY: MockCurrentContext = {
   projectId: null,
   unfiledCount: 0,
   loading: false,
+  error: null,
   refresh: () => Promise.resolve(),
+  // The read has come back and found nothing running — the Inbox, settled
+  // rather than merely not known yet. The two are a different state and the
+  // difference is what the "still finding out" test below is about.
+  settledActivityId: () => Promise.resolve(null),
 }
 let mockCurrentContext: MockCurrentContext = NO_ACTIVITY
 
@@ -888,7 +893,11 @@ function runningActivity(activityId: string, activityName: string): MockCurrentC
     projectId: 'prj_yarra',
     unfiledCount: 0,
     loading: false,
+    error: null,
     refresh: () => Promise.resolve(),
+    // What the screen actually hands the write. It agrees with `activityId`
+    // here because the read has already landed.
+    settledActivityId: () => Promise.resolve(activityId),
   }
 }
 

@@ -41,8 +41,49 @@ export type CurrentContext = {
   unfiledCount: number
   /** True only until the first read comes back — see `refresh` below. */
   loading: boolean
+  /**
+   * Why the last read failed, or null when the last one succeeded.
+   *
+   * **A failed read is not a fresh install, and the difference is the whole
+   * reason this field exists.** Before it, any throw from the four queries
+   * left `carryOn` at its initial `null` and the launcher drew its first-run
+   * face: "No project yet, so there is nothing to carry on with" — a claim
+   * about her data, said out loud by a screen reader, on the screen she opens
+   * most (doctrine rules 16 and 20). Nothing on screen distinguished that
+   * from a lost selection, and the hardware checklist lists exactly that
+   * sentence on reopen as a *failure* to report.
+   *
+   * The `Error` rather than a sentence: the sentence a person reads belongs to
+   * the screen that shows it (`index.tsx`'s `messageFor`), which is where
+   * `records.tsx` and `projects.tsx` keep theirs too.
+   */
+  error: Error | null
   /** Re-reads everything. Called on every focus, and callable directly. */
   refresh: () => Promise<void>
+  /**
+   * The activity a capture *written now* belongs to — the same answer as
+   * `activityId`, except that it waits for the first read when that read has
+   * not landed yet, instead of answering `null` because it has not.
+   *
+   * **This exists for the few milliseconds between a screen mounting and its
+   * read coming back.** `capture.tsx` reads the context here rather than
+   * taking it as a navigation parameter, so on a cold launch straight onto
+   * `/capture` there is a window where `activityId` is `null` only because
+   * nobody has looked yet. A tap in that window used to write a record with
+   * `activityId: null` AND `contextActivityId: null` — filed to the Inbox
+   * with no trace of where she was, and §8.3 makes the context half
+   * unrevisable, so the Inbox could never suggest where it belonged.
+   *
+   * It is a function returning a promise rather than a value so that the
+   * answer is read from the read itself, not from a React render: resolving a
+   * promise does not guarantee the component has re-rendered with the new
+   * props by the time the awaiting code continues, and a value refreshed by
+   * rendering would still be stale in exactly the window this closes.
+   *
+   * It never rejects — a failed read resolves it with whatever was last known,
+   * which on a first run is `null`, the Inbox, a supported destination.
+   */
+  settledActivityId: () => Promise<string | null>
 }
 
 /**
@@ -56,7 +97,7 @@ export type CurrentContext = {
  */
 const UNKNOWN_CLIENT = 'Client unknown'
 
-type Resolved = Omit<CurrentContext, 'refresh'>
+type Resolved = Omit<CurrentContext, 'refresh' | 'settledActivityId'>
 
 const NOTHING_YET: Resolved = {
   carryOn: null,
@@ -64,6 +105,29 @@ const NOTHING_YET: Resolved = {
   projectId: null,
   unfiledCount: 0,
   loading: true,
+  error: null,
+}
+
+/** A promise settled by hand, for `settledActivityId` to wait on. */
+type Deferred = { promise: Promise<void>; settle: () => void }
+
+function deferred(): Deferred {
+  // The executor runs synchronously, so `settle` is the real one by the time
+  // this returns — no definite assignment assertion needed.
+  let settle: () => void = () => undefined
+  const promise = new Promise<void>((resolve) => {
+    settle = resolve
+  })
+  return { promise, settle }
+}
+
+/**
+ * A thrown value as an `Error`, because `CurrentContext.error` is typed as one
+ * and a repository can in principle reject with anything. The same shape
+ * `records.tsx` and `projects.tsx` use before formatting their sentence.
+ */
+function asError(cause: unknown): Error {
+  return cause instanceof Error ? cause : new Error(String(cause))
 }
 
 export function useCurrentContext(): CurrentContext {
@@ -95,6 +159,38 @@ export function useCurrentContext(): CurrentContext {
    */
   const generation = useRef(0)
 
+  /**
+   * The answer `settledActivityId` gives, kept where a read can write it and
+   * an `await` can read it without a render in between — see that field's own
+   * note for why a rendered value would not do.
+   */
+  const settledActivity = useRef<string | null>(null)
+
+  /**
+   * Settled when the first read has come back, successfully or not.
+   *
+   * Lazily created once and then kept: a `useRef(deferred())` would build a
+   * new promise on every render, and a countdown re-renders this hook's
+   * callers several times a second.
+   */
+  const firstRead = useRef<Deferred | null>(null)
+  if (firstRead.current === null) firstRead.current = deferred()
+  const firstReadDone = firstRead.current
+
+  /*
+    Settled on unmount as well, and that is not tidiness. `useCapture` awaits
+    this immediately before writing its row; a screen that goes away with the
+    first read still in flight would otherwise leave that await pending for
+    ever and the record would never be written at all — losing the capture,
+    which is worse than the null destination this whole seam exists to
+    prevent. Settling here resolves it with whatever was last known.
+  */
+  useEffect(() => {
+    return () => {
+      firstReadDone.settle()
+    }
+  }, [firstReadDone])
+
   const refresh = useCallback(async (): Promise<void> => {
     generation.current += 1
     const ticket = generation.current
@@ -121,6 +217,8 @@ export function useCurrentContext(): CurrentContext {
 
       if (!mounted.current || ticket !== generation.current) return
 
+      settledActivity.current = context === null ? null : context.activity.id
+
       setResolved({
         carryOn:
           context === null
@@ -141,20 +239,41 @@ export function useCurrentContext(): CurrentContext {
         projectId: context === null ? null : context.project.id,
         unfiledCount: unfiled.length,
         loading: false,
+        error: null,
       })
-    } catch {
+    } catch (cause) {
       if (!mounted.current || ticket !== generation.current) return
       /*
         A read that failed leaves whatever was last read successfully, and
         stops claiming to be loading. It does not blank the card: the count
         it is showing was true a moment ago, and replacing it with nothing
         because a later read failed tells her less, not more. On the first
-        read there is nothing to keep, so this is the first-run card — which
-        is also what a device with a genuinely empty database shows.
+        read there is nothing to keep, so there is no card — and the screen
+        shows the failure and a way to try again rather than the first-run
+        face, which would be a claim about her data (doctrine rules 16 and
+        20). `index.tsx` is where that branch is drawn.
       */
-      setResolved((current) => ({ ...current, loading: false }))
+      setResolved((current) => ({ ...current, loading: false, error: asError(cause) }))
+    } finally {
+      /*
+        Only the current read may settle this. A superseded one finishing
+        first would otherwise hand `settledActivityId` the answer of a read
+        whose result was thrown away — and the newer read, which is about to
+        land, settles it with the right one a moment later.
+      */
+      if (ticket === generation.current) firstReadDone.settle()
     }
-  }, [db])
+  }, [db, firstReadDone])
+
+  /**
+   * Stable across renders, so a caller may hold it (`capture.tsx` hands it
+   * straight to `useCapture`, which reads its deps on every render but must
+   * not see a new identity each time).
+   */
+  const settledActivityId = useCallback(async (): Promise<string | null> => {
+    await firstReadDone.promise
+    return settledActivity.current
+  }, [firstReadDone])
 
   /**
    * Re-read every time the launcher becomes the focused route, not once on
@@ -181,5 +300,5 @@ export function useCurrentContext(): CurrentContext {
     }, [refresh]),
   )
 
-  return { ...resolved, refresh }
+  return { ...resolved, refresh, settledActivityId }
 }
