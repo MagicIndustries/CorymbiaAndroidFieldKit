@@ -1567,6 +1567,70 @@ describe('the recorded state (spec §9.6, doctrine rule 17)', () => {
     )
   })
 
+  it('files into the activity the read finds, when the tap came before the read', async () => {
+    // THE WINDOW THIS SEAM EXISTS FOR. A cold launch straight onto this
+    // screen, or a return from `/camera`, taps before `useCurrentContext`'s
+    // first read has come back: `activityId` is null then — not because
+    // nothing is running, but because nobody has looked yet — and the row
+    // used to be written with `activityId: null, contextActivityId: null`.
+    // §8.3 never allows the context half to be revised, so that capture lost
+    // every trace of where she was standing, silently, with the Inbox unable
+    // to suggest where it belonged.
+    const arrival = deferred<string | null>()
+    mockCurrentContext = {
+      ...runningActivity('act_reach_3', 'Reach 3 transect'),
+      // What the first render actually knows, which is nothing.
+      carryOn: null,
+      activityId: null,
+      loading: true,
+      settledActivityId: () => arrival.promise,
+    }
+
+    await arriveWithAFix()
+    await fireEvent.press(captureButton())
+    await settle()
+
+    // Not written yet: the destination is one of the row's own fields, so the
+    // insert waits for it. Nothing else does — the acquiring view and the
+    // sample collection began at the tap (doctrine rule 4), which the
+    // countdown tests either side of this one pin.
+    expect(mockRepo.createRecord).not.toHaveBeenCalled()
+    expect(captureButton()).toHaveTextContent('ACCEPT NOW')
+
+    await act(async () => {
+      arrival.resolve('act_reach_3')
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenLastCalledWith(
+      mockDb,
+      expect.objectContaining({ activityId: 'act_reach_3', contextActivityId: 'act_reach_3' }),
+    )
+  })
+
+  it('still files to the Inbox when the read in that window finds nothing running', async () => {
+    // The other half, and the one that keeps rule 4 honest: waiting for the
+    // answer must not turn a genuine first run into anything other than a
+    // capture in the Inbox. A device with no project at all answers null, and
+    // the row is written exactly as it was before.
+    const arrival = deferred<string | null>()
+    mockCurrentContext = { ...NO_ACTIVITY, loading: true, settledActivityId: () => arrival.promise }
+
+    await arriveWithAFix()
+    await fireEvent.press(captureButton())
+    await settle()
+
+    await act(async () => {
+      arrival.resolve(null)
+    })
+    await settle()
+
+    expect(mockRepo.createRecord).toHaveBeenLastCalledWith(
+      mockDb,
+      expect.objectContaining({ activityId: null, contextActivityId: null }),
+    )
+  })
+
   it('names the activity it was filed into, rather than the Inbox', async () => {
     mockCurrentContext = runningActivity('act_reach_3', 'Reach 3 transect')
     await arriveWithAFix()

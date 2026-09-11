@@ -164,8 +164,27 @@ export type CaptureDeps = {
    * Null is not an error state — it is the Inbox, a capture taken with no
    * activity running, and spec §10.2 is explicit that filing there is a
    * supported destination rather than something that went wrong.
+   *
+   * **Or a function that answers it, for a caller whose own read may not have
+   * landed yet.** `capture.tsx` reads the context from the database when it
+   * mounts, so for the first few milliseconds of the screen's life its answer
+   * is `null` only because nobody has looked. A tap in that window wrote a
+   * row with `activityId: null` AND `contextActivityId: null` — into the
+   * Inbox, with no trace of the activity she was standing in, and §8.3 makes
+   * the context half unrevisable, so nothing downstream could ever repair it.
+   * Given a function, `captureNow` asks at the WRITE instead of at the tap:
+   * collection has already begun by then (see below), so doctrine rule 4 is
+   * untouched — nothing blocks the capture, one field of the row waits for the
+   * answer it is about to record. The wait is on the same database the write
+   * itself needs, so it adds no way to hang that the write did not already
+   * have.
+   *
+   * It must not reject: it is awaited inside the write's own `try`, so a
+   * rejection would be reported to her as a failed save.
+   * `useCurrentContext.settledActivityId` is the implementation, and it
+   * resolves rather than rejects on a failed read.
    */
-  activityId: string | null
+  activityId: string | null | (() => Promise<string | null>)
 }
 
 export type Capture = {
@@ -664,13 +683,21 @@ export function useCapture(deps: CaptureDeps): Capture {
       const fix: Fix = attempt.ok ? attempt.fix : { quality: 'none' }
       unstorable = attempt.ok ? null : attempt.message
 
+      // WHERE THIS ROW IS FILED, asked here and not at the tap — after the
+      // fix is built and collection is running, immediately before the insert
+      // that records it. A caller that already knows passes the value and
+      // this is not a wait at all; one whose first read is still in flight
+      // passes a function and the row waits for it rather than recording a
+      // destination that is only an artefact of the screen's age.
+      const filedInto = typeof activityId === 'function' ? await activityId() : activityId
+
       created = await createRecord(db, {
         // Filed into the activity running now, and stamped as context with
         // that same value — see `CaptureDeps.activityId` for why these are
         // two fields despite agreeing here. Null files to the Inbox, a
         // supported destination rather than an error state (spec §10.2).
-        activityId,
-        contextActivityId: activityId,
+        activityId: filedInto,
+        contextActivityId: filedInto,
         kind: 'pin',
         fix,
         deviceId: device.id,

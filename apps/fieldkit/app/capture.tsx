@@ -342,10 +342,20 @@ function CaptureBody() {
    *
    * `null` is not an error state: it is the Inbox, which §10.2 is explicit is
    * a supported destination rather than something that went wrong.
+   *
+   * **`settledActivityId`, not `activityId`, is what the write is given.**
+   * The value is what this render knows, and on a cold launch straight onto
+   * this screen the first render knows nothing yet — a tap in that window
+   * wrote a row filed to the Inbox with `contextActivityId: null`, which
+   * §8.3 never allows to be revised, so the capture lost every trace of where
+   * she was taking it. The function waits for that first read at the write
+   * and answers with what it found. Nothing about the tap waits: the
+   * countdown, the acquiring view and the sample collection all begin from
+   * the tap as before (doctrine rule 4).
    */
-  const { activityId, carryOn } = useCurrentContext()
+  const { carryOn, settledActivityId } = useCurrentContext()
 
-  const capture = useCapture({ db, device, source, activityId })
+  const capture = useCapture({ db, device, source, activityId: settledActivityId })
   const acquiring = capture.phase === 'acquiring'
 
   /**
@@ -1253,13 +1263,14 @@ function RecordedState({
  * carries an activity id, never an activity name, so a filed record is always
  * captioned with `activityName` — the live context's name — not with
  * whatever the record's own activity was called at capture time. The two
- * agree today only because `activityName` is derived from the same
- * `carryOn` that decided `record.activityId` in the first place (see the
- * call site below), which is also why the middle branch — a filed record
- * with no name to hand — cannot be reached yet: `activityName` is null
- * exactly when `record.activityId` is, in every path that reaches this
- * function today. A caller that ever passed an `activityName` read at a
- * different moment than the record's own `activityId` — the case this
+ * agree today only because `activityName` and the id the record was filed
+ * under come from the same read of the same context — `useCurrentContext`
+ * publishes the card and the settled activity id together, in one state
+ * update — which is also why the middle branch, a filed record with no name
+ * to hand, cannot be reached yet: `activityName` is null exactly when the
+ * filed id is, in every path that reaches this function today. A caller that
+ * ever passed an `activityName` read at a different moment than the record's
+ * own `activityId` — the case this
  * branch exists for — would have this line caption a record with whichever
  * activity the context currently names, which is not necessarily the one it
  * was actually filed into.
