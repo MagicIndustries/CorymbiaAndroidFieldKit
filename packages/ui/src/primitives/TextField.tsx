@@ -24,6 +24,7 @@ export function TextField({
   onChangeText,
   placeholder,
   multiline = false,
+  keyboardType = 'default',
   testID,
   accessibilityLabel,
 }: {
@@ -33,6 +34,18 @@ export function TextField({
   placeholder?: string
   /** A field for more than a line: taller, and text starts at the top of it. */
   multiline?: boolean
+  /**
+   * Which keyboard Android raises. `'number-pad'` for a field that can only
+   * ever hold digits — the Inbox's filing position — because a full QWERTY
+   * keyboard for a one-digit answer is four times the keys and every one of
+   * them wrong.
+   *
+   * Deliberately narrower than `TextInput`'s own `KeyboardTypeOptions`: this
+   * component is doctrine rule 5's one visual signature for text entry, and
+   * a prop that forwarded all eleven platform keyboards would be a hole in
+   * that. A twelfth case that genuinely needs one adds it here, named.
+   */
+  keyboardType?: 'default' | 'number-pad'
   testID?: string
   accessibilityLabel?: string
 }) {
@@ -66,6 +79,7 @@ export function TextField({
         placeholder={placeholder}
         placeholderTextColor={theme.colors.textDim}
         multiline={multiline}
+        keyboardType={keyboardType}
         style={style}
       />
     </View>

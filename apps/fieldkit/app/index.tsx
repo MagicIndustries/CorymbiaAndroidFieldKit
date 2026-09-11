@@ -252,8 +252,8 @@ function LauncherBody() {
             accessibilityRole="button"
             accessibilityLabel={`Open the Inbox, ${formatUnfiled(unfiledCount)}`}
             onPress={() => {
-              // `/inbox` does not exist at this commit. Task 9 of this plan
-              // builds it.
+              // `app/inbox.tsx` — the list of what is unfiled, with one-tap
+              // filing into the activity each capture was taken in.
               router.push('/inbox')
             }}
             style={({ pressed }) => ({ minHeight: touch.comfortable, opacity: pressed ? 0.7 : 1 })}

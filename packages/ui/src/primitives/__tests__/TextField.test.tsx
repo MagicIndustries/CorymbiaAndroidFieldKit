@@ -46,6 +46,24 @@ describe('TextField', () => {
     )
   })
 
+  it('raises the ordinary keyboard unless asked for another', async () => {
+    await wrap(<TextField label="NAME" value="" onChangeText={() => {}} testID="f" />)
+    expect(screen.getByTestId('f').props.keyboardType).toBe('default')
+  })
+
+  it('raises a number pad for a field that can only hold digits', async () => {
+    await wrap(
+      <TextField
+        label="POSITION"
+        value=""
+        onChangeText={() => {}}
+        keyboardType="number-pad"
+        testID="f"
+      />,
+    )
+    expect(screen.getByTestId('f').props.keyboardType).toBe('number-pad')
+  })
+
   it('carries the spoken name it is given, distinct from the label', async () => {
     await wrap(
       <TextField
