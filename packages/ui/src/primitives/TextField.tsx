@@ -25,6 +25,7 @@ export function TextField({
   placeholder,
   multiline = false,
   keyboardType = 'default',
+  disabled = false,
   testID,
   accessibilityLabel,
 }: {
@@ -46,6 +47,18 @@ export function TextField({
    * that. A twelfth case that genuinely needs one adds it here, named.
    */
   keyboardType?: 'default' | 'number-pad'
+  /**
+   * A field that is not ready to be typed into yet — doctrine rule 18: a box
+   * that looks typeable and discards what she types is worse than one that
+   * plainly is not. The Inbox's position field is the case: it cannot say
+   * what the allowed positions are until the destination activity has been
+   * read, so until then it refuses the keyboard rather than accepting a
+   * number it has no way to check.
+   *
+   * Two channels under rule 9 — `accessibilityState` and the dimming — plus
+   * whatever the caller's own label says about why.
+   */
+  disabled?: boolean
   testID?: string
   accessibilityLabel?: string
 }) {
@@ -59,6 +72,7 @@ export function TextField({
     backgroundColor: theme.colors.surface,
     color: theme.colors.textPrimary,
     paddingHorizontal: spacing.md,
+    opacity: disabled ? 0.35 : 1,
   }
   if (multiline) {
     // Without this a multiline box centres its first line vertically on
@@ -74,6 +88,8 @@ export function TextField({
       <TextInput
         testID={testID}
         accessibilityLabel={accessibilityLabel}
+        accessibilityState={{ disabled }}
+        editable={!disabled}
         value={value}
         onChangeText={onChangeText}
         placeholder={placeholder}

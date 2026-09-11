@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, ScrollView, View } from 'react-native'
-import { useFocusEffect } from 'expo-router'
+import { useFocusEffect, useRouter } from 'expo-router'
 import { radii, spacing, touch } from '@corymbia/tokens'
 import {
   Button,
@@ -16,6 +16,7 @@ import {
   fileRecord,
   listActivities,
   listProjects,
+  listRecords,
   listUnfiledRecords,
   readCurrentContext,
   type Activity,
@@ -125,16 +126,39 @@ function fileMessageFor(captureNumber: number, cause: unknown): string {
 }
 
 /**
+ * The one filing failure that is not a failure: the record reached an
+ * activity, just not from this tap.
+ *
+ * She is looking at a list that was read some seconds ago, and a filing from
+ * the records screen — or a second tap that beat this one — can land in
+ * between. `fileRecord` refuses a record that is already filed, and that
+ * refusal arrives here as a thrown error like every other; said as one it
+ * would tell her the capture is still waiting when it is not, which is the
+ * exact reading doctrine rule 20 exists to prevent.
+ *
+ * Which case it is is decided by re-reading `listUnfiledRecords` and looking
+ * for the record, never by matching the text of the error: the repository's
+ * wording is free to change, and a sentence that changed meaning because a
+ * message was reworded is a bug nobody would find.
+ */
+function alreadyFiledMessageFor(captureNumber: number): string {
+  return `Capture ${String(captureNumber)} was already filed, so it is no longer waiting here.`
+}
+
+/**
  * What she may type into the position field, read.
  *
  * Blank is not a refusal and not a zero — it is the default and the common
  * case, "put it at the end", which is exactly what `fileRecord` does with an
  * omitted position. Everything else has to be a whole number of at least one,
- * because that is what an activity ordinal is.
+ * because that is what an activity ordinal is — and no higher than one past
+ * the end of the destination, because there is no place after that to put it.
  *
- * Refused here rather than left to `fileRecord`, which would refuse it too:
- * its refusal arrives as a thrown error dressed as a failure, and this is not
- * a failure. It is a field she has mistyped, and it is said as one, before
+ * Both refusals happen here rather than in `fileRecord`, which would refuse
+ * them too: its refusal arrives as a thrown error dressed as a failure of the
+ * write, and it names the activity by its id (`...in activity act_survey`),
+ * which would put a raw id on the screen the moment it was shown (doctrine
+ * rule 6). Neither is true of a mistyped field. It is said as one, before
  * anything is written — the same reasoning as `new-activity.tsx`'s empty-name
  * refusal.
  */
@@ -146,16 +170,58 @@ const POSITION_MUST_BE_A_PLACE =
   'A position is a whole number, 1 or more — the place in the activity this capture should ' +
   'take. Leave it blank to put it at the end.'
 
-function readPosition(text: string): PositionChoice {
+/** Names the range rather than only refusing what is outside it. */
+function positionMustBeInRange(highest: number): string {
+  return (
+    `A position is a whole number from 1 to ${String(highest)} — the place in this activity ` +
+    'the capture should take. Leave it blank to put it at the end.'
+  )
+}
+
+/**
+ * `highest` is one past the activity's last record, which is what appending
+ * would produce, or `null` when the destination could not be read and the only
+ * check left is the shape of what she typed.
+ */
+function readPosition(text: string, highest: number | null): PositionChoice {
   const trimmed = text.trim()
   if (trimmed.length === 0) return { state: 'chosen', position: undefined }
   // Digits only: `Number('3.5')`, `Number(' 3 ')` and `Number('3e2')` are all
   // numbers, and none of them is a place in a list.
   if (!/^\d+$/.test(trimmed)) return { state: 'refused', message: POSITION_MUST_BE_A_PLACE }
   const position = Number(trimmed)
-  if (position < 1) return { state: 'refused', message: POSITION_MUST_BE_A_PLACE }
+  if (highest === null) {
+    if (position < 1) return { state: 'refused', message: POSITION_MUST_BE_A_PLACE }
+    return { state: 'chosen', position }
+  }
+  if (position < 1 || position > highest) {
+    return { state: 'refused', message: positionMustBeInRange(highest) }
+  }
   return { state: 'chosen', position }
 }
+
+/**
+ * How far the chosen destination's numbering reaches, which is the only thing
+ * this screen reads the destination's own records for.
+ *
+ * Read when she picks an activity rather than with the list: there are as many
+ * answers as there are activities, all but one of them would go unused, and
+ * the one she wants is cheap.
+ *
+ * `highest` is `listRecords(...).length + 1` — one past the end, because
+ * appending is a legal position. It can read one or two short of what
+ * `fileRecord` would accept for an activity some of whose records have been
+ * deleted: a tombstone keeps its ordinal (`nextSequence`'s comment says why),
+ * so the repository's own ceiling counts numbers this screen cannot see. The
+ * error is in the safe direction — she is offered every place that is visible
+ * in the activity, and a place in a gap left by a deleted record is refused
+ * with the range named rather than filed into silently.
+ */
+type Destination =
+  | { state: 'reading' }
+  | { state: 'read'; highest: number }
+  /** The destination's records could not be read; the shape check is all that is left. */
+  | { state: 'unreadable' }
 
 /**
  * Puts the activity she is standing in at the top of the chooser, and its
@@ -214,6 +280,7 @@ function describeInbox(
 function InboxBody() {
   const db = useDatabase()
   const device = useDevice()
+  const router = useRouter()
   const { theme } = useTheme()
 
   const [listing, setListing] = useState<Listing | null>(null)
@@ -223,6 +290,7 @@ function InboxBody() {
   /** Which row's chooser is open, at most one. Two open choosers are two half-answered questions. */
   const [openRecordId, setOpenRecordId] = useState<string | null>(null)
   const [chosenActivityId, setChosenActivityId] = useState<string | null>(null)
+  const [destination, setDestination] = useState<Destination>({ state: 'reading' })
   const [position, setPosition] = useState('')
   const [positionError, setPositionError] = useState<string | null>(null)
   const [filingRecordId, setFilingRecordId] = useState<string | null>(null)
@@ -248,7 +316,20 @@ function InboxBody() {
   // older read finishing last must not put a filed record back on screen.
   const generation = useRef(0)
 
-  const refresh = useCallback(async (): Promise<void> => {
+  /**
+   * The same ticket, for the destination read. She can try one activity and
+   * then another faster than either query comes back, and the range shown
+   * beside the field has to be the one she last chose.
+   */
+  const destinationRead = useRef(0)
+
+  /**
+   * Reads the list, and hands back what it read so a caller can ask a
+   * question of it — the filing failure path asks whether the record it could
+   * not file is still waiting. `null` means this read told the screen nothing:
+   * it failed, or a newer read had already superseded it.
+   */
+  const refresh = useCallback(async (): Promise<FieldRecord[] | null> => {
     generation.current += 1
     const ticket = generation.current
     try {
@@ -272,7 +353,7 @@ function InboxBody() {
           }
         }),
       )
-      if (!mounted.current || ticket !== generation.current) return
+      if (!mounted.current || ticket !== generation.current) return null
 
       // A project with no activity is not a destination — nothing can be
       // filed into a project — so it is left out rather than rendered as a
@@ -295,12 +376,14 @@ function InboxBody() {
         currentActivityId,
       })
       setLoadError(null)
+      return records
     } catch (cause) {
-      if (!mounted.current || ticket !== generation.current) return
+      if (!mounted.current || ticket !== generation.current) return null
       // Deliberately leaves `listing` alone. What is on the screen was true a
       // moment ago, and replacing it with nothing because a later read failed
       // tells her less, not more (doctrine rule 20).
       setLoadError(readMessageFor(cause))
+      return null
     }
   }, [db])
 
@@ -357,9 +440,32 @@ function InboxBody() {
         await refresh()
       } catch (cause) {
         if (!mounted.current) return
-        // The row stays. Doctrine rule 20: the sentence renders here, on the
-        // screen it belongs to, and stays until a filing actually succeeds.
-        setFileError(fileMessageFor(record.captureNumber, cause))
+        /*
+          Re-read before saying anything. A failure here has two quite
+          different meanings and the screen cannot tell them apart from the
+          error alone: either the write did not happen and the capture is
+          still waiting, or the list this tap came from was stale and the
+          record had already been filed from somewhere else. Asking the
+          database which it is costs one query and is the difference between
+          a true sentence and a false one — and it is asked of
+          `listUnfiledRecords` rather than of the error's wording, which is
+          free to change without anyone noticing this depended on it.
+
+          A re-read that itself fails answers `null`, and the capture is
+          reported as still here: that is the conservative half, and it is the
+          half the rest of the screen is already showing.
+        */
+        const fresh = await refresh()
+        if (!mounted.current) return
+        const gone = fresh !== null && !fresh.some((waiting) => waiting.id === record.id)
+        // The row stays, unless the re-read above has just taken it away.
+        // Doctrine rule 20: the sentence renders here, on the screen it
+        // belongs to, and stays until a filing actually succeeds.
+        setFileError(
+          gone
+            ? alreadyFiledMessageFor(record.captureNumber)
+            : fileMessageFor(record.captureNumber, cause),
+        )
       } finally {
         // Reopened in both outcomes, unlike `new-activity.tsx`'s save: nothing
         // here navigates away, so there is no frame after this in which a
@@ -381,9 +487,47 @@ function InboxBody() {
   const toggleChooser = useCallback((recordId: string): void => {
     setOpenRecordId((current) => (current === recordId ? null : recordId))
     setChosenActivityId(null)
+    setDestination({ state: 'reading' })
     setPosition('')
     setPositionError(null)
   }, [])
+
+  /**
+   * Choosing a destination asks it how long it is, so the position field can
+   * say which places are actually in it before she types one rather than
+   * after.
+   *
+   * The typed position is deliberately not cleared here. It is a place in a
+   * list and it still means that; what changes is which list, and the range
+   * it is checked against is re-read along with the destination.
+   */
+  const chooseActivity = useCallback(
+    async (activityId: string): Promise<void> => {
+      setChosenActivityId(activityId)
+      setPositionError(null)
+      setDestination({ state: 'reading' })
+      destinationRead.current += 1
+      const ticket = destinationRead.current
+      try {
+        const held = await listRecords(db, activityId)
+        if (!mounted.current || ticket !== destinationRead.current) return
+        // One past the end: appending is a legal position, and it is the one
+        // she gets by leaving the field alone.
+        setDestination({ state: 'read', highest: held.length + 1 })
+      } catch {
+        if (!mounted.current || ticket !== destinationRead.current) return
+        /*
+          Not said as a failure, and not routed to `fileError`. Nothing of
+          hers has been touched — she has picked a destination and the screen
+          could not find out how long it is. The field goes back to asking for
+          a whole number without naming a range, and `fileRecord` remains the
+          backstop it always was.
+        */
+        setDestination({ state: 'unreadable' })
+      }
+    },
+    [db],
+  )
 
   /**
    * Typing answers the refusal that asked for a number. Only that one: a
@@ -397,14 +541,18 @@ function InboxBody() {
 
   const handleConfirm = useCallback(
     (record: FieldRecord, activity: Activity): void => {
-      const choice = readPosition(position)
+      // `reading` never reaches here — the button is disabled until the
+      // destination answers — but the range has to come from somewhere, and
+      // the only honest answer while it is unknown is "unchecked".
+      const highest = destination.state === 'read' ? destination.highest : null
+      const choice = readPosition(position, highest)
       if (choice.state === 'refused') {
         setPositionError(choice.message)
         return
       }
       void file(record, activity.id, choice.position)
     },
-    [file, position],
+    [destination, file, position],
   )
 
   const chosenActivity =
@@ -483,7 +631,17 @@ function InboxBody() {
               record.contextActivityId === null
                 ? undefined
                 : listing.activitiesById.get(record.contextActivityId)
-            const busy = filingRecordId === record.id
+            /*
+              Doctrine rule 18, in both halves. `filing` is the one row whose
+              write is out — it says so in a word, so the busy row is not
+              told apart by dimness alone (rule 9). `anyFiling` disables every
+              filing control on every row, because `file` claims a lock and
+              returns early: without this, tapping another row's button
+              during a slow write looks pressable, swallows the tap and
+              teaches her it did not register when it did.
+            */
+            const filing = filingRecordId === record.id
+            const anyFiling = filingRecordId !== null
             const chooserOpen = openRecordId === record.id
 
             return (
@@ -532,8 +690,8 @@ function InboxBody() {
                     <Button
                       testID={`inbox-file-${record.id}`}
                       // Doctrine rule 6: the activity's name, never its id.
-                      label={`File into ${suggested.name}`}
-                      disabled={busy}
+                      label={filing ? 'Filing…' : `File into ${suggested.name}`}
+                      disabled={anyFiling}
                       onPress={() => {
                         // Appending — no position asked for and none invented.
                         // Spec: she asked for insertion because a misfiled
@@ -548,7 +706,7 @@ function InboxBody() {
                     testID={`inbox-choose-${record.id}`}
                     label={suggested === undefined ? 'Choose an activity' : 'File somewhere else'}
                     kind="secondary"
-                    disabled={busy}
+                    disabled={anyFiling}
                     onPress={() => {
                       toggleChooser(record.id)
                     }}
@@ -556,6 +714,32 @@ function InboxBody() {
 
                   {chooserOpen ? (
                     <View testID={`inbox-chooser-${record.id}`} style={{ gap: spacing.md }}>
+                      {/*
+                        No activity anywhere is a supported state, not a
+                        broken one: doctrine rule 4 lets her capture before
+                        she has set anything up, and this screen is where
+                        those captures land. An empty chooser would be
+                        doctrine rule 18's inert control — a button that
+                        opens nothing — so it says what is missing and offers
+                        the one thing that fixes it.
+                      */}
+                      {listing.groups.length === 0 ? (
+                        <View style={{ gap: spacing.sm }}>
+                          <Type testID="inbox-no-activities">
+                            There is no activity to file this into yet. Start one from a project.
+                          </Type>
+                          <Button
+                            testID="inbox-start-activity"
+                            label="Go to projects"
+                            kind="secondary"
+                            disabled={anyFiling}
+                            onPress={() => {
+                              router.push('/projects')
+                            }}
+                          />
+                        </View>
+                      ) : null}
+
                       {listing.groups.map((group) => (
                         <View key={group.projectId} style={{ gap: spacing.xs }}>
                           {/*
@@ -582,8 +766,7 @@ function InboxBody() {
                                   `${chosen ? ', chosen' : ''}`
                                 }
                                 onPress={() => {
-                                  setChosenActivityId(activity.id)
-                                  setPositionError(null)
+                                  void chooseActivity(activity.id)
                                 }}
                                 style={({ pressed }) => ({
                                   minHeight: touch.min,
@@ -661,14 +844,39 @@ function InboxBody() {
                       */}
                       {chosenActivity !== undefined ? (
                         <View style={{ gap: spacing.sm }}>
+                          {/*
+                            The label carries the range, above the input,
+                            because it is the thing she needs before she types
+                            rather than after: "1 to 5" is the whole answer to
+                            "where can this go", and the alternative — letting
+                            her type 9 and refusing it — is a correction where
+                            an instruction would have done.
+
+                            Shown, not hidden, while the destination is still
+                            being read, and disabled with it (doctrine rule
+                            18): a field that appeared under her thumb the
+                            instant a query came back would move the confirm
+                            button as she reached for it (rule 10's reason).
+                          */}
                           <TextField
-                            label="POSITION IN THE ACTIVITY (OPTIONAL)"
+                            label={
+                              destination.state === 'read'
+                                ? `POSITION, 1 TO ${String(destination.highest)} (OPTIONAL)`
+                                : 'POSITION IN THE ACTIVITY (OPTIONAL)'
+                            }
                             testID="inbox-position"
-                            accessibilityLabel="Position in the activity. Optional; leave it blank to put this capture at the end."
+                            accessibilityLabel={
+                              destination.state === 'read'
+                                ? `Position in the activity, 1 to ${String(destination.highest)}. Optional; leave it blank to put this capture at the end.`
+                                : destination.state === 'reading'
+                                  ? 'Position in the activity. Finding how many captures this activity already holds.'
+                                  : 'Position in the activity. Optional; leave it blank to put this capture at the end.'
+                            }
                             value={position}
                             onChangeText={handlePositionChange}
                             keyboardType="number-pad"
                             placeholder="At the end"
+                            disabled={destination.state === 'reading'}
                           />
                           {positionError !== null ? (
                             <Type
@@ -680,9 +888,15 @@ function InboxBody() {
                           ) : null}
                           <Button
                             testID="inbox-confirm"
-                            label={`File into ${chosenActivity.name}`}
+                            label={
+                              filing
+                                ? 'Filing…'
+                                : destination.state === 'reading'
+                                  ? 'Reading the activity…'
+                                  : `File into ${chosenActivity.name}`
+                            }
                             size="field"
-                            disabled={busy}
+                            disabled={anyFiling || destination.state === 'reading'}
                             onPress={() => {
                               handleConfirm(record, chosenActivity)
                             }}

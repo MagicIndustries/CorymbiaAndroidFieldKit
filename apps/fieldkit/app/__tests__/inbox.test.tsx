@@ -12,9 +12,9 @@ import type { Activity, CurrentContext, FieldRecord, Project, StoredFix } from '
  * this screen may read as a queue of mistakes, which is why the very first
  * test below is about wording rather than behaviour.
  *
- * WHAT IS AND IS NOT MOCKED. The five repository functions this screen calls
+ * WHAT IS AND IS NOT MOCKED. The six repository functions this screen calls
  * are (`listUnfiledRecords`, `fileRecord`, `listProjects`, `listActivities`,
- * `readCurrentContext`) and nothing else is. Every one of them is already
+ * `listRecords`, `readCurrentContext`) and nothing else is. Every one of them is already
  * proved in `packages/data` — `fileRecord`'s renumbering especially, which
  * this screen must call and must not reimplement. What is left for this file
  * is what the screen does with their answers: which destination it offers,
@@ -108,6 +108,15 @@ const mockRepo = {
     ReturnType<typeof import('@corymbia/data').listActivities>,
     Parameters<typeof import('@corymbia/data').listActivities>
   >(),
+  /**
+   * Read when she picks a destination in the chooser, for one fact: how many
+   * records that activity already holds, which is what makes "1 to 5" sayable
+   * beside the position field.
+   */
+  listRecords: jest.fn<
+    ReturnType<typeof import('@corymbia/data').listRecords>,
+    Parameters<typeof import('@corymbia/data').listRecords>
+  >(),
   readCurrentContext: jest.fn<
     ReturnType<typeof import('@corymbia/data').readCurrentContext>,
     Parameters<typeof import('@corymbia/data').readCurrentContext>
@@ -123,6 +132,8 @@ jest.mock('@corymbia/data', () => ({
     mockRepo.listProjects(...args),
   listActivities: (...args: Parameters<typeof import('@corymbia/data').listActivities>) =>
     mockRepo.listActivities(...args),
+  listRecords: (...args: Parameters<typeof import('@corymbia/data').listRecords>) =>
+    mockRepo.listRecords(...args),
   readCurrentContext: (...args: Parameters<typeof import('@corymbia/data').readCurrentContext>) =>
     mockRepo.readCurrentContext(...args),
 }))
@@ -133,6 +144,7 @@ const listUnfiledRecords = mockRepo.listUnfiledRecords
 const fileRecord = mockRepo.fileRecord
 const listProjects = mockRepo.listProjects
 const listActivities = mockRepo.listActivities
+const listRecords = mockRepo.listRecords
 const readCurrentContext = mockRepo.readCurrentContext
 
 // Imported after the mocks so it picks them up.
@@ -245,6 +257,24 @@ function filed(id: string, activityId: string): FieldRecord {
 }
 
 /**
+ * `count` records already sitting in an activity. The screen reads exactly
+ * one thing from `listRecords` — how many came back — so the ordinals here
+ * are honest rather than load-bearing.
+ *
+ * Four by default across this file, which makes the offered range 1 to 5: one
+ * past the end, because appending is a legal position.
+ */
+function holding(count: number, activityId: string): FieldRecord[] {
+  return Array.from({ length: count }, (_unused, at) =>
+    unfiled(`rec_held_${String(at + 1)}`, {
+      activityId,
+      sequence: at + 1,
+      filedAt: '2026-09-05T01:00:00.000Z',
+    }),
+  )
+}
+
+/**
  * A promise a test resolves by hand, for the cases that are about a read or a
  * write still being in flight. `resolve` is given a no-op first so it has a
  * type before the executor — which runs synchronously — replaces it.
@@ -288,6 +318,7 @@ beforeEach(() => {
   fileRecord.mockReset()
   listProjects.mockReset()
   listActivities.mockReset()
+  listRecords.mockReset()
   readCurrentContext.mockReset()
 
   listUnfiledRecords.mockResolvedValue([])
@@ -304,6 +335,7 @@ beforeEach(() => {
           : [],
     ),
   )
+  listRecords.mockImplementation((_db, activityId) => Promise.resolve(holding(4, activityId)))
   readCurrentContext.mockResolvedValue(CONTEXT)
 })
 
@@ -561,6 +593,38 @@ describe('the Inbox', () => {
       expect(screen.queryByTestId('inbox-chooser-rec_a')).toBeNull()
     })
 
+    it('says what is missing when there is no activity anywhere, rather than opening empty', async () => {
+      /*
+        A supported state, not a broken one: doctrine rule 4 lets her capture
+        before she has set anything up, and this screen is where those
+        captures land. An empty chooser is doctrine rule 18's inert control —
+        a button that opens nothing — so it says what is missing and offers
+        the one thing that fixes it.
+      */
+      listProjects.mockResolvedValue([])
+      listActivities.mockResolvedValue([])
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a', { contextActivityId: null })])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-choose-rec_a'))
+
+      expect(screen.getByTestId('inbox-no-activities')).toHaveTextContent(
+        'There is no activity to file this into yet. Start one from a project.',
+      )
+      expect(screen.getByTestId('inbox-start-activity')).toBeTruthy()
+      expect(screen.queryByTestId('inbox-confirm')).toBeNull()
+      expect(screen.queryByTestId('inbox-position')).toBeNull()
+    })
+
+    it('sends her to the projects list to start one', async () => {
+      listProjects.mockResolvedValue([])
+      listActivities.mockResolvedValue([])
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a', { contextActivityId: null })])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-choose-rec_a'))
+      await fireEvent.press(screen.getByTestId('inbox-start-activity'))
+      expect(mockRouter.push).toHaveBeenCalledWith('/projects')
+    })
+
     it('asks nothing further until she has chosen a destination', async () => {
       // Doctrine rule 18: a confirm button with nowhere to file to is a
       // control that can only swallow the tap.
@@ -655,6 +719,116 @@ describe('the Inbox', () => {
       expect(screen.getByTestId('inbox-position-error')).toBeTruthy()
     })
 
+    it('says which places are actually in the activity, before she types one', async () => {
+      // Four records in it, so the places are 1 to 5 — one past the end,
+      // because appending is a legal position and it is the one she gets by
+      // leaving the field alone.
+      listRecords.mockResolvedValue(holding(4, ACT_SURVEY.id))
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a')])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-choose-rec_a'))
+      await fireEvent.press(screen.getByTestId('inbox-activity-act_survey'))
+      expect(listRecords).toHaveBeenCalledWith(mockDb, 'act_survey')
+      expect(screen.getByTestId('inbox-row-rec_a')).toHaveTextContent('1 TO 5', { exact: false })
+    })
+
+    it('refuses a position past the end of the activity without writing or naming an id', async () => {
+      /*
+        `fileRecord` would refuse this too — and its refusal reads "A position
+        is a whole number from 1 to 5 in activity act_survey; got 9", which
+        the failure sentence would put on screen verbatim: a raw activity id
+        (doctrine rule 6), and a typo dressed as a failed write that then
+        parks itself above the list under rule 20. It is a mistyped field, and
+        it is said as one, before anything is written.
+      */
+      listRecords.mockResolvedValue(holding(4, ACT_SURVEY.id))
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a')])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-choose-rec_a'))
+      await fireEvent.press(screen.getByTestId('inbox-activity-act_survey'))
+      await fireEvent.changeText(screen.getByTestId('inbox-position'), '9')
+      await fireEvent.press(screen.getByTestId('inbox-confirm'))
+
+      expect(fileRecord).not.toHaveBeenCalled()
+      expect(screen.getByTestId('inbox-position-error')).toHaveTextContent('1 to 5', {
+        exact: false,
+      })
+      expect(screen.queryByTestId('inbox-error')).toBeNull()
+      expect(screen.getByTestId('inbox')).not.toHaveTextContent('act_', { exact: false })
+    })
+
+    it('still takes the last place in the activity, which is one past its end', async () => {
+      // The boundary the range is about: 5 is appending, and appending is
+      // never a mistake.
+      listRecords.mockResolvedValue(holding(4, ACT_SURVEY.id))
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a')])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-choose-rec_a'))
+      await fireEvent.press(screen.getByTestId('inbox-activity-act_survey'))
+      await fireEvent.changeText(screen.getByTestId('inbox-position'), '5')
+      await fireEvent.press(screen.getByTestId('inbox-confirm'))
+      expect(fileRecord.mock.calls[0]?.[1].position).toBe(5)
+    })
+
+    it('reads the range of the destination she actually picked', async () => {
+      // Two activities of different lengths, and the range beside the field
+      // has to belong to the one that is chosen.
+      listRecords.mockImplementation((_db, activityId) =>
+        Promise.resolve(holding(activityId === ACT_SAMPLING.id ? 1 : 4, activityId)),
+      )
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a')])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-choose-rec_a'))
+      await fireEvent.press(screen.getByTestId('inbox-activity-act_sampling'))
+      expect(screen.getByTestId('inbox-row-rec_a')).toHaveTextContent('1 TO 2', { exact: false })
+      await fireEvent.changeText(screen.getByTestId('inbox-position'), '3')
+      await fireEvent.press(screen.getByTestId('inbox-confirm'))
+      expect(fileRecord).not.toHaveBeenCalled()
+      expect(screen.getByTestId('inbox-position-error')).toHaveTextContent('1 to 2', {
+        exact: false,
+      })
+    })
+
+    it('shows the field and the confirm disabled while the range is still being read', async () => {
+      // Doctrine rule 18, and rule 10's reason for the "not hidden" half: a
+      // field that appeared the instant a query came back would move the
+      // confirm button as she reached for it.
+      const pending = deferred<FieldRecord[]>()
+      listRecords.mockReturnValue(pending.promise)
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a')])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-choose-rec_a'))
+      await fireEvent.press(screen.getByTestId('inbox-activity-act_survey'))
+
+      expect(screen.getByTestId('inbox-position').props.editable).toBe(false)
+      expect(screen.getByTestId('inbox-confirm').props.accessibilityState).toEqual(
+        expect.objectContaining({ disabled: true }),
+      )
+
+      await act(async () => {
+        pending.resolve(holding(4, ACT_SURVEY.id))
+      })
+      expect(screen.getByTestId('inbox-position').props.editable).toBe(true)
+      expect(screen.getByTestId('inbox-confirm').props.accessibilityState).toEqual(
+        expect.objectContaining({ disabled: false }),
+      )
+    })
+
+    it('still lets her file when the destination could not be read', async () => {
+      // Nothing of hers has been touched — the screen simply could not find
+      // out how long the activity is — so it asks for a whole number without
+      // naming a range and lets `fileRecord` be the backstop it always was.
+      listRecords.mockRejectedValue(new Error('database is locked'))
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a')])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-choose-rec_a'))
+      await fireEvent.press(screen.getByTestId('inbox-activity-act_survey'))
+      await fireEvent.changeText(screen.getByTestId('inbox-position'), '9')
+      await fireEvent.press(screen.getByTestId('inbox-confirm'))
+      expect(fileRecord.mock.calls[0]?.[1].position).toBe(9)
+      expect(screen.queryByTestId('inbox-position-error')).toBeNull()
+    })
+
     it('takes the refusal back the moment she corrects the field', async () => {
       listUnfiledRecords.mockResolvedValue([unfiled('rec_a')])
       await renderInbox()
@@ -727,15 +901,44 @@ describe('the Inbox', () => {
       })
     })
 
-    it('leaves the other rows pressable while one is being filed', async () => {
+    it('disables every other row too, because only one filing can be in flight', async () => {
+      /*
+        REVERSED FROM WHAT THIS FILE FIRST ASSERTED, which was that the other
+        rows stayed pressable. They did — and pressing one did nothing:
+        `file` takes a single lock and returns early, so every other row's
+        button looked live, swallowed the tap and wrote nothing. That is
+        exactly doctrine rule 18's inert control, and the rule is cited in
+        `inbox.tsx` itself. One filing at a time is the design; the screen now
+        says so on every row rather than on one.
+      */
       const pending = deferred<FieldRecord>()
       fileRecord.mockReturnValue(pending.promise)
       listUnfiledRecords.mockResolvedValue([unfiled('rec_a'), unfiled('rec_b')])
       await renderInbox()
       await fireEvent.press(screen.getByTestId('inbox-file-rec_a'))
       expect(screen.getByTestId('inbox-file-rec_b').props.accessibilityState).toEqual(
-        expect.objectContaining({ disabled: false }),
+        expect.objectContaining({ disabled: true }),
       )
+      expect(screen.getByTestId('inbox-choose-rec_b').props.accessibilityState).toEqual(
+        expect.objectContaining({ disabled: true }),
+      )
+      await act(async () => {
+        pending.resolve(filed('rec_a', ACT_SURVEY.id))
+      })
+    })
+
+    it('says in a word which row is the one filing, not in dimness alone', async () => {
+      // Doctrine rule 9: the busy row is disabled like every other row, so
+      // something other than the disabling has to tell them apart.
+      const pending = deferred<FieldRecord>()
+      fileRecord.mockReturnValue(pending.promise)
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a'), unfiled('rec_b')])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-file-rec_a'))
+      expect(screen.getByTestId('inbox-file-rec_a')).toHaveTextContent(/filing/i)
+      expect(screen.getByTestId('inbox-file-rec_b')).not.toHaveTextContent(/filing/i, {
+        exact: false,
+      })
       await act(async () => {
         pending.resolve(filed('rec_a', ACT_SURVEY.id))
       })
@@ -769,6 +972,71 @@ describe('the Inbox', () => {
       expect(screen.getByTestId('inbox-error')).toHaveTextContent('database is locked', {
         exact: false,
       })
+    })
+
+    it('says the capture was already filed when the list it came from was stale', async () => {
+      /*
+        She is looking at a list read some seconds ago. `fileRecord` refuses a
+        record that is already in an activity — "Record rec_a is already filed
+        into activity act_survey" — and said as a failure that would tell her
+        the capture is still waiting when it is not, with a raw id attached.
+        The screen asks `listUnfiledRecords` which case it is rather than
+        reading the error's wording.
+      */
+      fileRecord.mockRejectedValue(new Error('Record rec_a is already filed into act_survey.'))
+      listUnfiledRecords
+        .mockResolvedValueOnce([unfiled('rec_a', { captureNumber: 412 })])
+        .mockResolvedValue([])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-file-rec_a'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('inbox-error')).toHaveTextContent(
+          'Capture 412 was already filed, so it is no longer waiting here.',
+        )
+      })
+      expect(screen.getByTestId('inbox-error')).not.toHaveTextContent(/still here/i, {
+        exact: false,
+      })
+      expect(screen.getByTestId('inbox')).not.toHaveTextContent('act_', { exact: false })
+      expect(screen.queryByTestId('inbox-row-rec_a')).toBeNull()
+    })
+
+    it('says the capture is still here when the re-read still finds it waiting', async () => {
+      // The other branch of the same check, and the common one: the write
+      // really did fail and the record really is still in the Inbox.
+      fileRecord.mockRejectedValue(new Error('database is locked'))
+      listUnfiledRecords.mockResolvedValue([unfiled('rec_a', { captureNumber: 412 })])
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-file-rec_a'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('inbox-error')).toHaveTextContent(/still here/i, {
+          exact: false,
+        })
+      })
+      expect(screen.getByTestId('inbox-error')).toHaveTextContent('database is locked', {
+        exact: false,
+      })
+      expect(screen.getByTestId('inbox-row-rec_a')).toBeTruthy()
+    })
+
+    it('reports the capture as still here when the re-read fails as well', async () => {
+      // The conservative half: a re-read that answers nothing is not evidence
+      // the record moved, and the rest of the screen is still showing it.
+      fileRecord.mockRejectedValue(new Error('database is locked'))
+      listUnfiledRecords
+        .mockResolvedValueOnce([unfiled('rec_a', { captureNumber: 412 })])
+        .mockRejectedValue(new Error('database is locked'))
+      await renderInbox()
+      await fireEvent.press(screen.getByTestId('inbox-file-rec_a'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('inbox-error')).toHaveTextContent(/still here/i, {
+          exact: false,
+        })
+      })
+      expect(screen.getByTestId('inbox-row-rec_a')).toBeTruthy()
     })
 
     it('lets her try again after a failure', async () => {
@@ -846,6 +1114,25 @@ describe('the Inbox', () => {
       await refocus()
       expect(screen.getByTestId('inbox-row-rec_a')).toBeTruthy()
       expect(screen.getByTestId('inbox-load-error')).toBeTruthy()
+    })
+
+    it('re-reads when she presses Try again', async () => {
+      // The one control on this screen whose whole job is a second attempt.
+      // Without its `onPress` doing the read, the failure sentence is a dead
+      // end she can only leave by navigating away.
+      listUnfiledRecords.mockRejectedValueOnce(new Error('database is locked'))
+      await renderInbox()
+      expect(screen.getByTestId('inbox-load-error')).toBeTruthy()
+      expect(listUnfiledRecords).toHaveBeenCalledTimes(1)
+
+      listUnfiledRecords.mockResolvedValueOnce([unfiled('rec_a')])
+      await fireEvent.press(screen.getByTestId('inbox-retry'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('inbox-row-rec_a')).toBeTruthy()
+      })
+      expect(listUnfiledRecords).toHaveBeenCalledTimes(2)
+      expect(screen.queryByTestId('inbox-load-error')).toBeNull()
     })
 
     it('takes the failure back once a read succeeds', async () => {

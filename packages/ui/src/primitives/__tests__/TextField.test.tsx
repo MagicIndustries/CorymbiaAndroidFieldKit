@@ -64,6 +64,24 @@ describe('TextField', () => {
     expect(screen.getByTestId('f').props.keyboardType).toBe('number-pad')
   })
 
+  it('is typeable unless it is told otherwise', async () => {
+    await wrap(<TextField label="NAME" value="" onChangeText={() => {}} testID="f" />)
+    const input = screen.getByTestId('f')
+    expect(input.props.editable).toBe(true)
+    expect(input.props.accessibilityState).toEqual(expect.objectContaining({ disabled: false }))
+  })
+
+  it('refuses the keyboard when it is not ready to be typed into', async () => {
+    // Doctrine rule 18: a box that looks typeable and discards what she types
+    // is worse than one that plainly is not. Two channels under rule 9 — the
+    // spoken state and the dimming — not dimness alone.
+    await wrap(<TextField label="POSITION" value="" onChangeText={() => {}} disabled testID="f" />)
+    const input = screen.getByTestId('f')
+    expect(input.props.editable).toBe(false)
+    expect(input.props.accessibilityState).toEqual(expect.objectContaining({ disabled: true }))
+    expect(input.props.style).toEqual(expect.objectContaining({ opacity: 0.35 }))
+  })
+
   it('carries the spoken name it is given, distinct from the label', async () => {
     await wrap(
       <TextField
