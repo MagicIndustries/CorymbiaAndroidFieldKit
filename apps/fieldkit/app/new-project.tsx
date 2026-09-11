@@ -1,8 +1,8 @@
 import React, { useCallback, useRef, useState } from 'react'
-import { ScrollView, TextInput, View } from 'react-native'
+import { ScrollView } from 'react-native'
 import { router } from 'expo-router'
-import { field, radii, spacing, touch, type Theme } from '@corymbia/tokens'
-import { Button, Screen, Type, useTheme } from '@corymbia/ui'
+import { spacing } from '@corymbia/tokens'
+import { Button, Screen, TextField, Type, useTheme } from '@corymbia/ui'
 import { createProject } from '@corymbia/data'
 import { useDatabase, useDatabaseStatus } from '../src/db/provider'
 
@@ -57,6 +57,13 @@ function messageFor(cause: unknown): string {
   return `The project could not be saved: ${detail.replace(/[.?!…]+$/, '')}. Try again.`
 }
 
+/**
+ * The refusal an empty name earns. A module constant rather than a literal in
+ * `handleSave`, because `handleNameChange` below has to recognise it: typing
+ * a name answers this message and nothing else.
+ */
+const NEEDS_A_NAME = 'A project needs a name. Type one before saving.'
+
 function NewProjectBody() {
   const db = useDatabase()
   const { theme } = useTheme()
@@ -72,6 +79,20 @@ function NewProjectBody() {
   // resolves.
   const savingRef = useRef(false)
 
+  /**
+   * Typing a name clears the refusal that asked for one — otherwise the
+   * sentence "A project needs a name" stays on screen, and in the spoken
+   * description, while she is looking at the name she has just typed.
+   *
+   * Only that message. A failed write's message is left standing, because
+   * typing does not answer it and doctrine rule 20 makes that sentence the
+   * only telling she gets that the write did not land.
+   */
+  const handleNameChange = useCallback((text: string): void => {
+    setName(text)
+    setError((current) => (current === NEEDS_A_NAME ? null : current))
+  }, [])
+
   const handleSave = useCallback(async (): Promise<void> => {
     if (savingRef.current) return
 
@@ -80,7 +101,7 @@ function NewProjectBody() {
       // Doctrine rule 18: a save that silently does nothing on an empty name
       // is exactly the control that must not exist. This says what is
       // missing instead.
-      setError('A project needs a name. Type one before saving.')
+      setError(NEEDS_A_NAME)
       return
     }
 
@@ -126,51 +147,33 @@ function NewProjectBody() {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <View style={{ gap: spacing.xs }}>
-          <Type variant="label" dim>
-            NAME
-          </Type>
-          <TextInput
-            testID="new-project-name"
-            accessibilityLabel="Project name"
-            value={name}
-            onChangeText={setName}
-            placeholder="Tambo River eDNA"
-            placeholderTextColor={theme.colors.textDim}
-            style={inputStyle(theme)}
-          />
-        </View>
+        <TextField
+          label="NAME"
+          testID="new-project-name"
+          accessibilityLabel="Project name"
+          value={name}
+          onChangeText={handleNameChange}
+          placeholder="Tambo River eDNA"
+        />
 
-        <View style={{ gap: spacing.xs }}>
-          <Type variant="label" dim>
-            SHORT LABEL (OPTIONAL)
-          </Type>
-          <TextInput
-            testID="new-project-short-label"
-            accessibilityLabel="Short label"
-            value={shortLabel}
-            onChangeText={setShortLabel}
-            placeholder="Tambo"
-            placeholderTextColor={theme.colors.textDim}
-            style={inputStyle(theme)}
-          />
-        </View>
+        <TextField
+          label="SHORT LABEL (OPTIONAL)"
+          testID="new-project-short-label"
+          accessibilityLabel="Short label"
+          value={shortLabel}
+          onChangeText={setShortLabel}
+          placeholder="Tambo"
+        />
 
-        <View style={{ gap: spacing.xs }}>
-          <Type variant="label" dim>
-            DESCRIPTION (OPTIONAL)
-          </Type>
-          <TextInput
-            testID="new-project-description"
-            accessibilityLabel="Project description"
-            value={description}
-            onChangeText={setDescription}
-            placeholder="What this project is for"
-            placeholderTextColor={theme.colors.textDim}
-            multiline
-            style={[inputStyle(theme), { minHeight: field.control, textAlignVertical: 'top' }]}
-          />
-        </View>
+        <TextField
+          label="DESCRIPTION (OPTIONAL)"
+          testID="new-project-description"
+          accessibilityLabel="Project description"
+          value={description}
+          onChangeText={setDescription}
+          placeholder="What this project is for"
+          multiline
+        />
 
         {error !== null ? (
           <Type testID="new-project-error" style={{ color: theme.colors.statusPoor }}>
@@ -189,16 +192,4 @@ function NewProjectBody() {
       </ScrollView>
     </Screen>
   )
-}
-
-function inputStyle(theme: Theme) {
-  return {
-    minHeight: touch.min,
-    borderRadius: radii.md,
-    borderWidth: 2,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface,
-    color: theme.colors.textPrimary,
-    paddingHorizontal: spacing.md,
-  }
 }

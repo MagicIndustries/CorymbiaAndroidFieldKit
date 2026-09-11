@@ -103,6 +103,35 @@ describe('creating a project', () => {
     expect(screen.getByTestId('new-project-error')).toHaveTextContent(/name/i)
   })
 
+  it('stops asking for a name once she has typed one', async () => {
+    // The refusal is answered by typing, so it must go when she types. Left
+    // standing it is worse on the screen and worse still in the spoken
+    // description, which reads the error branch: voice mode would go on
+    // saying "A project needs a name" over the name she just gave it.
+    await renderNewProject()
+    await fireEvent.press(screen.getByTestId('new-project-save'))
+    expect(screen.getByTestId('new-project-error')).toHaveTextContent(/name/i)
+    await fireEvent.changeText(screen.getByTestId('new-project-name'), 'Mitchell River eDNA')
+    expect(screen.queryByTestId('new-project-error')).toBeNull()
+    expect(spokenDescription()).not.toMatch(/needs a name/i)
+    expect(spokenDescription()).toMatch(/only the name is required/i)
+  })
+
+  it('keeps a failed save on screen while she edits, because typing does not answer it', async () => {
+    // The asymmetry is deliberate (doctrine rule 20). "Needs a name" is a
+    // field she has not filled in, and typing answers it. "Could not be
+    // saved" is the only telling she gets that a write did not land, and
+    // nothing in the application remembers it once it is off screen — so a
+    // keystroke must not take it away.
+    createProject.mockRejectedValue(new Error('database is locked'))
+    await renderNewProject()
+    await fireEvent.changeText(screen.getByTestId('new-project-name'), 'Mitchell River eDNA')
+    await fireEvent.press(screen.getByTestId('new-project-save'))
+    expect(screen.getByTestId('new-project-error')).toHaveTextContent(/could not be saved/i)
+    await fireEvent.changeText(screen.getByTestId('new-project-name'), 'Mitchell River eDNA 2')
+    expect(screen.getByTestId('new-project-error')).toHaveTextContent(/could not be saved/i)
+  })
+
   it('keeps the optional fields optional', async () => {
     await renderNewProject()
     await fireEvent.changeText(screen.getByTestId('new-project-name'), 'Mitchell River eDNA')
@@ -193,10 +222,14 @@ describe('creating a project', () => {
     await renderNewProject()
     await fireEvent.changeText(screen.getByTestId('new-project-name'), 'Mitchell River eDNA')
     const save = screen.getByTestId('new-project-save')
-    await act(async () => {
-      fireEvent.press(save)
-      fireEvent.press(save)
-    })
+    // Two presses, each awaited in turn rather than fired together inside one
+    // `act` — `fireEvent` in RNTL v14 opens an `act` scope of its own, so
+    // nesting them is what produced this file's three "overlapping act()
+    // calls" errors. The condition under test is unchanged: the first press
+    // settles nothing, because `createProject` is still holding its promise,
+    // so the second lands while the save is genuinely in flight.
+    await fireEvent.press(save)
+    await fireEvent.press(save)
     release(CREATED)
     await act(async () => {})
     expect(createProject).toHaveBeenCalledTimes(1)

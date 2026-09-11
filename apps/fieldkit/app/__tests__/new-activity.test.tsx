@@ -24,7 +24,10 @@ import type { Activity, Project } from '@corymbia/data'
  * of that array, so a stubbed list here would only prove the stub — the
  * "offers every activity kind" test below is exactly the one that must fail
  * if a sixth kind is added to `@corymbia/data` and the list this screen maps
- * over is not the same list.
+ * over is not the same list. That test names the five literals AND counts the
+ * chips against `ACTIVITY_KINDS.length`: the literals say what the five are
+ * today, and the count is what a sixth kind moves. Iterating the literals
+ * alone would not — five chips out of six is five passing lookups.
  */
 
 const mockRouter = {
@@ -35,8 +38,14 @@ const mockRouter = {
 /**
  * The route's own parameter, replaced per test. `let`, not `const`: the
  * no-project tests below render with it empty.
+ *
+ * Typed `string | string[] | undefined`, which is what expo-router actually
+ * delivers (`UnknownOutputParams = Record<string, string | string[]>`) — a
+ * key repeated in the URL arrives as an array. Narrowing this fixture to
+ * `string` would have made the shape the screen has to survive unwritable
+ * here, which is how an asserted parameter stays asserted.
  */
-let mockParams: { projectId?: string } = { projectId: 'prj_tambo' }
+let mockParams: { projectId?: string | string[] } = { projectId: 'prj_tambo' }
 
 jest.mock('expo-router', () => ({
   router: {
@@ -101,8 +110,10 @@ const createActivity = mockRepo.createActivity
 const setCurrentActivity = mockRepo.setCurrentActivity
 const getProject = mockRepo.getProject
 
-// Imported after the mocks so it picks them up.
+// Imported after the mocks so they are picked up. `ACTIVITY_KINDS` comes
+// through the factory above, which hands back the real array.
 import NewActivityScreen from '../new-activity'
+import { ACTIVITY_KINDS } from '@corymbia/data'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -160,6 +171,12 @@ describe('starting an activity', () => {
     for (const kind of ['survey', 'sampling', 'collection', 'workshop', 'meeting']) {
       expect(screen.getByTestId(`activity-kind-${kind}`)).toBeTruthy()
     }
+    // And exactly those, counted against the repository's own list rather
+    // than against the five literals above — a sixth kind added to
+    // `@corymbia/data` fails here if this screen is not mapping over the same
+    // array. The pattern excludes `activity-kind-<kind>-chosen`, the tick on
+    // the selected chip.
+    expect(screen.getAllByTestId(/^activity-kind-[a-z]+$/)).toHaveLength(ACTIVITY_KINDS.length)
   })
 
   it('creates the activity with the kind she chose', async () => {
@@ -200,6 +217,35 @@ describe('starting an activity', () => {
     await fireEvent.press(screen.getByTestId('new-activity-save'))
     expect(createActivity).not.toHaveBeenCalled()
     expect(screen.getByTestId('new-activity-error')).toHaveTextContent(/name/i)
+  })
+
+  it('stops asking for a name once she has typed one', async () => {
+    // The refusal is answered by typing, so it must go when she types.
+    // Left standing it is worse on the screen and worse still in the spoken
+    // description, which reads the error branch: voice mode would go on
+    // saying "An activity needs a name" over the name she just gave it.
+    await renderNewActivity()
+    await fireEvent.press(screen.getByTestId('new-activity-save'))
+    expect(screen.getByTestId('new-activity-error')).toHaveTextContent(/name/i)
+    await fireEvent.changeText(screen.getByTestId('new-activity-name'), 'Reach 4 transect')
+    expect(screen.queryByTestId('new-activity-error')).toBeNull()
+    expect(spokenDescription()).not.toMatch(/needs a name/i)
+    expect(spokenDescription()).toMatch(/type a name and save/i)
+  })
+
+  it('keeps a failed save on screen while she edits, because typing does not answer it', async () => {
+    // The asymmetry is deliberate (doctrine rule 20). "Needs a name" is a
+    // field she has not filled in, and typing answers it. "Could not be
+    // saved" is the only telling she gets that a write did not land, and
+    // nothing in the application remembers it once it is off screen — so a
+    // keystroke must not take it away.
+    createActivity.mockRejectedValue(new Error('database is locked'))
+    await renderNewActivity()
+    await fireEvent.changeText(screen.getByTestId('new-activity-name'), 'Reach 4 transect')
+    await fireEvent.press(screen.getByTestId('new-activity-save'))
+    expect(screen.getByTestId('new-activity-error')).toHaveTextContent(/could not be saved/i)
+    await fireEvent.changeText(screen.getByTestId('new-activity-name'), 'Reach 4 transect b')
+    expect(screen.getByTestId('new-activity-error')).toHaveTextContent(/could not be saved/i)
   })
 
   it('says so and stays put when it cannot be saved', async () => {
@@ -296,6 +342,41 @@ describe('starting an activity', () => {
     expect(createActivity).toHaveBeenCalledTimes(1)
   })
 
+  it('disables the save while the write is in flight, rather than swallowing the tap', async () => {
+    // Doctrine rule 18: a busy control is genuinely disabled, not silently
+    // inert. `savingRef` alone would refuse the second press invisibly, which
+    // teaches her the tap did not register when it did.
+    let release: (value: Activity) => void = () => {}
+    createActivity.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+    await renderNewActivity()
+    await fireEvent.changeText(screen.getByTestId('new-activity-name'), 'Reach 4 transect')
+    expect(screen.getByTestId('new-activity-save').props.accessibilityState.disabled).toBe(false)
+    await fireEvent.press(screen.getByTestId('new-activity-save'))
+    expect(screen.getByTestId('new-activity-save')).toHaveTextContent('Starting…')
+    expect(screen.getByTestId('new-activity-save').props.accessibilityState.disabled).toBe(true)
+    release(CREATED)
+    await act(async () => {})
+  })
+
+  it('offers the save again when the write failed', async () => {
+    // The other half of the rule above: the guard closes for the save that
+    // succeeded (this screen is on its way to the launcher) and reopens for
+    // the one that did not, because the retry is on this screen.
+    createActivity.mockRejectedValue(new Error('database is locked'))
+    await renderNewActivity()
+    await fireEvent.changeText(screen.getByTestId('new-activity-name'), 'Reach 4 transect')
+    await fireEvent.press(screen.getByTestId('new-activity-save'))
+    expect(screen.getByTestId('new-activity-save').props.accessibilityState.disabled).toBe(false)
+    createActivity.mockResolvedValue(CREATED)
+    await fireEvent.press(screen.getByTestId('new-activity-save'))
+    expect(createActivity).toHaveBeenCalledTimes(2)
+    expect(mockRouter.dismissTo).toHaveBeenCalledWith('/')
+  })
+
   describe('with no project to start it in', () => {
     it('offers no form when the route carried no project', async () => {
       mockParams = {}
@@ -313,11 +394,48 @@ describe('starting an activity', () => {
       expect(screen.queryByTestId('new-activity-save')).toBeNull()
     })
 
-    it('offers no form when the project could not be read', async () => {
+    it('offers no form when the project could not be read, and names the cause', async () => {
+      // The absence of the form is already covered by the `null` case above,
+      // so on its own it proves nothing about this one. What is particular
+      // here is what she is told: a read that failed is a different event
+      // from a project she never chose, and saying the second when the first
+      // happened sends her off to choose a project she has already chosen.
+      // `toHaveTextContent` is exact by default in RNTL 14, hence
+      // `{ exact: false }`.
       getProject.mockRejectedValue(new Error('database is locked'))
       await renderNewActivity()
       expect(screen.queryByTestId('new-activity-name')).toBeNull()
       expect(screen.queryByTestId('new-activity-save')).toBeNull()
+      const sentence = screen.getByTestId('new-activity-no-project')
+      expect(sentence).toHaveTextContent('could not be opened', { exact: false })
+      expect(sentence).toHaveTextContent('database is locked', { exact: false })
+      expect(sentence).not.toHaveTextContent('No project has been chosen', { exact: false })
+      expect(spokenDescription()).toMatch(/could not be opened/i)
+      expect(spokenDescription()).toMatch(/database is locked/i)
+      expect(spokenDescription()).not.toMatch(/no project has been chosen/i)
+    })
+
+    it('offers no form when the route carried an empty project id', async () => {
+      // An empty string is a parameter that arrived, so `projectId !==
+      // undefined` would have let it through to `getProject(db, '')` — a
+      // lookup that can only come back empty, reported as "that project no
+      // longer exists" about a project she never named.
+      mockParams = { projectId: '' }
+      await renderNewActivity()
+      expect(screen.queryByTestId('new-activity-name')).toBeNull()
+      expect(screen.getByTestId('new-activity-no-project')).toBeTruthy()
+      expect(getProject).not.toHaveBeenCalled()
+    })
+
+    it('offers no form when the route carried the project twice', async () => {
+      // expo-router types a parameter `string | string[]`: a key repeated in
+      // the URL arrives as an array. Asserting it is a string does not make
+      // it one — it makes `getProject(db, ['prj_tambo', 'prj_yarra'])`.
+      mockParams = { projectId: ['prj_tambo', 'prj_yarra'] }
+      await renderNewActivity()
+      expect(screen.queryByTestId('new-activity-name')).toBeNull()
+      expect(screen.getByTestId('new-activity-no-project')).toBeTruthy()
+      expect(getProject).not.toHaveBeenCalled()
     })
 
     it('sends her to choose a project instead, and nothing else', async () => {

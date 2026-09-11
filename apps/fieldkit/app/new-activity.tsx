@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, TextInput, View } from 'react-native'
+import { Pressable, ScrollView, View } from 'react-native'
 import { router, useLocalSearchParams } from 'expo-router'
-import { radii, spacing, touch, type Theme } from '@corymbia/tokens'
-import { Button, Screen, Type, useTheme } from '@corymbia/ui'
+import { radii, spacing, touch } from '@corymbia/tokens'
+import { Button, Screen, TextField, Type, useTheme } from '@corymbia/ui'
 import {
   ACTIVITY_KINDS,
   createActivity,
@@ -101,7 +101,18 @@ const KIND_LABEL: Readonly<Record<ActivityKind, string>> = Object.freeze({
  */
 function NewActivityBody() {
   const db = useDatabase()
-  const { projectId } = useLocalSearchParams<{ projectId?: string }>()
+  const { projectId } = useLocalSearchParams()
+
+  /**
+   * A route parameter is `string | string[] | undefined` — expo-router hands
+   * back an array when the same key appears more than once in the URL, and
+   * `undefined` when it does not appear at all. Only a non-empty string names
+   * a project; everything else (absent, repeated, empty) is the settled answer
+   * "there is no project to start this in", which this screen already knows
+   * how to say. Checking it rather than declaring it `string` is the
+   * difference between that sentence and `getProject(db, ['a','b'])`.
+   */
+  const projectKey = typeof projectId === 'string' && projectId.length > 0 ? projectId : null
 
   // `undefined` is "not answered yet", distinct from `null`, which is the
   // settled answer "there is no project to start this in".
@@ -109,7 +120,7 @@ function NewActivityBody() {
   const [lookupError, setLookupError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (projectId === undefined) {
+    if (projectKey === null) {
       // Nothing to look up, and not a failure: the launcher can reach this
       // screen on a first run with no project selected at all.
       setProject(null)
@@ -123,7 +134,7 @@ function NewActivityBody() {
     let current = true
     void (async () => {
       try {
-        const found = await getProject(db, projectId)
+        const found = await getProject(db, projectKey)
         if (!current) return
         setProject(found)
         setLookupError(null)
@@ -136,7 +147,7 @@ function NewActivityBody() {
     return () => {
       current = false
     }
-  }, [db, projectId])
+  }, [db, projectKey])
 
   if (project === undefined) {
     return (
@@ -172,6 +183,13 @@ function NewActivityBody() {
   return <NewActivityForm project={project} />
 }
 
+/**
+ * The refusal an empty name earns. A module constant rather than a literal in
+ * `handleSave`, because `handleNameChange` below has to recognise it: typing
+ * a name answers this message and nothing else.
+ */
+const NEEDS_A_NAME = 'An activity needs a name. Type one before saving.'
+
 function NewActivityForm({ project }: { project: Project }) {
   const db = useDatabase()
   const { theme } = useTheme()
@@ -191,6 +209,21 @@ function NewActivityForm({ project }: { project: Project }) {
   // before the first await resolves.
   const savingRef = useRef(false)
 
+  /**
+   * Typing a name clears the refusal that asked for one. Without this the
+   * sentence "An activity needs a name" stays on the screen — and, worse, in
+   * the spoken description, which reads the error branch — while she is
+   * looking at the name she has just typed.
+   *
+   * Only that message. A failed write's message is left standing, because
+   * typing does not answer it and doctrine rule 20 makes that sentence the
+   * only telling she gets that the write did not land.
+   */
+  const handleNameChange = useCallback((text: string): void => {
+    setName(text)
+    setError((current) => (current === NEEDS_A_NAME ? null : current))
+  }, [])
+
   const handleSave = useCallback(async (): Promise<void> => {
     if (savingRef.current) return
 
@@ -201,7 +234,7 @@ function NewActivityForm({ project }: { project: Project }) {
       // refuse this too, but its refusal arrives as a thrown error dressed
       // as a failure — this is not a failure, it is a field she has not
       // filled in yet, and it is said as one.
-      setError('An activity needs a name. Type one before saving.')
+      setError(NEEDS_A_NAME)
       return
     }
 
@@ -226,12 +259,20 @@ function NewActivityForm({ project }: { project: Project }) {
       // the launcher is where the activity she just started becomes the card
       // she captures from. The launcher re-reads on focus, so it is already
       // showing the new activity by the time she lands.
+      //
+      // The success path deliberately leaves the guard closed and `saving`
+      // true, and there is deliberately no `finally`: a `finally` runs after
+      // this navigation, and the frames between it and the unmount are
+      // exactly where a second press would start a second activity. Nothing
+      // is set after the navigation either, for the same reason — this
+      // component is on its way out.
       router.dismissTo('/')
     } catch (cause) {
-      setError(messageFor(cause))
-    } finally {
+      // Reopened only here: the save failed, she is still on this screen, and
+      // the retry has to be pressable.
       savingRef.current = false
       setSaving(false)
+      setError(messageFor(cause))
     }
   }, [db, project.id, kind, name])
 
@@ -332,20 +373,14 @@ function NewActivityForm({ project }: { project: Project }) {
           </View>
         </View>
 
-        <View style={{ gap: spacing.xs }}>
-          <Type variant="label" dim>
-            NAME
-          </Type>
-          <TextInput
-            testID="new-activity-name"
-            accessibilityLabel="Activity name"
-            value={name}
-            onChangeText={setName}
-            placeholder="Reach 4 transect"
-            placeholderTextColor={theme.colors.textDim}
-            style={inputStyle(theme)}
-          />
-        </View>
+        <TextField
+          label="NAME"
+          testID="new-activity-name"
+          accessibilityLabel="Activity name"
+          value={name}
+          onChangeText={handleNameChange}
+          placeholder="Reach 4 transect"
+        />
 
         {error !== null ? (
           <Type testID="new-activity-error" style={{ color: theme.colors.statusPoor }}>
@@ -353,10 +388,18 @@ function NewActivityForm({ project }: { project: Project }) {
           </Type>
         ) : null}
 
+        {/*
+          Doctrine rule 18: a control mid-write is genuinely disabled, not
+          quietly inert. `savingRef` still guards the handler — it is claimed
+          synchronously, ahead of any re-render — but a button that looks
+          pressable and swallows the tap teaches her the tap did not register
+          when it did.
+        */}
         <Button
           testID="new-activity-save"
           label={saving ? 'Starting…' : 'Start activity'}
           size="field"
+          disabled={saving}
           onPress={() => {
             void handleSave()
           }}
@@ -364,16 +407,4 @@ function NewActivityForm({ project }: { project: Project }) {
       </ScrollView>
     </Screen>
   )
-}
-
-function inputStyle(theme: Theme) {
-  return {
-    minHeight: touch.min,
-    borderRadius: radii.md,
-    borderWidth: 2,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface,
-    color: theme.colors.textPrimary,
-    paddingHorizontal: spacing.md,
-  }
 }
