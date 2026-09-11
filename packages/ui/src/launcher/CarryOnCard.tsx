@@ -36,12 +36,18 @@ const ACTIVITY_KIND_LABEL: Readonly<Record<CarryOnActivityKind, string>> = Objec
 /**
  * "40 minutes ago" mid-survey, "3 hours ago" further in — never the raw ISO
  * timestamp `startedAt` carries, which is arithmetic homework at a glance.
- * Whole minutes under an hour, whole hours above (brief, spec §10.1). Local
- * and pure: nothing outside this file needs the format, and the two duration
- * tests in `CarryOnCard.test.tsx` pin it through the rendered card rather
- * than by calling it directly.
+ * Whole minutes under an hour, whole hours above (brief, spec §10.1). Pure,
+ * and the two duration tests in `CarryOnCard.test.tsx` pin it through the
+ * rendered card rather than by calling it directly.
+ *
+ * Exported because the records list says when each record was taken and must
+ * say it the same way this card says when the activity started — two
+ * renderings of "how long ago" that disagreed would be a worse answer than
+ * either. It is a stopgap either way: the owner's design pass may decide a
+ * list of records wants something denser than a sentence per row, and this is
+ * the one place that would change.
  */
-function formatElapsed(startedAt: string): string {
+export function formatElapsed(startedAt: string): string {
   const elapsedMs = Date.now() - new Date(startedAt).getTime()
   const minutes = Math.max(0, Math.round(elapsedMs / 60_000))
   if (minutes < 60) {
