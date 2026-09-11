@@ -403,15 +403,16 @@ describe('records', () => {
     expect(second.sequence).toBe(2)
   })
 
-  it('lists an activity’s records most recent first, by capture time', async () => {
+  it('lists an activity’s records in sequence order, highest first — not by capture time', async () => {
     const older = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
     const newer = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    expect(older.sequence).toBe(1)
+    expect(newer.sequence).toBe(2)
 
-    // nowIso() truncates to whole seconds, so both rows are written with the
-    // same captured_at no matter how long the test sleeps between them — and
-    // the id tiebreak alone would then decide the order, leaving `captured_at
-    // DESC` untested. Push them apart explicitly, and put the times in the
-    // OPPOSITE order to the ids, so dropping either term changes the answer.
+    // Set captured_at in the OPPOSITE order to sequence — older ends up with
+    // the later timestamp, newer the earlier one. If listRecords still
+    // ordered by capture time this would put older first; ordering by
+    // sequence puts newer first instead, which is what this pins.
     await db.execute('UPDATE record SET captured_at = ? WHERE id = ?', [
       '2026-02-11T08:00:00+11:00',
       newer.id,
@@ -421,19 +422,16 @@ describe('records', () => {
       older.id,
     ])
 
-    expect((await listRecords(db, activityId)).map((r) => r.id)).toEqual([older.id, newer.id])
+    expect((await listRecords(db, activityId)).map((r) => r.id)).toEqual([newer.id, older.id])
   })
 
-  it('breaks a same-second tie by id, so a burst of captures has a stable order', async () => {
+  it('keeps sequence order even when every record shares the same captured_at second', async () => {
     // nowIso() truncates to whole seconds, so two captures in the same second
-    // — the normal case for a burst — genuinely share a captured_at and the
-    // tiebreak is all there is. Pinned here rather than left to chance: writing
-    // the timestamp explicitly keeps the test off the second boundary that
-    // would otherwise decide, at random, which term it was exercising.
-    //
-    // This test would keep passing if `captured_at DESC` were dropped. That is
-    // deliberate — it covers `id DESC` only, and the test above covers the
-    // other term. Ids are time-ordered, so the later capture still sorts first.
+    // — the normal case for a burst — genuinely share a captured_at. That no
+    // longer matters: captured_at is not part of listRecords' ORDER BY at
+    // all, and `record_sequence_tracks_activity` (migration 003) guarantees
+    // sequence is unique per activity, so it alone decides the order with no
+    // tiebreak needed.
     const first = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
     const second = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
     await db.execute('UPDATE record SET captured_at = ? WHERE activity_id = ?', [
@@ -442,6 +440,23 @@ describe('records', () => {
     ])
 
     expect((await listRecords(db, activityId)).map((r) => r.id)).toEqual([second.id, first.id])
+  })
+
+  it('lists a record filed into position 2 at sequence 2, not appended to the end', async () => {
+    // The case the old capture-time order got wrong (task's Fix 1): filing at
+    // position 2 gives the new record sequence 2 and shifts the two records
+    // that followed it up to 3 and 4, but none of that changes when any row
+    // was captured. listRecords must reflect the position, not capture time.
+    const first = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    const second = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    const third = await createRecord(db, { activityId, kind: 'pin', fix: DELIBERATE, deviceId })
+    const filed = await createRecord(db, { activityId: null, kind: 'pin', fix: AMBIENT, deviceId })
+
+    await fileRecord(db, { recordId: filed.id, activityId, deviceId, position: 2 })
+
+    const records = await listRecords(db, activityId)
+    expect(records.map((r) => r.sequence)).toEqual([4, 3, 2, 1])
+    expect(records.map((r) => r.id)).toEqual([third.id, second.id, filed.id, first.id])
   })
 
   it('soft-deletes, keeping the row and logging the deletion', async () => {

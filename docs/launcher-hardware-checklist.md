@@ -67,12 +67,13 @@ then everything else on top of what item 2 created.
 5. **Filing with a position renumbers the rest.** Into an activity that already holds four
    records, file an Inbox capture at **position 2**. Then open Records.
    *Expect:* five rows, and the numbers 1, 2, 3, 4, 5 each appear **exactly once** — nothing
-   repeated, nothing missing. Read them as a set, not as a column: this list is ordered
-   newest-first by capture time and shows the activity sequence, so an inserted record sits
-   wherever its capture time puts it and the numbers do **not** run down the screen in order.
-   *Failure:* two rows with the same number, a number missing, or a row showing `—`. This is
-   the one item whose wrong answer is completely silent — nothing on screen complains, the
-   data is just wrong — so count them deliberately rather than glancing.
+   repeated, nothing missing. This list is ordered by the activity sequence, highest first, so
+   they should also read in order from the top: 5, 4, 3, 2, 1 down the screen, with the filed
+   capture sitting at 2.
+   *Failure:* two rows with the same number, a number missing, a row showing `—`, or the
+   numbers not running down the screen in order. This is the one item whose wrong answer is
+   completely silent — nothing on screen complains, the data is just wrong — so count them
+   deliberately rather than glancing.
 
 6. **Force-quit and reopen.** From the launcher showing a resumed activity, swipe the app off
    the recents list (a real kill, not Back), then open it again.

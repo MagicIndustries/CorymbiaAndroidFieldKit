@@ -624,9 +624,23 @@ export async function getRecord(db: Database, id: string): Promise<FieldRecord |
   return row ? toRecord(row) : null
 }
 
+/**
+ * Every record filed into an activity, in activity order, highest `sequence`
+ * first.
+ *
+ * The screen that lists an activity shows each record's `sequence` (spec
+ * §7.2) — "Pin 023" — so the order it lists them in has to be the sequence's
+ * order, not capture time's: `fileRecord` and `moveRecord` renumber records
+ * without touching `captured_at`, so once anything has been filed into a
+ * position the two can disagree, and ordering by capture time then shows the
+ * activity's own ordinals out of sequence. `record_sequence_tracks_activity`
+ * (migration 003) guarantees every row this query can return has a non-null
+ * `sequence` — a record only reaches this table's `activity_id = ?` branch by
+ * having one — so there is no null case to order around.
+ */
 export async function listRecords(db: Database, activityId: string): Promise<FieldRecord[]> {
   const rows = await db.all<RecordRow>(
-    `${SELECT} AND activity_id = ? ORDER BY captured_at DESC, id DESC`,
+    `${SELECT} AND activity_id = ? ORDER BY sequence DESC, id DESC`,
     [activityId],
   )
   return rows.map(toRecord)

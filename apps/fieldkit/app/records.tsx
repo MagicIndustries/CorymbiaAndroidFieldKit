@@ -149,10 +149,10 @@ function RecordsBody() {
           : {
               state: 'listed',
               activityName: context.activity.name,
-              // The order `listRecords` hands back — `captured_at DESC`,
-              // newest first. This screen never re-sorts: a second ordering
-              // here could disagree with the repository's, and then the two
-              // would be right on different days.
+              // The order `listRecords` hands back — `sequence DESC`,
+              // highest position first. This screen never re-sorts: a second
+              // ordering here could disagree with the repository's, and then
+              // the two would be right on different days.
               records,
             },
       )

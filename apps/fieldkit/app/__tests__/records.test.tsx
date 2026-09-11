@@ -221,13 +221,14 @@ beforeEach(() => {
 
 describe('the records list', () => {
   it('lists the records in the activity, in the order the repository returns', async () => {
-    // `listRecords` orders `captured_at DESC` — newest first. The screen shows
-    // that order and never re-sorts: a second ordering here could disagree
-    // with the repository's, and the two would be right on different days.
-    // So the fixture is handed back newest-first, as the real query would,
-    // and the assertion is that it survives to the screen unchanged.
+    // `listRecords` orders by `sequence DESC` — highest position in the
+    // activity first, not by capture time. The screen shows that order and
+    // never re-sorts: a second ordering here could disagree with the
+    // repository's, and the two would be right on different days. So the
+    // fixture is handed back highest-sequence-first, as the real query
+    // would, and the assertion is that it survives to the screen unchanged.
     listRecords.mockResolvedValue([
-      recordRow({ id: 'rec_b', sequence: 2, capturedAt: new Date(Date.now() - 5 * 60_000).toISOString() }),
+      recordRow({ id: 'rec_b', sequence: 2 }),
       recordRow({ id: 'rec_a', sequence: 1 }),
     ])
     await renderRecords()
