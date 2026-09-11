@@ -2392,6 +2392,15 @@ function FieldEditor({
               placeholder={label}
               placeholderTextColor={theme.colors.textDim}
               multiline={kind === 'description'}
+              // This repeats the border/radius/fill/padding signature that
+              // lives in `TextField` (`@corymbia/ui`'s `packages/ui/src/
+              // primitives/TextField.tsx`, doctrine rule 5) — that component
+              // is the source of the text-entry visual signature. This one
+              // stays inline rather than being converted to `TextField` for
+              // three reasons: it needs `autoFocus` (see above), a bounded
+              // `maxHeight` (below) so a long note scrolls instead of growing
+              // the card into the keyboard, and it takes no label. A change to
+              // one of these two styles must be mirrored in the other.
               style={{
                 minHeight: kind === 'description' ? field.control : touch.min,
                 // See the note on the component: bounded so a long note

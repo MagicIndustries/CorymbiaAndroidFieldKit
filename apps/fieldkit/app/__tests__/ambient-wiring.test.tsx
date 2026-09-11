@@ -168,9 +168,13 @@ jest.mock('expo-router', () => ({
  * Its own behaviour is proved in
  * `src/context/__tests__/useCurrentContext.test.ts`.
  */
-const mockCurrentContext = {
+type MockCurrentContext = ReturnType<
+  typeof import('../../src/context/useCurrentContext').useCurrentContext
+>
+const mockCurrentContext: MockCurrentContext = {
   carryOn: null,
   activityId: null,
+  projectId: null,
   unfiledCount: 0,
   loading: false,
   refresh: () => Promise.resolve(),

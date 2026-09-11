@@ -119,12 +119,20 @@ function NewProjectBody() {
 
     try {
       await createProject(db, input)
+      // The success path deliberately leaves the guard closed and `saving`
+      // true, and there is deliberately no `finally`: a `finally` runs after
+      // this navigation, and the frames between it and the unmount are
+      // exactly where a second press would start a second project. Nothing
+      // is set after the navigation either, for the same reason — this
+      // component is on its way out. Mirrors `new-activity.tsx`'s
+      // `handleSave`.
       router.back()
     } catch (cause) {
-      setError(messageFor(cause))
-    } finally {
+      // Reopened only here: the save failed, she is still on this screen, and
+      // the retry has to be pressable.
       savingRef.current = false
       setSaving(false)
+      setError(messageFor(cause))
     }
   }, [db, name, description, shortLabel])
 
@@ -181,10 +189,18 @@ function NewProjectBody() {
           </Type>
         ) : null}
 
+        {/*
+          Doctrine rule 18: a control mid-write is genuinely disabled, not
+          quietly inert. `savingRef` still guards the handler — it is claimed
+          synchronously, ahead of any re-render — but a button that looks
+          pressable and swallows the tap teaches her the tap did not register
+          when it did.
+        */}
         <Button
           testID="new-project-save"
           label={saving ? 'Saving…' : 'Save project'}
           size="field"
+          disabled={saving}
           onPress={() => {
             void handleSave()
           }}

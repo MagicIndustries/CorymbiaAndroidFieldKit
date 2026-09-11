@@ -235,6 +235,43 @@ describe('creating a project', () => {
     expect(createProject).toHaveBeenCalledTimes(1)
   })
 
+  it('disables the save while the write is in flight, rather than swallowing the tap', async () => {
+    // Doctrine rule 18: a busy control is genuinely disabled, not silently
+    // inert. `savingRef` alone would refuse the second press invisibly, which
+    // teaches her the tap did not register when it did. Mirrors
+    // `new-activity.test.tsx`'s test of the same name.
+    let release: (value: Project) => void = () => {}
+    createProject.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+    await renderNewProject()
+    await fireEvent.changeText(screen.getByTestId('new-project-name'), 'Mitchell River eDNA')
+    expect(screen.getByTestId('new-project-save').props.accessibilityState.disabled).toBe(false)
+    await fireEvent.press(screen.getByTestId('new-project-save'))
+    expect(screen.getByTestId('new-project-save')).toHaveTextContent('Saving…')
+    expect(screen.getByTestId('new-project-save').props.accessibilityState.disabled).toBe(true)
+    release(CREATED)
+    await act(async () => {})
+  })
+
+  it('offers the save again when the write failed', async () => {
+    // The other half of the rule above: the guard closes for the save that
+    // succeeded (this screen is on its way back) and reopens for the one
+    // that did not, because the retry is on this screen. Mirrors
+    // `new-activity.test.tsx`'s test of the same name.
+    createProject.mockRejectedValue(new Error('database is locked'))
+    await renderNewProject()
+    await fireEvent.changeText(screen.getByTestId('new-project-name'), 'Mitchell River eDNA')
+    await fireEvent.press(screen.getByTestId('new-project-save'))
+    expect(screen.getByTestId('new-project-save').props.accessibilityState.disabled).toBe(false)
+    createProject.mockResolvedValue(CREATED)
+    await fireEvent.press(screen.getByTestId('new-project-save'))
+    expect(createProject).toHaveBeenCalledTimes(2)
+    expect(routerBack).toHaveBeenCalledTimes(1)
+  })
+
   it('shows no form until the database is open', async () => {
     mockStatus = { state: 'opening', error: null, applied: [] }
     await renderNewProject()
