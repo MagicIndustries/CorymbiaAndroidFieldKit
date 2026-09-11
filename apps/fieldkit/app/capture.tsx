@@ -55,6 +55,7 @@ import { ambientFixOrNone } from '../src/geo/ambientFix'
 import { useCapture, type Capture, type CapturePreview } from '../src/capture/useCapture'
 import { useSteadyGrade } from '../src/capture/steadyGrade'
 import { useDatabase, useDatabaseStatus, useDevice, useSettings } from '../src/db/provider'
+import { useCurrentContext } from '../src/context/useCurrentContext'
 
 /**
  * The capture screen (spec §9.1–§9.4): the one thing a field ecologist looks at
@@ -327,7 +328,34 @@ function CaptureBody() {
     void ambientCache.refresh()
   }, [])
 
-  const capture = useCapture({ db, device, source })
+  /**
+   * WHERE THIS CAPTURE IS FILED (spec §8.3, §10.1).
+   *
+   * The same hook the launcher resumes with, read here rather than passed as
+   * a navigation parameter. That is deliberate: a parameter would be a copy
+   * of the answer taken at the moment she left the launcher, and this screen
+   * can be reached without passing through it at all — a cold launch onto
+   * `/capture`, or a return from `/camera`. Reading the context here means
+   * the destination is whatever the database currently says it is, and
+   * `useCurrentContext` re-reads it on every focus, so an activity started or
+   * switched elsewhere is in force by the time she taps.
+   *
+   * `null` is not an error state: it is the Inbox, which §10.2 is explicit is
+   * a supported destination rather than something that went wrong.
+   *
+   * **`settledActivityId`, not `activityId`, is what the write is given.**
+   * The value is what this render knows, and on a cold launch straight onto
+   * this screen the first render knows nothing yet — a tap in that window
+   * wrote a row filed to the Inbox with `contextActivityId: null`, which
+   * §8.3 never allows to be revised, so the capture lost every trace of where
+   * she was taking it. The function waits for that first read at the write
+   * and answers with what it found. Nothing about the tap waits: the
+   * countdown, the acquiring view and the sample collection all begin from
+   * the tap as before (doctrine rule 4).
+   */
+  const { carryOn, settledActivityId } = useCurrentContext()
+
+  const capture = useCapture({ db, device, source, activityId: settledActivityId })
   const acquiring = capture.phase === 'acquiring'
 
   /**
@@ -694,6 +722,9 @@ function CaptureBody() {
         db={db}
         deviceId={device.id}
         message={message}
+        // What the destination line below the summary names, when the record
+        // has one. Null while nothing is running, which is the Inbox.
+        activityName={carryOn === null ? null : carryOn.activityName}
         // Shown only for the record it is actually about — see the guard above
         // — and only until she has said she meant both points.
         duplicate={
@@ -705,11 +736,10 @@ function CaptureBody() {
           setDuplicateAccepted(true)
         }}
         onLeave={() => {
-          // Plan 5 builds the launcher; until it exists `/` is the gallery, and
-          // it is the only route this screen knows. `replace` rather than
-          // `push`: leaving a finished capture is going back to where she came
-          // from, and pushing would stack a second gallery on top of the one
-          // already underneath.
+          // `/` is the launcher now that Plan 5 has built it. `replace` rather
+          // than `push`: leaving a finished capture is going back to where she
+          // came from, and pushing would stack a second launcher on top of the
+          // one already underneath.
           router.replace('/')
         }}
       />
@@ -894,6 +924,7 @@ function RecordedState({
   db,
   deviceId,
   message,
+  activityName,
   duplicate,
   onAcceptDuplicate,
   onLeave,
@@ -902,6 +933,8 @@ function RecordedState({
   db: Database
   deviceId: string
   message: React.ReactNode
+  /** The running activity's name, or null when none is running. */
+  activityName: string | null
   duplicate: { metresApart: number } | null
   onAcceptDuplicate: () => void
   onLeave: () => void
@@ -1068,7 +1101,7 @@ function RecordedState({
               POINT RECORDED
             </Type>
           ) : (
-            <RecordedSummary record={record} />
+            <RecordedSummary record={record} activityName={activityName} />
           )}
 
           {capture.message === null ? null : (
@@ -1218,8 +1251,48 @@ function RecordedState({
   )
 }
 
+/**
+ * Where the capture was filed, in one sentence (spec §9.6, §10.2).
+ *
+ * **Only whether it was filed is read off the RECORD** — `record.activityId`,
+ * which never changes once the row is written — because it is the row that
+ * was written that this branch is about, and a null-versus-not read off the
+ * current context instead could disagree with what was actually saved.
+ *
+ * **The NAME, when there is one, is not read off the record.** `FieldRecord`
+ * carries an activity id, never an activity name, so a filed record is always
+ * captioned with `activityName` — the live context's name — not with
+ * whatever the record's own activity was called at capture time. The two
+ * agree today only because `activityName` and the id the record was filed
+ * under come from the same read of the same context — `useCurrentContext`
+ * publishes the card and the settled activity id together, in one state
+ * update — which is also why the middle branch, a filed record with no name
+ * to hand, cannot be reached yet: `activityName` is null exactly when the
+ * filed id is, in every path that reaches this function today. A caller that
+ * ever passed an `activityName` read at a different moment than the record's
+ * own `activityId` — the case this
+ * branch exists for — would have this line caption a record with whichever
+ * activity the context currently names, which is not necessarily the one it
+ * was actually filed into.
+ */
+function describeDestination(record: FieldRecord, activityName: string | null): string {
+  if (record.activityId === null) {
+    return 'Saved to the Inbox. You can file it from there later.'
+  }
+  if (activityName === null) {
+    return 'Saved to the activity you are working in.'
+  }
+  return `Saved to ${activityName}.`
+}
+
 /** What was saved, in the four facts that make it read as finished. */
-function RecordedSummary({ record }: { record: FieldRecord }) {
+function RecordedSummary({
+  record,
+  activityName,
+}: {
+  record: FieldRecord
+  activityName: string | null
+}) {
   const point = positionOf(record.fix)
   return (
     <View style={{ gap: spacing.xs }}>
@@ -1239,18 +1312,17 @@ function RecordedSummary({ record }: { record: FieldRecord }) {
         This position is final. Nothing after this will change it.
       </Type>
       {/*
-        WHERE IT WENT. `useCapture` files every capture to the Inbox — it is
-        handed a database, a device and a source and has no activity to file
-        to — and that is a supported destination rather than an error state
-        (§10.2): capturing without context is a legitimate way to work, and
-        the Inbox is somewhere she works with and files from later.
-        Somewhere is not nowhere, though, and a recorded state that named no
-        destination at all left her to guess. This is also the line Plan 5
-        grows when activities exist: the name §9.6 asks for goes here, in
-        place of "the Inbox".
+        WHERE IT WENT — the activity's name when it has one, and the Inbox
+        when it does not (§9.6). This is the line Plan 5 grew: until the
+        launcher existed there was no activity to file into, so it read
+        "Saved to the Inbox" unconditionally. Both destinations are supported
+        (§10.2) — capturing with nothing running is a legitimate way to work
+        — but which one a capture actually went to is not something to leave
+        her to guess, and it is the one fact that changes the moment an
+        activity is running.
       */}
       <Type variant="small" dim testID="capture-recorded-destination">
-        Saved to the Inbox. You can file it from there later.
+        {describeDestination(record, activityName)}
       </Type>
 
       {/*
@@ -2219,7 +2291,7 @@ function FieldEditor({
    * closing the editor takes the failure message with it, so a dismissal
    * accepted while `renameRecord` is still out could land a failure on a
    * surface that no longer exists. It is a guard and not a disabled control:
-   * doctrine rule 3 is about something that LOOKS pressable and does nothing,
+   * doctrine rule 18 is about something that LOOKS pressable and does nothing,
    * and a hardware key renders nothing to look at.
    *
    * `saving` and `onCancel` are in the dependency list rather than read
@@ -2331,6 +2403,15 @@ function FieldEditor({
               placeholder={label}
               placeholderTextColor={theme.colors.textDim}
               multiline={kind === 'description'}
+              // This repeats the border/radius/fill/padding signature that
+              // lives in `TextField` (`@corymbia/ui`'s `packages/ui/src/
+              // primitives/TextField.tsx`, doctrine rule 5) — that component
+              // is the source of the text-entry visual signature. This one
+              // stays inline rather than being converted to `TextField` for
+              // three reasons: it needs `autoFocus` (see above), a bounded
+              // `maxHeight` (below) so a long note scrolls instead of growing
+              // the card into the keyboard, and it takes no label. A change to
+              // one of these two styles must be mirrored in the other.
               style={{
                 minHeight: kind === 'description' ? field.control : touch.min,
                 // See the note on the component: bounded so a long note
@@ -2372,7 +2453,7 @@ function FieldEditor({
                 onPress={onSave}
               />
               {/*
-                  Genuinely disabled mid-write, not inert (doctrine rule 3).
+                  Genuinely disabled mid-write, not inert (doctrine rule 18).
                   It is disabled at all — rather than left live — because
                   closing the editor takes the failure message with it, and a
                   cancel accepted while the write is still out could land that

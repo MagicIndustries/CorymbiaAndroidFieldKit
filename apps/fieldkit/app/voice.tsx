@@ -546,8 +546,9 @@ function VoiceBody() {
           await attachVoice({ recordId, sourceUri: finishedUri, durationMs: ranForMs })
           // Deliberately no `router.back()`, unlike the stop branch. She did
           // not ask for this stop and does not know it happened; navigating
-          // away would take the only sentence that tells her with it
-          // (doctrine rule 3, the same reason nothing here is an Alert).
+          // away would take the only sentence that tells her with it — no
+          // numbered doctrine rule covers this, the same as the Alert
+          // reasoning below, but it is the same shape.
           setInterruption({
             message: interruptionSaved(ranForMs),
             saved: true,
@@ -724,9 +725,10 @@ function VoiceBody() {
       // her back to record again — so this file is nobody's from here on.
       // See the same cleanup in `handleRecordingStatus`.
       discardFile(finishedUri)
-      // On screen, not an Alert (doctrine rule 3): a modal that dismisses
-      // takes the message with it, and a voice screen that closes on
-      // failure loses the note and the explanation together.
+      // On screen, not an Alert — no numbered doctrine rule covers this, but
+      // the reasoning is the same shape as several that do: a modal that
+      // dismisses takes the message with it, and a voice screen that closes
+      // on failure loses the note and the explanation together.
       setError(messageFor(cause))
       setPhase('idle')
     } finally {

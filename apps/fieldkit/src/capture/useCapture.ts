@@ -143,6 +143,48 @@ export type CaptureDeps = {
    * safety net for a run where the signal never settles.
    */
   capSeconds?: number
+  /**
+   * The activity running now, or null when none is — read by the caller
+   * (`readCurrentContext`, `@corymbia/data`) and handed straight through.
+   *
+   * **Stamped onto the record as two fields that take this same value, and
+   * they are not redundant despite that** (spec §8.3). `createRecord`'s
+   * `activityId` is *filed* — a deliberate destination, which can change
+   * later when she refiles a record out of the Inbox — while its
+   * `contextActivityId` is *where she was*, captured automatically and never
+   * revised once written. They start out equal because a capture taken while
+   * an activity is running is unambiguous evidence of being there, so filing
+   * it into that same activity is the obvious first destination. But only the
+   * filed half is ever allowed to move: the context half is what lets a later
+   * Inbox screen suggest where an unfiled record probably belongs, and it can
+   * only do that honestly if nothing downstream of the tap has touched it.
+   * Deleting one of these two fields because they look like the same value
+   * here is exactly the mistake this comment exists to stop.
+   *
+   * Null is not an error state — it is the Inbox, a capture taken with no
+   * activity running, and spec §10.2 is explicit that filing there is a
+   * supported destination rather than something that went wrong.
+   *
+   * **Or a function that answers it, for a caller whose own read may not have
+   * landed yet.** `capture.tsx` reads the context from the database when it
+   * mounts, so for the first few milliseconds of the screen's life its answer
+   * is `null` only because nobody has looked. A tap in that window wrote a
+   * row with `activityId: null` AND `contextActivityId: null` — into the
+   * Inbox, with no trace of the activity she was standing in, and §8.3 makes
+   * the context half unrevisable, so nothing downstream could ever repair it.
+   * Given a function, `captureNow` asks at the WRITE instead of at the tap:
+   * collection has already begun by then (see below), so doctrine rule 4 is
+   * untouched — nothing blocks the capture, one field of the row waits for the
+   * answer it is about to record. The wait is on the same database the write
+   * itself needs, so it adds no way to hang that the write did not already
+   * have.
+   *
+   * It must not reject: it is awaited inside the write's own `try`, so a
+   * rejection would be reported to her as a failed save.
+   * `useCurrentContext.settledActivityId` is the implementation, and it
+   * resolves rather than rejects on a failed read.
+   */
+  activityId: string | null | (() => Promise<string | null>)
 }
 
 export type Capture = {
@@ -418,7 +460,7 @@ function discardedRunMessage(
 }
 
 export function useCapture(deps: CaptureDeps): Capture {
-  const { db, device, source } = deps
+  const { db, device, source, activityId } = deps
   const secondsTotal = deps.capSeconds ?? DEFAULT_CAP_S
 
   const [phase, setPhase] = useState<CapturePhase>('ready')
@@ -641,12 +683,21 @@ export function useCapture(deps: CaptureDeps): Capture {
       const fix: Fix = attempt.ok ? attempt.fix : { quality: 'none' }
       unstorable = attempt.ok ? null : attempt.message
 
+      // WHERE THIS ROW IS FILED, asked here and not at the tap — after the
+      // fix is built and collection is running, immediately before the insert
+      // that records it. A caller that already knows passes the value and
+      // this is not a wait at all; one whose first read is still in flight
+      // passes a function and the row waits for it rather than recording a
+      // destination that is only an artefact of the screen's age.
+      const filedInto = typeof activityId === 'function' ? await activityId() : activityId
+
       created = await createRecord(db, {
-        // The Inbox. This hook is handed a database, a device and a source and
-        // nothing else, so it has no activity to file to and does not invent
-        // one — filing is a supported destination, not an error state, and the
-        // activity plumbing arrives with the screen that has one.
-        activityId: null,
+        // Filed into the activity running now, and stamped as context with
+        // that same value — see `CaptureDeps.activityId` for why these are
+        // two fields despite agreeing here. Null files to the Inbox, a
+        // supported destination rather than an error state (spec §10.2).
+        activityId: filedInto,
+        contextActivityId: filedInto,
         kind: 'pin',
         fix,
         deviceId: device.id,

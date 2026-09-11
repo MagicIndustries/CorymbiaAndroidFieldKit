@@ -1,7 +1,7 @@
 import { openTestDatabase } from '../../db/better-sqlite3'
 import { migrate } from '../../db/migrate'
 import type { Database } from '../../db/port'
-import { createActivity, listActivities, mostRecentActivity } from '../activities'
+import { ACTIVITY_KINDS, createActivity, listActivities, mostRecentActivity } from '../activities'
 import { createProject } from '../projects'
 
 // `.rejects.toThrow()` with no matcher passes on a column typo, a renamed
@@ -30,6 +30,21 @@ describe('activities', () => {
     })
     expect(activity.kind).toBe('survey')
     expect(activity.endedAt).toBeNull()
+  })
+
+  /**
+   * The five kinds are declared twice — once as `ACTIVITY_KINDS` in the
+   * repository, once as the `CHECK (kind IN (...))` in migration 001 — and
+   * nothing but this test makes the two agree. A kind added to the list and
+   * not to the constraint fails here with a SQLITE_CONSTRAINT, which is what
+   * it would otherwise do mid-capture on a field device.
+   */
+  it('accepts every kind it publishes, so the list and the constraint agree', async () => {
+    for (const kind of ACTIVITY_KINDS) {
+      const activity = await createActivity(db, { projectId, kind, name: `A ${kind}` })
+      expect(activity.kind).toBe(kind)
+    }
+    expect(ACTIVITY_KINDS).toHaveLength(5)
   })
 
   it('refuses a blank name', async () => {

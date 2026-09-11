@@ -2,7 +2,30 @@ import type { Database } from '../db/port'
 import { newId } from '../ids'
 import { nowIso } from '../time'
 
-export type ActivityKind = 'survey' | 'sampling' | 'collection' | 'workshop' | 'meeting'
+/**
+ * The five kinds, as a value rather than only a type (spec §7.4).
+ *
+ * A screen that offers her a choice of kind has to render one control per
+ * kind, and a union type is gone by run time — so the options would have to
+ * be restated as literals somewhere, and a sixth kind added here would be
+ * silently missing there. This is the single list both the type and any such
+ * screen are derived from: `ActivityKind` below is `(typeof
+ * ACTIVITY_KINDS)[number]`, and `new-activity.tsx` maps over this array.
+ *
+ * It is declared a second time in SQL — `CHECK (kind IN (...))` on the
+ * `activity` table, migration 001 — which no type can reach. That the two
+ * agree is pinned by a test in `__tests__/activities.test.ts` rather than by
+ * the compiler.
+ */
+export const ACTIVITY_KINDS = Object.freeze([
+  'survey',
+  'sampling',
+  'collection',
+  'workshop',
+  'meeting',
+] as const)
+
+export type ActivityKind = (typeof ACTIVITY_KINDS)[number]
 
 export type Activity = {
   id: string
@@ -67,6 +90,18 @@ export async function listActivities(db: Database, projectId: string): Promise<A
     [projectId],
   )
   return rows.map(toActivity)
+}
+
+/**
+ * One activity by id, or null when there is no live one under it.
+ *
+ * Mirrors `getProject`: a soft-deleted activity reads as absent, the same as
+ * an unknown id, so a caller checking whether an id still names something
+ * live does not have to know the difference.
+ */
+export async function getActivity(db: Database, id: string): Promise<Activity | null> {
+  const row = await db.first<ActivityRow>(`${SELECT} AND id = ?`, [id])
+  return row ? toActivity(row) : null
 }
 
 /**

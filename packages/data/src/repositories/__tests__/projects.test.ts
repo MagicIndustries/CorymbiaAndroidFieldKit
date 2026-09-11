@@ -1,6 +1,7 @@
 import { openTestDatabase } from '../../db/better-sqlite3'
 import { migrate } from '../../db/migrate'
 import type { Database } from '../../db/port'
+import { getClient } from '../clients'
 import { createProject, getProject, listProjects } from '../projects'
 
 const FOREIGN_KEY = /FOREIGN KEY constraint failed/
@@ -128,5 +129,33 @@ describe('projects', () => {
     expect(listed).toHaveLength(2)
     expect(listed[0]!.status).toBe('active')
     expect(listed[1]!.status).toBe('archived')
+  })
+
+  it('reads the client a project belongs to, by name', async () => {
+    const project = await createProject(db, { name: 'Yarra Flats' })
+    const client = await getClient(db, project.clientId)
+    expect(client?.name).toBe('Corymbia (internal)')
+  })
+
+  it('reads the client actually asked for, not whichever one is seeded', async () => {
+    await db.execute('INSERT INTO client (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)', [
+      'client-parks',
+      'Parks Victoria',
+      '2026-01-01T00:00:00Z',
+      '2026-01-01T00:00:00Z',
+    ])
+    const project = await createProject(db, { name: 'Yarra Flats', clientId: 'client-parks' })
+    const client = await getClient(db, project.clientId)
+    expect(client?.id).toBe('client-parks')
+    expect(client?.name).toBe('Parks Victoria')
+  })
+
+  it('reads a soft-deleted client as absent, the same as an unknown id', async () => {
+    await db.execute('UPDATE client SET deleted_at = ? WHERE id = ?', [
+      '2026-09-10T00:00:00Z',
+      'client-internal',
+    ])
+    expect(await getClient(db, 'client-internal')).toBeNull()
+    expect(await getClient(db, 'client-nobody')).toBeNull()
   })
 })

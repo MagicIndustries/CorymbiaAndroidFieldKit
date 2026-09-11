@@ -6,16 +6,20 @@ import {
   Button,
   CaptureDial,
   Card,
+  CarryOnCard,
   ContextStamp,
   HelpAffordance,
   InputAffordanceRow,
   MediaStrip,
   NameChip,
   ProjectName,
+  ToolTiles,
   Type,
   useLayout,
   useTheme,
+  type CarryOn,
   type MediaStripItem,
+  type ToolKind,
 } from '@corymbia/ui'
 import { CorymbiaMark } from '@corymbia/brand'
 
@@ -63,6 +67,35 @@ const MEDIA_MIXED: MediaStripItem[] = [
   { id: 'gallery-voice-2', kind: 'voice', uri: 'file:///gallery-voice-2.m4a', durationMs: 8200 },
   { id: 'gallery-photo-6', kind: 'photo', uri: 'file:///gallery-photo-6.jpg', durationMs: null },
 ]
+
+// `CarryOnCard` renders `startedAt` as elapsed time and never as a timestamp
+// (see `formatElapsed`), so a fixed date written in here would read as a
+// larger and larger number of hours for the rest of the project's life. An
+// offset from module load says "40 minutes ago" on the device, which is what
+// the card actually looks like mid-survey.
+const CARRY_ON_STARTED_AT = new Date(Date.now() - 40 * 60_000).toISOString()
+
+// The project name is `CHIP_NAME` deliberately: it is long enough that the
+// `ProjectName` inside the card has to clamp, which is the thing to look at
+// on a device — a card whose hero name pushed `CAPTURE` down the screen
+// would break rule 10 where it matters most.
+const GALLERY_CARRY_ON: CarryOn = {
+  projectName: CHIP_NAME,
+  activityName: 'Reach 4 transect',
+  activityKind: 'survey',
+  startedAt: CARRY_ON_STARTED_AT,
+  captureCount: 12,
+  clientName: 'Melbourne Water',
+}
+
+// Every kind `ToolTiles` knows how to place, so the ordering table can be
+// seen in full. The launcher never passes this — see `BUILT_TOOLS`.
+const EVERY_TOOL: ToolKind[] = ['capture', 'records', 'media', 'batching']
+
+// What `app/index.tsx`'s `AVAILABLE_TOOLS` really passes: the two tools that
+// have a route to open. Doctrine rule 21 — the other two get no tile at all,
+// which is the third row of the section below.
+const BUILT_TOOLS: ToolKind[] = ['capture', 'records']
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -343,6 +376,107 @@ export function GallerySections() {
               completed={['title']}
               counts={{ photo: 2 }}
               busy={['photo']}
+            />
+          </View>
+        </View>
+      </Section>
+
+      {/*
+        THE LAUNCHER'S CARD, IN BOTH OF THE STATES IT HAS.
+
+        The launcher itself only ever shows one of these on a given device —
+        whichever the database says — so this is the only place the two can be
+        put beside each other and judged as a pair. The question to ask of them
+        on a device is whether the first-run face reads as a beginning rather
+        than as the resumed card with its contents missing.
+      */}
+      <Section title="Carry on with — resumed, and a first run">
+        <View style={{ gap: spacing.md }}>
+          <View>
+            <Type variant="label" dim>
+              RESUMED — WHAT SHE LANDS ON, WITH CAPTURE INSIDE THE CARD
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <CarryOnCard
+              testID="gallery-carry-on"
+              carryOn={GALLERY_CARRY_ON}
+              onCapture={() => {}}
+              onSwitchProject={() => {}}
+              onNewActivity={() => {}}
+            />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              A FIRST RUN — NO CAPTURE IN THE CARD, BECAUSE THERE IS NOTHING TO CARRY ON WITH
+            </Type>
+            <Type dim>
+              Not a degraded version of the card above: with no project there is nothing for
+              `CAPTURE` to be filed into, so the card offers the one thing that makes sense
+              instead of a control that would look pressable and lead nowhere. Capture is still
+              reachable on the launcher itself — from the tile below the card — which is what
+              keeps the one-tap Impatient journey in spec §10.2 honest on a fresh install.
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <CarryOnCard
+              testID="gallery-carry-on-empty"
+              carryOn={null}
+              onCapture={() => {}}
+              onSwitchProject={() => {}}
+              onNewActivity={() => {}}
+            />
+          </View>
+        </View>
+      </Section>
+
+      {/*
+        THE TILES, AT TWO ACTIVITY KINDS AND ONCE SHORT TWO TOOLS.
+
+        Two kinds rather than one because the ordering table is the whole
+        component: a single row proves only that four tiles render. The third
+        row is doctrine rule 21 — the same `survey` order as the first, with
+        `media` and `batching` simply absent rather than dimmed — and the only
+        way to see that it reads as a complete row of tools rather than as a
+        row with two holes in it is to look at it next to the full one.
+      */}
+      <Section title="Tool tiles — ordered by activity kind, and short two tools">
+        <View style={{ gap: spacing.md }}>
+          <View>
+            <Type variant="label" dim>
+              SURVEY — CAPTURE AND RECORDS FLOAT TO THE TOP, BATCHING SINKS (SPEC §10.1)
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <ToolTiles
+              testID="gallery-tools-survey"
+              activityKind="survey"
+              available={EVERY_TOOL}
+              onOpen={() => {}}
+            />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              SAMPLING — THE LOG LEADS, SO RECORDS COMES FIRST
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <ToolTiles
+              testID="gallery-tools-sampling"
+              activityKind="sampling"
+              available={EVERY_TOOL}
+              onOpen={() => {}}
+            />
+          </View>
+
+          <View>
+            <Type variant="label" dim>
+              WHAT THE LAUNCHER ACTUALLY SHOWS — NO TILE AT ALL FOR A TOOL THAT IS NOT BUILT
+            </Type>
+            <View style={{ height: spacing.xs }} />
+            <ToolTiles
+              testID="gallery-tools-built"
+              activityKind="survey"
+              available={BUILT_TOOLS}
+              onOpen={() => {}}
             />
           </View>
         </View>
