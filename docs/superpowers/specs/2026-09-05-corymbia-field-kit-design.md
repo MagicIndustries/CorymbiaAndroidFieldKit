@@ -506,6 +506,15 @@ The named location derives from proximity to the project's own known locations, 
 distance shown. Reverse geocoding is an opportunistic bonus when a connection exists, cached
 — never depended upon.
 
+**Implementation note, 2026-09-11:** not built, in either half. `ContextStamp`
+(`packages/ui/src/context-stamp/ContextStamp.tsx`) renders a place name and its distance when
+it is handed one, and nothing in the application hands it one — the only caller that
+populates `place` is the component gallery's fixture. There are no saved locations to derive
+proximity from (no locations repository, no location search — see §10.3's note) and no
+reverse geocoding anywhere. A record's stamp therefore shows its fix and no place at all,
+which is honest rather than approximate; the component is ready for the day the query
+exists.
+
 ### 8.5 The event log
 
 Append-only. Records creation, edits, media added, filing, playback and deletion, each with
@@ -1147,6 +1156,26 @@ records to the top and dims batching. Pinning and manual ordering are version 2.
 
 An **Inbox** strip appears when unfiled items exist.
 
+**Implementation note, 2026-09-11:** built as described, with the parts that were not built
+named here rather than approximated on screen. The card
+(`packages/ui/src/launcher/CarryOnCard.tsx`) carries project, activity, how long ago it
+started, capture count and client, with `CAPTURE` inside it and `Switch project` /
+`New activity` beneath. With no context at all it draws a first-run face instead: no
+`CAPTURE` in the card, because there is no activity to file one into, and `Choose a project`
+in its place. That is the card only — `CAPTURE` is still one tap away from the tile below it,
+so §10.2's *Impatient* journey holds on a fresh install.
+
+The tiles (`packages/ui/src/launcher/ToolTiles.tsx`) reorder for all five activity kinds, but
+the application only ever offers two of the four tools: `capture` and `records` have routes,
+and batching and a media library do not, so those two get **no tile at all** rather than a
+dimmed one (UI doctrine rule 21, which this plan settled). "A survey … dims batching" is
+therefore unobservable today: the ordering row exists and there is nothing to render in it.
+Pinning and manual ordering remain version 2, per §15, and nothing on the launcher
+anticipates them.
+
+The Inbox strip appears only while at least one capture is unfiled, and goes away when the
+last one is filed.
+
 ### 10.2 The four journeys
 
 | Journey | Path | Cost |
@@ -1159,6 +1188,29 @@ An **Inbox** strip appears when unfiled items exist.
 **The Inbox is a supported destination, not an error state.** Capturing without context is a
 legitimate way to work.
 
+**Implementation note, 2026-09-11:** all four journeys exist, and two of them cost something
+other than the table says.
+
+*Methodical* is three taps when the project she switches to has no activity yet:
+`projects.tsx` sends such a project straight to `/new-activity`, and starting an activity
+selects it and returns to the launcher, so the path is Switch project → the project → name it
+→ `CAPTURE`. A project that already has an activity resumes its most recent one and returns
+to the launcher without asking anything, which is shorter.
+
+Filing from the Inbox has two shapes rather than one. The activity that was running when the
+capture was taken (§8.3) gets a one-tap `File into <name>` button, which appends. Everything
+else is choose → activity → confirm: pressing an activity selects it, the screen reads how
+many records that activity already holds, and a confirm button files into it. A position is
+optional on that path — left blank it appends, and a number outside 1 to one-past-the-end is
+refused with the range named rather than attempted. An Inbox with no activity anywhere to
+file into says so and offers a way to projects, rather than an empty chooser.
+
+Records have no detail screen yet. `records.tsx` lists what is in the current activity, each
+row a card that is deliberately not pressable because there is nowhere for a press to go
+(doctrine rule 18). Each row shows the activity **sequence**, never the capture number, and
+the list is ordered newest-first by capture time — so after an insertion the sequences on
+screen are a complete set with no gaps and no repeats, not an ascending column.
+
 ### 10.3 Project creation
 
 Projects are listed with the most recent in-progress highlighted, and a prominent
@@ -1170,6 +1222,19 @@ per §7.3.
 database; coordinate lookup accepts typed coordinates or drops the device's current
 position. Online geocoding is an opportunistic enhancement when a connection exists, cached
 — never a dependency.
+
+**Implementation note, 2026-09-11:** the list half is built as described —
+`apps/fieldkit/app/projects.tsx` highlights the most recent in-progress project and carries a
+prominent `Start a new project` — and creation asks for a name and nothing else, with a
+description and a short label optional beside it (`apps/fieldkit/app/new-project.tsx`).
+
+**Client typeahead and location lookup are not built.** There is no `listClients` query and
+no location search anywhere in `@corymbia/data`; `packages/data/src/repositories/` has no
+locations module at all. A typeahead over a query that does not exist would be a control with
+nothing behind it, so neither field is on the screen and a new project takes
+`createProject`'s defaults for both (§7.3 — `DEFAULT_CLIENT_ID`, `DEFAULT_LOCATION_ID`). The
+paragraph above is not narrowed by this note: it records what was designed, and this records
+what shipped.
 
 ### 10.4 Tablet workspace
 
