@@ -35,6 +35,37 @@ describe('stampFixFor', () => {
     expect(stampFixFor(fix)).toEqual({ quality: 'deliberate', accuracyM: 2.4 })
   })
 
+  it('rounds a deliberate fix’s accuracy to one decimal place', () => {
+    // A real reading, not a round number: GPS accuracy arrives as a float
+    // with far more precision than the reading ever earned. Printed raw,
+    // ContextStamp's chip would show `±4.728091239929199 m` — an appearance
+    // of precision docs/gps-accuracy.md is explicit is the misleading
+    // direction. One decimal matches every other accuracy display in the app.
+    const fix: StoredFix = {
+      quality: 'deliberate',
+      ...POSITION,
+      accuracyM: 4.728091239929199,
+      holdMs: 8000,
+      accuracyConvention: 'radius68',
+      sampleCount: 6,
+      spreadM: 2.1,
+    }
+    expect(stampFixFor(fix)).toEqual({ quality: 'deliberate', accuracyM: 4.7 })
+  })
+
+  it('rounds an ambient fix’s accuracy to one decimal place', () => {
+    // Same float-precision hazard as the deliberate branch above, and the
+    // same fix: round before it reaches ContextStamp's chip.
+    const fix: StoredFix = {
+      quality: 'ambient',
+      ...POSITION,
+      accuracyM: 4.728091239929199,
+      accuracyConvention: 'unknown',
+      ageSeconds: 240,
+    }
+    expect(stampFixFor(fix)).toEqual({ quality: 'ambient', accuracyM: 4.7, ageMinutes: 4 })
+  })
+
   it('turns an ambient fix’s age from seconds into whole minutes', () => {
     const fix: StoredFix = {
       quality: 'ambient',

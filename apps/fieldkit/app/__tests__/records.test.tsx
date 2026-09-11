@@ -249,7 +249,10 @@ describe('the records list', () => {
     listRecords.mockResolvedValue([recordRow({ id: 'rec_a', sequence: 7, captureNumber: 412 })])
     await renderRecords()
     const row = screen.getByTestId('record-row-rec_a')
-    expect(row).toHaveTextContent('7', { exact: false })
+    // '7' alone would also match inside '017' or '27' — '007' is what the
+    // zero-padded sequence actually renders, and only that proves this is the
+    // sequence rather than a substring of something else.
+    expect(row).toHaveTextContent('007', { exact: false })
     expect(row).not.toHaveTextContent('412', { exact: false })
   })
 
@@ -277,6 +280,19 @@ describe('the records list', () => {
     listRecords.mockResolvedValue([recordRow({ id: 'rec_a', sequence: 1, accuracyM: 2.4 })])
     await renderRecords()
     expect(screen.getByTestId('record-row-rec_a')).toHaveTextContent('2.4', { exact: false })
+  })
+
+  it('rounds a real GPS float to one decimal rather than showing it raw', async () => {
+    // 4.728091239929199 is the shape an actual reading arrives in — far more
+    // precision than the reading ever earned (docs/gps-accuracy.md). The row
+    // must read "4.7", never the long form.
+    listRecords.mockResolvedValue([
+      recordRow({ id: 'rec_a', sequence: 1, accuracyM: 4.728091239929199 }),
+    ])
+    await renderRecords()
+    const row = screen.getByTestId('record-row-rec_a')
+    expect(row).toHaveTextContent('4.7', { exact: false })
+    expect(row).not.toHaveTextContent('4.728091239929199', { exact: false })
   })
 
   it('does not dress an ambient fix up as a deliberate one', async () => {
@@ -395,7 +411,20 @@ describe('the records list', () => {
     // tappable would swallow the tap and teach her it did not register.
     listRecords.mockResolvedValue([recordRow({ id: 'rec_a', sequence: 1 })])
     await renderRecords()
-    expect(screen.getByTestId('record-row-rec_a').props.onStartShouldSetResponder).toBeUndefined()
+    const row = screen.getByTestId('record-row-rec_a')
+    expect(row.props.onStartShouldSetResponder).toBeUndefined()
+
+    // Not just the row's own host element: a `Pressable` wrapped AROUND the
+    // row (rather than something on the row itself) would leave the row's own
+    // props untouched and still pass the assertion above. Walk every ancestor
+    // up to the render root and check none of them either.
+    for (let node = row.parent; node !== null; node = node.parent) {
+      expect(node.props.onStartShouldSetResponder).toBeUndefined()
+      expect(node.props.onPress).toBeUndefined()
+      expect(node.props.onClick).toBeUndefined()
+      expect(node.props.accessibilityRole).not.toBe('button')
+    }
+
     expect(screen.queryByRole('button', { name: /Bank scrape/ })).toBeNull()
   })
 

@@ -25,6 +25,21 @@ import type { ContextStampFix } from '@corymbia/ui'
  * A `'none'` fix has no accuracy at all, which is the case the union already
  * expresses rather than a null.
  *
+ * **Rounded to one decimal place, not passed through raw.** `ContextStamp`'s
+ * chip interpolates `accuracyM` as-is, so an unrounded figure reaches the
+ * screen at full float precision (`◎ ±4.728091239929199 m`) — a false
+ * appearance of precision the reading never had, which is exactly what
+ * `docs/gps-accuracy.md` warns an optimistic-looking figure does. Every other
+ * accuracy display in the app (`capture.tsx`'s `formatAccuracy`,
+ * `useCapture.ts`'s `formatAccuracyM`) rounds to one decimal before showing
+ * it; this does the same rounding, just returning a `number` rather than a
+ * pre-formatted string, since `ContextStampFix.accuracyM` is typed as a
+ * `number` and `ContextStamp` still supplies the `±` and the unit. Using
+ * `Number(x.toFixed(1))` rather than `Math.round(x * 10) / 10` keeps the
+ * rounding identical to those two call sites' `.toFixed(1)` — the same
+ * figure would otherwise round two different ways in two places for a value
+ * near a rounding boundary.
+ *
  * **A `switch` with no `default`, on purpose.** CLAUDE.md's three-places rule:
  * the fix classes are stated by the `Fix` union, by migration 003's CHECK
  * constraints and by `ContextStampFix`. A fourth class added to any of them
@@ -35,11 +50,11 @@ import type { ContextStampFix } from '@corymbia/ui'
 export function stampFixFor(fix: StoredFix): ContextStampFix {
   switch (fix.quality) {
     case 'deliberate':
-      return { quality: 'deliberate', accuracyM: fix.accuracyM }
+      return { quality: 'deliberate', accuracyM: Number(fix.accuracyM.toFixed(1)) }
     case 'ambient':
       return {
         quality: 'ambient',
-        accuracyM: fix.accuracyM,
+        accuracyM: Number(fix.accuracyM.toFixed(1)),
         ageMinutes: Math.round(fix.ageSeconds / 60),
       }
     case 'none':
