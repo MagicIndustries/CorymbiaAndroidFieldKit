@@ -17,6 +17,7 @@ export type { Project } from './repositories/projects'
 export { getClient } from './repositories/clients'
 export type { Client } from './repositories/clients'
 export {
+  ACTIVITY_KINDS,
   createActivity,
   getActivity,
   listActivities,
